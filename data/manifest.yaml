@@ -1,0 +1,31 @@
+# Danh mục nguồn dữ liệu. Dữ liệu gốc không sửa; tải lại thì thêm phiên bản mới.
+sources:
+  - id: admin_units_provinces_open_api
+    description: Đơn vị hành chính trước và sau 01/07/2025, ánh xạ xã cũ → xã mới
+    url: https://provinces.open-api.vn/
+    fetched_at: 2026-11-22
+    license: xem điều khoản của nguồn (cần ghi rõ trước khi công bố)
+    path: data/admin_units/
+    files:
+      v1_depth3.json:       {endpoint: "/api/v1/?depth=3",              bytes: 1210650, sha256: 87c64c32262f3d0ade57954668cdf1771c7718ca2c38cdcb3250c246b3f65c9b}
+      v2_depth2.json:       {endpoint: "/api/v2/?depth=2",              bytes: 613422,  sha256: e997eb9dcbbbafbbae00496965572f8ccd6e192cbb1024e8fe6b5513c162dc9b}
+      v2_to_legacies.jsonl: {endpoint: "/api/v2/w/{code}/to-legacies/", bytes: 1600306, sha256: 9bfa7edf4ae0e6c02762bb4f943a43f137902cd3cc7bd0649fe2bd07918d9c77}
+
+  - id: kttv_hcmc_bulletins
+    description: Bản tin dự báo thủy văn – thủy triều TP.HCM, Đài KTTV Nam Bộ, 01/2017 → 11/2026 (3.636 PDF)
+    path: data/raw/kttv/           # không commit; hiện ở datamongo/KTTV/
+    in_mongodb: [hydromet_bulletins, hydromet_bulletin_files]
+    integrity: sha256 từng PDF lưu trong hydromet_bulletin_files.sha256
+    license: cần xác nhận điều khoản sử dụng trước khi chia sẻ
+
+  - id: merit_basins
+    description: MERIT-Basins (MERIT Hydro v0.7), riv_pfaf_4_MERIT_Hydro_v07_Basins_v01_bugfix1, vùng 43, 44
+    path: data/raw/merit/
+    in_mongodb: [merit_river_reaches]
+    license: xem điều khoản của MERIT-Basins
+
+  - id: osm_waterways
+    description: OpenStreetMap waterways Việt Nam, snapshot vietnam-2026-11-14
+    path: data/raw/osm/
+    in_mongodb: [waterways_segments]
+    license: ODbL

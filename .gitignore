@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Bí mật
+.env
+*.env
+!.env.example
+
+# Dữ liệu lớn / có hạn chế (chỉ commit README và manifest)
+data/raw/*
+data/interim/*
+data/processed/*
+!data/*/README.md
+*.archive
+*.parquet
+infra/backup/
+
+# Kết quả: chỉ commit summary và figures
+results/**/runs/
+results/mlruns/
+mlruns/
+
+# Node / Next.js
+node_modules/
+.next/
+apps/web/out/
+
+# R
+.Rhistory
+.RData
+pipelines/r/renv/library/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Hệ điều hành / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

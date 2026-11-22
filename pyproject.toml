@@ -1,0 +1,22 @@
+# Gốc uv workspace: không chứa code, chỉ khai báo các package Python và cấu hình công cụ chung.
+# Cài uv: https://docs.astral.sh/uv/  →  uv sync
+[project]
+name = "phase-propagation-gnn"
+version = "0.1.0"                     # phiên bản DUY NHẤT của toàn hệ thống (SemVer)
+description = "Hệ thống quản lý dữ liệu phân tán tích hợp dự báo đỉnh mực nước bằng GNN lan truyền pha"
+requires-python = ">=3.11"
+
+[tool.uv.workspace]
+members = [
+  "packages/vngis",
+  "packages/phasegnn",
+  "apps/api",
+  "apps/worker",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["packages", "apps"]
