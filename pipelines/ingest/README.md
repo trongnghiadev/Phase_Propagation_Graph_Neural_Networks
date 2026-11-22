@@ -28,7 +28,7 @@ python -X utf8 pipelines/ingest/stations/create_stations.py
 
 - URI MongoDB truyền làm tham số cuối (mặc định `mongodb://localhost:27017`); với replica set dùng `mongodb://mongo1:27101,mongo2:27102,mongo3:27103/?replicaSet=rs0`.
 - `create_stations.py` cần `admin_units` đã có để gán tỉnh cũ/mới.
-- Chi tiết field: [docs/data/du_lieu_kttv.md](../../docs/data/du_lieu_kttv.md).
+- Chi tiết field: `docs/data/du_lieu_kttv.md` (tài liệu private, submodule `docs/`).
 
 ## Việc còn lại
 - Tọa độ trạm đang viết cứng trong `create_stations.py`: chuyển sang `config/stations.yaml`.

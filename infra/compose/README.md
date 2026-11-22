@@ -1,6 +1,6 @@
 # Cụm phân tán giả lập (Docker)
 
-Cấu hình cho mục 5.9 của đề cương (repo private, `docs/private/proposal/`). Chạy mọi lệnh dưới đây từ **gốc repo**. Toàn bộ chạy trên một máy bằng Docker Compose, project `gis-dist`, mạng `gis-dist-net`.
+Cấu hình cho mục 5.9 của đề cương (`docs/proposal/`, private). Chạy mọi lệnh dưới đây từ **gốc repo**. Toàn bộ chạy trên một máy bằng Docker Compose, project `gis-dist`, mạng `gis-dist-net`.
 
 | Profile | Kịch bản | Thành phần | RAM ước tính |
 |---|---|---|---|

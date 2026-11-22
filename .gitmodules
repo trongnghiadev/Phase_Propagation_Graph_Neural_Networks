@@ -1,3 +1,3 @@
-[submodule "docs/private"]
-	path = docs/private
+[submodule "docs"]
+	path = docs
 	url = https://github.com/trongnghiadev/Phase_Propagation_Graph_Neural_Networks_private.git

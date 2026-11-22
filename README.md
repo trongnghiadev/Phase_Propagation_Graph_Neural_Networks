@@ -9,7 +9,7 @@
 2. **Mô hình PhaseGNN:** GNN lan truyền pha hai chiều (sóng triều đi ngược, dòng xả hồ đi xuôi) dự báo độ cao và thời điểm đỉnh mực nước 1–5 ngày, so sánh với dự báo nghiệp vụ của Đài KTTV Nam Bộ.
 3. **Hệ thống phân tán:** API + worker + web với phân quyền Bitmask, cache Redis, khóa phân tán (Redlock, fencing token), MongoDB replica set / sharding, giả lập bằng Docker.
 
-Repo này chỉ chứa **code và tài liệu kỹ thuật**. Đề cương, góp ý giảng viên, nhật ký, bản thảo báo cáo và slide ở repo private riêng, gắn vào tại `docs/private/` bằng git submodule (xem [docs/README.md](docs/README.md)).
+Repo này chỉ chứa **code và cấu hình**. **Toàn bộ tài liệu** (schema database, ADR, đề cương, góp ý, nhật ký, báo cáo, slide) nằm ở repo private, gắn vào tại `docs/` bằng git submodule. Không có quyền vào repo private thì `docs/` để trống và các link vào `docs/` không mở được; code vẫn chạy bình thường theo README trong từng thư mục.
 
 ---
 
@@ -49,12 +49,11 @@ Phase_Propagation_Graph_Neural_Networks/
 │   ├── interim/         Dữ liệu trung gian (gitignore)
 │   └── processed/       Parquet cho huấn luyện (gitignore)
 ├── results/             Kết quả thực nghiệm: summary + hình commit, từng lần chạy gitignore
-├── docs/                Tài liệu kỹ thuật (công khai được)
+├── docs/                SUBMODULE → repo PRIVATE: toàn bộ tài liệu
 │   ├── data/            Schema database, mô tả dữ liệu KTTV và địa giới
 │   ├── decisions/       ADR: quyết định thiết kế đánh số
-│   ├── api/             Ảnh chụp OpenAPI theo phiên bản
-│   ├── models/          Model card cho mỗi mô hình lên production
-│   └── private/         SUBMODULE → repo private: đề cương, góp ý, nhật ký, báo cáo, slide
+│   ├── api/, models/    Ảnh chụp OpenAPI, model card
+│   └── proposal/, feedback/, journal/, report/, slides/
 ├── pyproject.toml       Gốc uv workspace; phiên bản DUY NHẤT của hệ thống
 ├── CHANGELOG.md         Lịch sử thay đổi theo phiên bản
 ├── .env.example         Mẫu biến môi trường (không commit .env)
@@ -76,7 +75,7 @@ Mỗi thư mục cấp 1 và cấp 2 có `README.md` mô tả chức năng, nộ
 | Chương 5.9 – Phân tán | `infra/`, `research/chaos/` |
 | Chương 6 – Mã nguồn, kiểm thử | `*/tests/` trong từng package và app |
 | Chương 7 – Thực nghiệm | `research/experiments/`, `research/benchmarks/`, `results/` |
-| Đề cương, báo cáo, slide | repo private (`docs/private/`) |
+| Đề cương, báo cáo, slide | `docs/` (repo private) |
 
 ---
 
@@ -92,7 +91,7 @@ packages/vngis    ────────────────────�
 
 - `packages/` không import từ `apps/`, `pipelines/`, `research/`.
 - `apps/api` không import `phasegnn` (image API không chứa torch).
-- Lý do: [docs/decisions/0001-cau-truc-monorepo.md](docs/decisions/0001-cau-truc-monorepo.md), [0002-tach-api-worker.md](docs/decisions/0002-tach-api-worker.md).
+- Lý do: ADR 0001 (cấu trúc monorepo), 0002 (tách API và worker) trong `docs/decisions/` (private).
 
 ---
 
@@ -124,11 +123,11 @@ Commit theo [Conventional Commits](https://www.conventionalcommits.org/vi/v1.0.0
 | Thư viện chung | `packages/vngis`: `locks` (Redlock, fencing token), `text` (chuẩn hóa tên) |
 | API | `apps/api`: bản tối giản `/health`, `/stations`, `/lock/{resource}` |
 | Hạ tầng | `infra/compose/` (profile `ha`, `spark`, `shard`), `infra/scripts/migrate-data.ps1` |
-| Tài liệu | `docs/data/` (schema, dữ liệu KTTV), `docs/decisions/` (ADR 0001–0004), đề cương và checklist trong `docs/private/proposal/` |
+| Tài liệu | submodule `docs/` (private): schema, dữ liệu KTTV, ADR 0001–0005, đề cương, checklist |
 
 Chưa có: Spark, R, PhaseGNN, worker, web, migration, schema JSON, thực nghiệm. PDF bản tin KTTV (khoảng 1,1 GB) để ngoài repo, đặt vào `data/raw/kttv/` khi cần chạy lại parser (không commit).
 
-Database `vietnam_gis` hiện có 8 collection dữ liệu: `hydromet_bulletins`, `hydromet_bulletin_files`, `merit_river_reaches`, `waterways_segments`, `stations`, `admin_units`, `admin_unit_mappings`, `province_timeline`. Chi tiết: [docs/data/vietnam_gis_schema.md](docs/data/vietnam_gis_schema.md).
+Database `vietnam_gis` hiện có 8 collection dữ liệu: `hydromet_bulletins`, `hydromet_bulletin_files`, `merit_river_reaches`, `waterways_segments`, `stations`, `admin_units`, `admin_unit_mappings`, `province_timeline`. Chi tiết: `docs/data/vietnam_gis_schema.md` (private).
 
 ---
 
