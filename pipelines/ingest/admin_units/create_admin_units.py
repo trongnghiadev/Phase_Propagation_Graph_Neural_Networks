@@ -10,47 +10,44 @@
 Lưu ý: cùng một `code` có thể là hai đơn vị KHÁC NHAU ở hai thời kỳ (ví dụ tỉnh 80: Long An → Tây Ninh),
 nên luôn truy vấn kèm `era`.
 
+Tên chuẩn hóa (`name_norm`, `aliases_norm`) dùng `vngis.text.norm_name` (bản duy nhất trong repo).
+
 Nạp an toàn: ghi vào collection tạm `*__staging`, kiểm tra, rồi `renameCollection` (dropTarget) – thay thế
 nguyên tử, người đọc không thấy dữ liệu dở dang.
 
     python -X utf8 pipelines/ingest/admin_units/create_admin_units.py [mongodb_uri]
+
+Kết nối đọc bằng `vngis.config` (APP_ENV, MONGO_URI, MONGO_DB; tham số dòng lệnh `mongodb_uri` ghi đè URI);
+tên collection theo `mongo.collections`. Cần package vngis (pymongo, pydantic, pyyaml).
 """
 import json
 import os
 import sys
-import unicodedata
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
-from pymongo import ASCENDING, MongoClient
+from pymongo import ASCENDING
 
-URI = sys.argv[1] if len(sys.argv) > 1 else "mongodb://localhost:27017"
+try:                                   # cài package vngis (container/workspace) hoặc chạy thẳng từ repo
+    import vngis  # noqa: F401
+except ImportError:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "packages", "vngis", "src"))
+from vngis.config import ConfigError, load_config  # noqa: E402
+from vngis.db import get_db  # noqa: E402
+from vngis.text import ADMIN_PREFIXES as PREFIXES, norm_name as norm  # noqa: E402
+
 SRC = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "admin_units")
 OLD, NEW = "before_2025_07", "from_2025_07"
 EFFECTIVE = datetime(2025, 7, 1)                    # ngày hiệu lực (giờ Việt Nam)
 LAST_OLD = datetime(2025, 6, 30)
 SOURCE = "provinces.open-api.vn"
 
-PREFIXES = ["thành phố trung ương", "thành phố", "tỉnh", "thị xã", "thị trấn", "quận", "huyện",
-            "phường", "xã", "đặc khu"]
 # Cách viết tắt hay gặp trong bản tin và tài liệu
 EXTRA_ALIASES = {
     (NEW, "province", 79): ["TPHCM", "TP.HCM", "TP. HCM", "TP. Hồ Chí Minh", "Hồ Chí Minh", "Sài Gòn"],
     (OLD, "province", 79): ["TPHCM", "TP.HCM", "TP. HCM", "TP. Hồ Chí Minh", "Hồ Chí Minh", "Sài Gòn"],
     (OLD, "province", 77): ["BR-VT", "BRVT", "Bà Rịa Vũng Tàu"],
 }
-
-
-def norm(s: str) -> str:
-    """Chuẩn hóa để so khớp tên: bỏ dấu, chữ thường, bỏ tiền tố cấp hành chính."""
-    s = " ".join(s.strip().lower().split())
-    for p in PREFIXES:
-        if s.startswith(p + " "):
-            s = s[len(p) + 1:]
-            break
-    s = s.replace("đ", "d")
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
-    return s.replace("-", " ").replace("  ", " ").strip()
 
 
 def short_name(name: str, division_type: str) -> str:
@@ -227,7 +224,15 @@ def main():
     assert all(succ[p["code"]] for p in v1), "Có tỉnh cũ không có tỉnh kế thừa"
 
     # ---------------- nạp nguyên tử ----------------
-    db = MongoClient(URI)["vietnam_gis"]
+    try:                                            # APP_ENV, MONGO_URI, MONGO_DB; tham số dòng lệnh ghi đè URI
+        env = dict(os.environ)
+        if len(sys.argv) > 1:
+            env["MONGO_URI"] = sys.argv[1]
+        cfg = load_config(environ=env)
+    except ConfigError as e:
+        sys.exit(f"Lỗi cấu hình: {e}")
+    db = get_db(cfg)
+    names = cfg.mongo.collections
     now = datetime.now(timezone.utc)
     for d in docs:
         d["loaded_at"] = now
@@ -252,9 +257,9 @@ def main():
         for keys, opts in indexes:
             db[tmp].create_index(keys, **opts)
         assert db[tmp].count_documents({}) == len(rows)
-        db.client.admin.command("renameCollection", f"vietnam_gis.{tmp}", to=f"vietnam_gis.{name}", dropTarget=True)
+        db.client.admin.command("renameCollection", f"{db.name}.{tmp}", to=f"{db.name}.{name}", dropTarget=True)
 
-    load("admin_units", docs, unit_validator, [
+    load(names.admin_units, docs, unit_validator, [
         ([("era", ASCENDING), ("level", ASCENDING), ("code", ASCENDING)], {"unique": True, "name": "era_level_code_unique"}),
         ([("era", ASCENDING), ("level", ASCENDING), ("name_norm", ASCENDING)], {"name": "era_level_name_norm_idx"}),
         ([("aliases_norm", ASCENDING)], {"name": "aliases_norm_idx", "sparse": True}),
@@ -268,14 +273,14 @@ def main():
                        "status": {"enum": ["giữ nguyên", "sáp nhập", "hợp nhất"]}}}}
     for t in timeline:
         t["loaded_at"] = now
-    load("province_timeline", timeline, timeline_validator, [
+    load(names.province_timeline, timeline, timeline_validator, [
         ([("era", ASCENDING), ("code", ASCENDING)], {"unique": True, "name": "era_code_unique"}),
         ([("valid_from", ASCENDING), ("valid_to", ASCENDING)], {"name": "validity_idx"}),
         ([("name_norm", ASCENDING)], {"name": "name_norm_idx"}),
         ([("aliases_norm", ASCENDING)], {"name": "aliases_norm_idx", "sparse": True}),
         ([("successor.code", ASCENDING)], {"name": "successor_idx", "sparse": True}),
     ])
-    load("admin_unit_mappings", maps, map_validator, [
+    load(names.admin_unit_mappings, maps, map_validator, [
         ([("old.ward_code", ASCENDING)], {"name": "old_ward_idx"}),
         ([("new.ward_code", ASCENDING)], {"name": "new_ward_idx"}),
         ([("old.province_code", ASCENDING), ("new.province_code", ASCENDING)], {"name": "old_new_province_idx"}),

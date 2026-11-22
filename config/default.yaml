@@ -1,0 +1,73 @@
+# Cấu hình mặc định của hệ thống. File trong config/env/ chỉ ghi đè các khóa khác mặc định.
+# Thứ tự gộp: default.yaml → env/{APP_ENV}.yaml → biến môi trường (MONGO_URI, MONGO_DB, REDIS_*).
+# Kiểm tra bằng pydantic trong packages/vngis/src/vngis/config.py; khóa lạ hoặc sai kiểu → dừng ngay.
+# KHÔNG ghi mật khẩu, token ở đây.
+config_version: 1          # tăng khi đổi tên hoặc bỏ một khóa
+
+app:
+  timezone: Asia/Ho_Chi_Minh       # dữ liệu gốc theo giờ Việt Nam (UTC+7); DB lưu Date UTC
+  debug: false
+  log_level: INFO
+
+mongo:
+  uri: mongodb://localhost:27017
+  db: vietnam_gis
+  mode: auto                       # auto | single | replica_set | mongos (auto: suy ra từ URI)
+  app_name: vngis
+  server_selection_timeout_ms: 5000
+  write_concern: null              # ví dụ "majority" trên replica set; null = mặc định của driver/URI
+  read_concern: null               # ví dụ "majority"
+  collections:                     # tên logic → tên collection trong MongoDB
+    hydromet_bulletins: hydromet_bulletins
+    hydromet_bulletin_files: hydromet_bulletin_files
+    merit_river_reaches: merit_river_reaches
+    waterways_segments: waterways_segments
+    stations: stations
+    admin_units: admin_units
+    admin_unit_mappings: admin_unit_mappings
+    province_timeline: province_timeline
+    lock_fences: lock_fences       # fencing token của vngis.locks.next_fence
+
+redis:
+  cache:
+    mode: single                   # single | sentinel
+    url: redis://localhost:6379/0  # dùng khi mode = single
+    sentinels: []                  # dùng khi mode = sentinel, dạng "host:port"
+    master: cache                  # tên master trong sentinel.conf
+    socket_timeout_s: 0.5
+  lock:
+    backend: redlock               # redlock (N node Redis độc lập)
+    nodes: []                      # "host:port"; rỗng = chưa cấu hình khóa phân tán
+    timeout_s: 0.05
+    default_ttl_ms: 30000
+
+admin:
+  # 01/07/2025 00:00 giờ Việt Nam. Bản ghi có thời điểm >= mốc này thuộc thời kỳ from_2025_07.
+  effective_utc: "2025-06-30T17:00:00Z"
+  eras: [before_2025_07, from_2025_07]
+  # Bản tin còn ghi tên tỉnh cũ sau mốc ("đổi tên chậm"): chỉ tra theo thời kỳ cũ khi nhãn mới xuất hiện trong
+  # vòng ngần này ngày kể từ mốc (theo ngày quan trắc). Job Spark G0 nhận giá trị qua --max-lag-days (mặc định 31).
+  max_label_lag_days: 31
+
+stations:
+  snap_radius_m: 3000              # bán kính tìm reach MERIT quanh tọa độ trạm ($geoNear)
+  basin_root_comid: 44045960       # gốc cây Đồng Nai – Sài Gòn trong MERIT-Basins
+  min_uparea_km2:                  # dưới ngưỡng → review_reasons "uparea nhỏ bất thường"
+    water_level: 1000
+    reservoir: 500
+
+cache:                             # TTL cơ bản (giây), đề cương 5.5
+  ttl_s:
+    stats: 86400                   # stats:tide:*, stats:res:*
+    tide_past_month: 86400
+    tide_current_month: 600
+    bulletin: 604800               # bul:*, gần như bất biến
+    pdf_meta: 604800
+    bbox: 600
+    skill: 86400
+    permission: 300
+  jitter: 0.1                      # ±10% TTL chống hết hạn đồng loạt
+  stale_factor: 4                  # bản stale:* sống gấp 4 lần TTL
+
+scheduler:
+  enabled: true

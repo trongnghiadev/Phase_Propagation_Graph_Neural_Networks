@@ -2,13 +2,16 @@
 name = "vngis"
 version = "0.1.0"
 description = "Thư viện lõi dùng chung"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
   "pymongo>=4.10",
   "redis>=5.2",
   "pydantic>=2.9",
   "pyyaml>=6.0",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
 
 [build-system]
 requires = ["hatchling"]

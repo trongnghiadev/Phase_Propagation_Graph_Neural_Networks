@@ -7,63 +7,81 @@ khoảng cách dọc sông tới cửa xả và lịch sử cấp báo động l
 Chạy lại nhiều lần được (upsert theo `code`). Bản ghi đã được người dùng xác nhận
 (`location.method != "estimated"`) sẽ không bị ghi đè tọa độ.
 
-    python -X utf8 pipelines/ingest/stations/create_stations.py [mongodb://localhost:27017]
+    python -X utf8 pipelines/ingest/stations/create_stations.py [mongodb_uri]
+
+Cấu hình đọc bằng `vngis.config` (thư mục config/ ở gốc repo hoặc biến VNGIS_CONFIG_DIR):
+  - config/default.yaml + config/env/{APP_ENV}.yaml + biến MONGO_URI, MONGO_DB: kết nối, tên database, bán kính
+    gán trạm, gốc cây MERIT, ngưỡng uparea, `admin.max_label_lag_days`. Tham số dòng lệnh `mongodb_uri` ghi đè URI.
+  - config/stations.yaml (`vngis.config.load_stations_catalog`): tọa độ ước lượng của trạm mực nước, hồ chứa,
+    trạm mưa và tỉnh cũ/mới của trạm; thiếu khóa / sai kiểu → dừng với thông báo theo đường dẫn khóa.
+Tỉnh của hồ chứa: `vngis.province_labels` (thời kỳ theo NGÀY QUAN TRẮC, quy tắc đổi tên chậm dùng chung với job G0).
+Cần package vngis (pymongo, pydantic, pyyaml); chạy thẳng từ repo thì script tự thêm packages/vngis/src vào sys.path.
 """
+import os
 import sys
-import unicodedata
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 
-from pymongo import ASCENDING, GEOSPHERE, MongoClient
+try:                                   # cài package vngis (container/workspace) hoặc chạy thẳng từ repo
+    import vngis  # noqa: F401
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "vngis" / "src"))
+from pymongo import ASCENDING, GEOSPHERE  # noqa: E402
 
-URI = sys.argv[1] if len(sys.argv) > 1 else "mongodb://localhost:27017"
-db = MongoClient(URI)["vietnam_gis"]
-B, M, S = db.hydromet_bulletins, db.merit_river_reaches, "stations"
-PRIMARY = {"source.is_primary": True, "bulletin_type": "tide_forecast_5day"}
+from vngis.bulletins import duplicate_exclusions  # noqa: E402
+from vngis.admin import BEFORE as OLD_ERA, EFFECTIVE_UTC, FROM as NEW_ERA  # noqa: E402
+from vngis.config import ConfigError, load_config, load_stations_catalog  # noqa: E402
+from vngis.db import get_db  # noqa: E402
+from vngis.province_labels import assign_runs, build_index, lookup  # noqa: E402
+from vngis.text import slug  # noqa: E402
 
-# --------------------------------------------------------------------------
-# Tọa độ ƯỚC LƯỢNG [lon, lat]. confidence: medium ≈ sai số vài km; low ≈ chưa chắc vị trí.
-# Cần thay bằng tọa độ chính thức khi có.
-# --------------------------------------------------------------------------
-WATER_LEVEL = {  # tên chuẩn: (lon, lat, confidence)
-    "Vũng Tàu":    (107.070, 10.340, "medium"),
-    "Nhà Bè":      (106.735, 10.665, "medium"),
-    "Phú An":      (106.722, 10.775, "medium"),
-    "Thủ Dầu Một": (106.650, 10.980, "medium"),
-    "Biên Hòa":    (106.820, 10.950, "medium"),
-    "Dầu Tiếng":   (106.360, 11.300, "medium"),
-    "Tân An":      (106.410, 10.540, "medium"),
-    "Bến Lức":     (106.490, 10.640, "medium"),
-    "Gò Dầu Hạ":   (106.260, 11.080, "medium"),
-}
-RESERVOIRS = {  # vị trí đập, ước lượng
-    "Trị An":     (107.050, 11.100, "medium"),
-    "Thác Mơ":    (106.980, 11.840, "medium"),
-    "Sr.P.Miêng": (106.820, 11.580, "low"),
-    "Dầu Tiếng":  (106.360, 11.330, "medium"),
-    "Sông Ray":   (107.360, 10.730, "low"),
-    "Đá Đen":     (107.260, 10.550, "low"),
-    "Sông Hỏa":   None,  # chưa xác định được vị trí
-}
-RAIN = {
-    "Tân Sơn Hòa":  (106.665, 10.800, "medium"),
-    "Nhà Bè":       (106.735, 10.665, "medium"),
-    "Mạc Đĩnh Chi": (106.700, 10.787, "medium"),
-    "Vũng Tàu":     (107.070, 10.340, "medium"),
-    "Thủ Dầu Một":  (106.650, 10.980, "medium"),
-    "Củ Chi":       (106.500, 10.970, "low"),
-    "Hóc Môn":      (106.590, 10.890, "low"),
-    "Cần Giờ":      (106.950, 10.410, "low"),
-    "Bình Chánh":   (106.600, 10.690, "low"),
-    "Phú An":       (106.722, 10.775, "medium"),
-}
-SNAP_RADIUS_M = 3000
+try:
+    _env = dict(os.environ)
+    if len(sys.argv) > 1:
+        _env["MONGO_URI"] = sys.argv[1]          # tham số dòng lệnh ghi đè URI của cấu hình
+    CFG = load_config(environ=_env)
+    CATALOG = load_stations_catalog(CFG.config_dir)
+except ConfigError as e:
+    sys.exit(f"Lỗi cấu hình: {e}")
+
+db = get_db(CFG)
+B, M, S = db.hydromet_bulletins, db.merit_river_reaches, CFG.mongo.collections.stations
+# Kiểm tra trước khi ghi gì: cần province_timeline để gán tỉnh cũ/mới
+TIMELINE = CFG.mongo.collections.province_timeline
+P_INDEX = build_index(db[TIMELINE].find({}, {"_id": 0, "era": 1, "code": 1, "name": 1, "name_norm": 1,
+                                             "aliases_norm": 1}))
+if not P_INDEX:
+    sys.exit(f"Thiếu collection {TIMELINE} (hoặc rỗng): chạy pipelines/ingest/admin_units/create_admin_units.py trước")
+PRIMARY_ALL = {"source.is_primary": True, "bulletin_type": "tide_forecast_5day"}
+# Bỏ bản tin chính trùng nội dung (cùng sha256, file nằm sai thư mục ngày) – cùng hàm với job G0,
+# để số bản tin (bulletin_rows, n_bulletins) khớp với các collection G0.
+_dups = duplicate_exclusions([{"source_file": d["source_file"], "sha256": (d.get("source") or {}).get("sha256"),
+                               "date_from_filename": (d.get("source") or {}).get("date_from_filename"),
+                               "bulletin_date": d.get("bulletin_date")}
+                              for d in B.find(PRIMARY_ALL, {"source_file": 1, "source.sha256": 1,
+                                                            "source.date_from_filename": 1, "bulletin_date": 1})])
+EXCLUDED = [x["source_file"] for x in _dups]
+PRIMARY = {**PRIMARY_ALL, "source_file": {"$nin": EXCLUDED}}
+print(f"bỏ {len(EXCLUDED)} bản tin chính trùng nội dung (sha256): {EXCLUDED}")
 
 
-def slug(name: str) -> str:
-    s = name.replace("Đ", "D").replace("đ", "d")
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
-    return "".join(c if c.isalnum() else "_" for c in s).strip("_").upper()
+def coord_table(section):
+    """Mục trong stations.yaml → {tên: (lon, lat, confidence) | None}, giữ thứ tự khai báo."""
+    return {name: None if c is None else (float(c.lon), float(c.lat), c.confidence)
+            for name, c in getattr(CATALOG, section).items()}
+
+
+# Tọa độ ƯỚC LƯỢNG (config/stations.yaml), cần thay bằng tọa độ chính thức khi có.
+WATER_LEVEL = coord_table("water_level")   # tên chuẩn: (lon, lat, confidence)
+RESERVOIRS = coord_table("reservoirs")     # vị trí đập; None = chưa xác định được vị trí
+RAIN = coord_table("rain")
+SNAP_RADIUS_M = CFG.stations.snap_radius_m
+BASIN_ROOT_COMID = CFG.stations.basin_root_comid
+MIN_UPAREA_KM2 = CFG.stations.min_uparea_km2
+MAX_LAG_DAYS = CFG.admin.max_label_lag_days
+if CFG.admin.effective_utc != EFFECTIVE_UTC:
+    sys.exit(f"admin.effective_utc trong cấu hình ({CFG.admin.effective_utc}) khác vngis.admin ({EFFECTIVE_UTC})")
 
 
 def point(c):
@@ -205,90 +223,49 @@ for name, c in RAIN.items():
     })
 
 # ---------------- địa giới hành chính: tỉnh CŨ (trước 01/07/2025) và MỚI ----------------
-# Cần collection admin_units (pipelines/ingest/admin_units/create_admin_units.py). Chưa có ranh giới đa giác nên chỉ gán
-# đến cấp TỈNH: trạm theo vị trí đã biết, hồ chứa theo nhãn tỉnh ghi trong bản tin.
-OLD_ERA, NEW_ERA = "before_2025_07", "from_2025_07"
-EFFECTIVE_UTC = datetime(2025, 6, 30, 17, 0)     # 01/07/2025 00:00 giờ Việt Nam, lưu UTC (naive)
-STATION_PROVINCE = {  # tên trạm: (tỉnh trước 01/07/2025, tỉnh từ 01/07/2025)
-    "Vũng Tàu": ("Bà Rịa - Vũng Tàu", "Hồ Chí Minh"),
-    "Nhà Bè": ("Hồ Chí Minh", "Hồ Chí Minh"),
-    "Phú An": ("Hồ Chí Minh", "Hồ Chí Minh"),
-    "Thủ Dầu Một": ("Bình Dương", "Hồ Chí Minh"),
-    "Biên Hòa": ("Đồng Nai", "Đồng Nai"),
-    "Dầu Tiếng": ("Bình Dương", "Hồ Chí Minh"),
-    "Tân An": ("Long An", "Tây Ninh"),
-    "Bến Lức": ("Long An", "Tây Ninh"),
-    "Gò Dầu Hạ": ("Tây Ninh", "Tây Ninh"),
-    "Tân Sơn Hòa": ("Hồ Chí Minh", "Hồ Chí Minh"),
-    "Mạc Đĩnh Chi": ("Hồ Chí Minh", "Hồ Chí Minh"),
-    "Củ Chi": ("Hồ Chí Minh", "Hồ Chí Minh"),
-    "Hóc Môn": ("Hồ Chí Minh", "Hồ Chí Minh"),
-    "Cần Giờ": ("Hồ Chí Minh", "Hồ Chí Minh"),
-    "Bình Chánh": ("Hồ Chí Minh", "Hồ Chí Minh"),
-}
-has_admin = "admin_units" in db.list_collection_names()
-
-
-def norm_name(s):
-    s = " ".join(s.strip().lower().split())
-    for p in ["thành phố trung ương", "thành phố", "tỉnh"]:
-        if s.startswith(p + " "):
-            s = s[len(p) + 1:]
-            break
-    s = unicodedata.normalize("NFKD", s.replace("đ", "d")).encode("ascii", "ignore").decode()
-    return s.replace("-", " ").replace("  ", " ").strip()
+# Cần collection province_timeline (pipelines/ingest/admin_units/create_admin_units.py). Chưa có ranh giới đa giác nên
+# chỉ gán đến cấp TỈNH: trạm theo vị trí đã biết, hồ chứa theo nhãn tỉnh ghi trong bản tin.
+# tên trạm: (tỉnh trước 01/07/2025, tỉnh từ 01/07/2025) – config/stations.yaml, mục station_province
+STATION_PROVINCE = {name: (p.before_2025_07, p.from_2025_07) for name, p in CATALOG.station_province.items()}
 
 
 def find_province(era, label):
-    if not has_admin or not label:
-        return None
-    n = norm_name(label)
-    u = db.admin_units.find_one({"era": era, "level": "province", "$or": [{"name_norm": n}, {"aliases_norm": n}]},
-                                {"_id": 0, "code": 1, "name": 1})
-    return {"code": u["code"], "name": u["name"]} if u else None
+    p, _ = lookup(P_INDEX, era, label)
+    return {"code": p["code"], "name": p["name"]} if p else None
 
 
-# Nhãn tỉnh của hồ chứa trong bản tin, chia theo đoạn liên tiếp và theo thời kỳ
-res_runs = defaultdict(list)
-for b in B.find(PRIMARY, {"reservoirs.reservoir": 1, "reservoirs.province": 1, "bulletin_date": 1}).sort("bulletin_date", 1):
-    era = NEW_ERA if b["bulletin_date"] >= EFFECTIVE_UTC else OLD_ERA
+# Nhãn tỉnh của hồ chứa trong bản tin theo NGÀY QUAN TRẮC; chia đoạn và gán thời kỳ bằng vngis.province_labels
+res_records = defaultdict(list)
+for b in B.find(PRIMARY, {"reservoirs.reservoir": 1, "reservoirs.province": 1, "observation_date": 1}):
     for r in b.get("reservoirs", []):
-        runs = res_runs[r["reservoir"]]
-        label = r.get("province")
-        if runs and runs[-1]["label"] == label and runs[-1]["era"] == era:
-            runs[-1]["to"] = b["bulletin_date"]
-            runs[-1]["n_bulletins"] += 1
-        else:
-            runs.append({"label": label, "era": era, "from": b["bulletin_date"], "to": b["bulletin_date"],
-                         "n_bulletins": 1})
+        res_records[r["reservoir"]].append((b["observation_date"], r.get("province")))
 
 
 def reservoir_admin(name):
     hist, before, after = [], None, None
-    for r in res_runs.get(name, []):
-        p = find_province(r["era"], r["label"])
-        note = None
-        if p is None and r["era"] == NEW_ERA:
-            p = find_province(OLD_ERA, r["label"])
-            if p:
-                note = "bản tin còn dùng tên tỉnh cũ sau ngày hiệu lực 01/07/2025"
-        hist.append({**r, "province_code": p["code"] if p else None, "province_name": p["name"] if p else None,
-                     "matched_era": (r["era"] if not note else OLD_ERA) if p else None, "note": note})
-        if p and r["era"] == OLD_ERA:
+    for r in assign_runs(res_records.get(name, []), P_INDEX, MAX_LAG_DAYS):
+        p = {"code": r.code, "name": r.name} if r.matched else None
+        # era = thời kỳ theo ngày quan trắc của đoạn; matched_era = thời kỳ đem tra (khác era khi đổi tên chậm)
+        h = {"label": r.label, "era": r.obs_era, "from": r.first, "to": r.last, "n_bulletins": r.n,
+             "province_code": r.code, "province_name": r.name, "matched_era": r.era,
+             "note": r.note if r.matched else r.reason}
+        if r.provisional:
+            h["provisional"] = True        # đoạn cuối dữ liệu, có thể còn đổi tên chậm
+        hist.append(h)
+        if p and r.obs_era == OLD_ERA:
             before = p
-        if p and r["era"] == NEW_ERA and note is None:
+        if p and r.obs_era == NEW_ERA and r.era == NEW_ERA:
             after = p
     return hist, before, after
 
 
 def station_admin(d):
-    if not has_admin:
-        return None
     if d["kind"] == "reservoir":
         hist, before, after = reservoir_admin(d["name"])
         d["admin_history"] = hist
         return {OLD_ERA: before, NEW_ERA: after, "level": "province",
-                "method": "nhãn tỉnh trong hydromet_bulletins.reservoirs.province",
+                "method": "nhãn tỉnh trong hydromet_bulletins.reservoirs.province; thời kỳ theo observation_date "
+                          f"(vngis.province_labels, đổi tên chậm tối đa {MAX_LAG_DAYS} ngày)",
                 "note": None if before else "bản tin không ghi tỉnh trước 01/07/2025"}
     names = STATION_PROVINCE.get(d["name"])
     if not names:
@@ -310,11 +287,10 @@ for d in docs:
         m = snap(c) if d["kind"] in ("water_level", "reservoir") else None
         reasons = ["tọa độ ước lượng"]
         if m and m.get("uparea_km2") is not None:
-            if (d["kind"] == "reservoir" and m["uparea_km2"] < 500) or \
-               (d["kind"] == "water_level" and m["uparea_km2"] < 1000):
+            if d["kind"] in MIN_UPAREA_KM2 and m["uparea_km2"] < MIN_UPAREA_KM2[d["kind"]]:
                 reasons.append("reach được gán có uparea nhỏ bất thường")
-            if not m["root_is_outlet"] or m["basin_root_COMID"] != 44045960:
-                reasons.append("không thuộc cây Đồng Nai – Sài Gòn (44045960)")
+            if not m["root_is_outlet"] or m["basin_root_COMID"] != BASIN_ROOT_COMID:
+                reasons.append(f"không thuộc cây Đồng Nai – Sài Gòn ({BASIN_ROOT_COMID})")
         setf["merit"] = m
         setf["needs_review"] = True
         setf["review_reasons"] = reasons

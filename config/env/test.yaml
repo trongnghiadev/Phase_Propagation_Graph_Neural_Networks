@@ -1,0 +1,18 @@
+# Chạy test tự động: database tạm riêng, chờ server ngắn, tắt scheduler, cache sống ngắn.
+mongo:
+  db: vietnam_gis_test
+  server_selection_timeout_ms: 1000
+
+cache:
+  ttl_s:
+    stats: 5
+    tide_past_month: 5
+    tide_current_month: 5
+    bulletin: 5
+    pdf_meta: 5
+    bbox: 5
+    skill: 5
+    permission: 5
+
+scheduler:
+  enabled: false

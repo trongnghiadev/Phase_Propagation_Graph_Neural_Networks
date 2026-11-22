@@ -1,0 +1,15 @@
+# Máy cá nhân: MongoDB một node localhost:27017 (= mặc định, nên không ghi lại).
+# Redis trỏ vào các cổng của cụm Docker infra/compose khi cụm đang chạy (khớp .env.example).
+app:
+  debug: true
+  log_level: DEBUG
+
+mongo:
+  mode: single
+
+redis:
+  cache:
+    mode: sentinel
+    sentinels: [localhost:26381, localhost:26382, localhost:26383]
+  lock:
+    nodes: [localhost:6391, localhost:6392, localhost:6393]

@@ -53,6 +53,7 @@ x-api: &api
   cpus: 0.5
   mem_limit: 256m
   environment: &api-env
+    APP_ENV: cluster                 # vngis.config đọc config/env/cluster.yaml (VNGIS_CONFIG_DIR đặt trong image)
     TZ: Asia/Ho_Chi_Minh
     MONGO_URI: mongodb://mongo1:27101,mongo2:27102,mongo3:27103/?replicaSet=rs0&w=majority&readConcernLevel=majority
     MONGO_DB: vietnam_gis
@@ -82,8 +83,8 @@ x-spark: &spark
     PYSPARK_PYTHON: /usr/bin/python3
     PYSPARK_DRIVER_PYTHON: /usr/bin/python3
     # Kịch bản A đọc từ secondary; kịch bản B đổi sang mongodb://mongos:27200
-    MONGODB_URI: mongodb://mongo1:27101,mongo2:27102,mongo3:27103/?replicaSet=rs0&readPreference=secondaryPreferred
-    MONGODB_DB: vietnam_gis
+    MONGO_URI: mongodb://mongo1:27101,mongo2:27102,mongo3:27103/?replicaSet=rs0&readPreference=secondaryPreferred
+    MONGO_DB: vietnam_gis              # cùng tên biến với vngis.config (job G0 vẫn nhận MONGODB_* làm dự phòng)
   volumes:
     - ../..:/opt/spark/work/project:ro
   networks: [gisnet]

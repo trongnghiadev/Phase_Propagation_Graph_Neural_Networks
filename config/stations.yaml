@@ -1,0 +1,60 @@
+# Danh mục trạm cho pipelines/ingest/stations/create_stations.py.
+#
+# TỌA ĐỘ Ở ĐÂY LÀ TỌA ĐỘ ƯỚC LƯỢNG, CHƯA PHẢI TỌA ĐỘ CHÍNH THỨC. Cần thay khi có tọa độ chính thức.
+#   lon, lat: độ thập phân (WGS84)
+#   confidence: medium ≈ sai số vài km; low ≈ chưa chắc vị trí
+#   null: chưa xác định được vị trí
+# Tên trạm (khóa) phải viết đúng như cột tên chuẩn trong hydromet_bulletins (station / reservoir).
+# Thứ tự khai báo được giữ khi tạo bản ghi.
+config_version: 1
+
+water_level:                       # trạm mực nước (Vũng Tàu là trạm mực nước biển)
+  Vũng Tàu:    {lon: 107.070, lat: 10.340, confidence: medium}
+  Nhà Bè:      {lon: 106.735, lat: 10.665, confidence: medium}
+  Phú An:      {lon: 106.722, lat: 10.775, confidence: medium}
+  Thủ Dầu Một: {lon: 106.650, lat: 10.980, confidence: medium}
+  Biên Hòa:    {lon: 106.820, lat: 10.950, confidence: medium}
+  Dầu Tiếng:   {lon: 106.360, lat: 11.300, confidence: medium}
+  Tân An:      {lon: 106.410, lat: 10.540, confidence: medium}
+  Bến Lức:     {lon: 106.490, lat: 10.640, confidence: medium}
+  Gò Dầu Hạ:   {lon: 106.260, lat: 11.080, confidence: medium}
+
+reservoirs:                        # vị trí đập, ước lượng
+  Trị An:      {lon: 107.050, lat: 11.100, confidence: medium}
+  Thác Mơ:     {lon: 106.980, lat: 11.840, confidence: medium}
+  Sr.P.Miêng:  {lon: 106.820, lat: 11.580, confidence: low}
+  Dầu Tiếng:   {lon: 106.360, lat: 11.330, confidence: medium}
+  Sông Ray:    {lon: 107.360, lat: 10.730, confidence: low}
+  Đá Đen:      {lon: 107.260, lat: 10.550, confidence: low}
+  Sông Hỏa:    null                # chưa xác định được vị trí
+
+rain:                              # trạm mưa
+  Tân Sơn Hòa:  {lon: 106.665, lat: 10.800, confidence: medium}
+  Nhà Bè:       {lon: 106.735, lat: 10.665, confidence: medium}
+  Mạc Đĩnh Chi: {lon: 106.700, lat: 10.787, confidence: medium}
+  Vũng Tàu:     {lon: 107.070, lat: 10.340, confidence: medium}
+  Thủ Dầu Một:  {lon: 106.650, lat: 10.980, confidence: medium}
+  Củ Chi:       {lon: 106.500, lat: 10.970, confidence: low}
+  Hóc Môn:      {lon: 106.590, lat: 10.890, confidence: low}
+  Cần Giờ:      {lon: 106.950, lat: 10.410, confidence: low}
+  Bình Chánh:   {lon: 106.600, lat: 10.690, confidence: low}
+  Phú An:       {lon: 106.722, lat: 10.775, confidence: medium}
+
+# Tỉnh của trạm mực nước / trạm mưa theo vị trí đã biết (chưa có ranh giới đa giác nên chỉ đến cấp tỉnh).
+# Hồ chứa KHÔNG khai báo ở đây: lấy theo nhãn tỉnh trong bản tin.
+station_province:
+  Vũng Tàu:     {before_2025_07: "Bà Rịa - Vũng Tàu", from_2025_07: "Hồ Chí Minh"}
+  Nhà Bè:       {before_2025_07: "Hồ Chí Minh", from_2025_07: "Hồ Chí Minh"}
+  Phú An:       {before_2025_07: "Hồ Chí Minh", from_2025_07: "Hồ Chí Minh"}
+  Thủ Dầu Một:  {before_2025_07: "Bình Dương", from_2025_07: "Hồ Chí Minh"}
+  Biên Hòa:     {before_2025_07: "Đồng Nai", from_2025_07: "Đồng Nai"}
+  Dầu Tiếng:    {before_2025_07: "Bình Dương", from_2025_07: "Hồ Chí Minh"}
+  Tân An:       {before_2025_07: "Long An", from_2025_07: "Tây Ninh"}
+  Bến Lức:      {before_2025_07: "Long An", from_2025_07: "Tây Ninh"}
+  Gò Dầu Hạ:    {before_2025_07: "Tây Ninh", from_2025_07: "Tây Ninh"}
+  Tân Sơn Hòa:  {before_2025_07: "Hồ Chí Minh", from_2025_07: "Hồ Chí Minh"}
+  Mạc Đĩnh Chi: {before_2025_07: "Hồ Chí Minh", from_2025_07: "Hồ Chí Minh"}
+  Củ Chi:       {before_2025_07: "Hồ Chí Minh", from_2025_07: "Hồ Chí Minh"}
+  Hóc Môn:      {before_2025_07: "Hồ Chí Minh", from_2025_07: "Hồ Chí Minh"}
+  Cần Giờ:      {before_2025_07: "Hồ Chí Minh", from_2025_07: "Hồ Chí Minh"}
+  Bình Chánh:   {before_2025_07: "Hồ Chí Minh", from_2025_07: "Hồ Chí Minh"}

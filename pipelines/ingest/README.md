@@ -27,10 +27,17 @@ python -X utf8 pipelines/ingest/stations/create_stations.py
 ```
 
 - URI MongoDB truyền làm tham số cuối (mặc định `mongodb://localhost:27017`); với replica set dùng `mongodb://mongo1:27101,mongo2:27102,mongo3:27103/?replicaSet=rs0`.
-- `create_stations.py` cần `admin_units` đã có để gán tỉnh cũ/mới.
+- Chuẩn hóa tên dùng `vngis.text.norm_name` (bản duy nhất). Script tự thêm `packages/vngis/src` vào `sys.path` nếu chưa cài `vngis`; cài thì dùng bản cài.
+- `create_stations.py` đọc cấu hình bằng `vngis.config` (tôn trọng `APP_ENV`, `MONGO_URI`, `MONGO_DB`; tham số dòng lệnh ghi đè URI), nên cần các phụ thuộc của `vngis` (pymongo, pydantic, pyyaml, redis): tọa độ ước lượng + tỉnh của trạm đọc từ `config/stations.yaml` (thiếu khóa → dừng, báo rõ khóa nào); bán kính gán trạm, gốc cây MERIT, ngưỡng uparea, `admin.max_label_lag_days` từ `config/default.yaml` (chạy ngoài repo thì đặt `VNGIS_CONFIG_DIR`). Cần `province_timeline` đã có. Sửa tọa độ trong YAML rồi chạy lại, không sửa code.
+- Tỉnh của hồ chứa (`stations.admin_history`, `stations.admin`): `vngis.province_labels`, thời kỳ theo **ngày quan trắc**; `admin_history[].from/to` là ngày quan trắc đầu/cuối của đoạn nhãn. Cùng quy tắc với `reservoir_daily.province` của job G0.
+  - Hai nghĩa `era` khác nhau: `admin_history[].era` = thời kỳ theo **ngày quan trắc** của đoạn; `admin_history[].matched_era` (và `reservoir_daily.province.era`) = thời kỳ **đem tra mã**. Hai giá trị khác nhau ở đoạn "đổi tên chậm" (ví dụ Dầu Tiếng "Tây Ninh" 01–06/07/2025: `era = from_2025_07`, `matched_era = before_2025_07`, mã 72).
+  - `admin_history[].provisional: true` (chỉ ghi khi đúng): đoạn sau mốc ở cuối dữ liệu, dùng lại nhãn trước mốc và còn trong `max_label_lag_days` → chưa biết có đổi tên chậm hay không; chạy lại khi có thêm bản tin.
+  - Nhãn tỉnh rỗng: không làm đứt đoạn, được gom thành đoạn riêng `province_code = null`, `note = "nhãn tỉnh rỗng"`.
+  - Bỏ 4 bản tin chính trùng nội dung (cùng sha256) bằng `vngis.bulletins.duplicate_exclusions` – cùng hàm với job G0 – nên `bulletin_rows`, `alarm_history[].n_bulletins`, `admin_history[].n_bulletins` đếm trên 3.590 bản tin như các collection G0.
+  - Thiếu hoặc rỗng `province_timeline` → dừng với thông báo (không ghi `admin` rỗng).
+- `create_admin_units.py` cũng đọc kết nối bằng `vngis.config` (APP_ENV, MONGO_URI, MONGO_DB; tham số dòng lệnh ghi đè URI), tên collection theo `mongo.collections`.
+- Chạy trong container (không cài gì vào máy): `docker run --rm --network <mạng MongoDB> -e MONGO_URI=mongodb://mongo:27017 -v "<gốc repo>:/repo" -w /repo python:3.12-slim sh -c "pip -q install ./packages/vngis && python -X utf8 pipelines/ingest/stations/create_stations.py"`.
 - Chi tiết field: `docs/data/du_lieu_kttv.md` (tài liệu private, submodule `docs/`).
 
 ## Việc còn lại
-- Tọa độ trạm đang viết cứng trong `create_stations.py`: chuyển sang `config/stations.yaml`.
-- Các script còn bản sao riêng của hàm chuẩn hóa tên; chuyển sang `vngis.text` khi dùng `uv sync`.
 - `kttv_load_mongo.py` đang xóa rồi nạp lại collection: đổi sang nạp vào `__staging` rồi `renameCollection` (đề cương 5.6.4).

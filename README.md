@@ -127,7 +127,7 @@ Commit theo [Conventional Commits](https://www.conventionalcommits.org/vi/v1.0.0
 
 Chưa có: Spark, R, PhaseGNN, worker, web, migration, schema JSON, thực nghiệm. PDF bản tin KTTV (khoảng 1,1 GB) để ngoài repo, đặt vào `data/raw/kttv/` khi cần chạy lại parser (không commit).
 
-Database `vietnam_gis` hiện có 8 collection dữ liệu: `hydromet_bulletins`, `hydromet_bulletin_files`, `merit_river_reaches`, `waterways_segments`, `stations`, `admin_units`, `admin_unit_mappings`, `province_timeline`. Chi tiết: `docs/data/vietnam_gis_schema.md` (private).
+Database `vietnam_gis` hiện có 12 collection dữ liệu: `hydromet_bulletins`, `hydromet_bulletin_files`, `merit_river_reaches`, `waterways_segments`, `stations`, `admin_units`, `admin_unit_mappings`, `province_timeline` và 4 collection do job G0 (`pipelines/spark/flatten/`) sinh ra từ bản tin: `tide_extremes` (time series), `official_forecasts`, `reservoir_daily`, `rainfall_daily`. Thêm 2 collection vận hành của job: `job_locks` (khóa chống chạy chồng), `jobs` (nhật ký lần chạy). Chi tiết: `docs/data/vietnam_gis_schema.md` (private).
 
 ---
 

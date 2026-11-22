@@ -1,0 +1,15 @@
+# Cụm Docker infra/compose/docker-compose.yml (profile ha): tên host trong mạng gisnet.
+# Sharding (profile shard): đặt MONGO_URI=mongodb://localhost:27200 (mongos) và MONGO_MODE=mongos.
+mongo:
+  uri: mongodb://mongo1:27101,mongo2:27102,mongo3:27103/?replicaSet=rs0
+  mode: replica_set
+  write_concern: majority
+  read_concern: majority
+
+redis:
+  cache:
+    mode: sentinel
+    sentinels: [sentinel-1:26379, sentinel-2:26379, sentinel-3:26379]
+    master: cache
+  lock:
+    nodes: [redis-lock-1:6379, redis-lock-2:6379, redis-lock-3:6379]
