@@ -9,7 +9,7 @@
 2. **Mô hình PhaseGNN:** GNN lan truyền pha hai chiều (sóng triều đi ngược, dòng xả hồ đi xuôi) dự báo độ cao và thời điểm đỉnh mực nước 1–5 ngày, so sánh với dự báo nghiệp vụ của Đài KTTV Nam Bộ.
 3. **Hệ thống phân tán:** API + worker + web với phân quyền Bitmask, cache Redis, khóa phân tán (Redlock, fencing token), MongoDB replica set / sharding, giả lập bằng Docker.
 
-Đề cương đầy đủ: [docs/proposal/](docs/proposal/) (đang chuyển vào).
+Repo này chỉ chứa **code và tài liệu kỹ thuật**. Đề cương, góp ý giảng viên, nhật ký, bản thảo báo cáo và slide ở repo private riêng, gắn vào tại `docs/private/` bằng git submodule (xem [docs/README.md](docs/README.md)).
 
 ---
 
@@ -49,14 +49,12 @@ Phase_Propagation_Graph_Neural_Networks/
 │   ├── interim/         Dữ liệu trung gian (gitignore)
 │   └── processed/       Parquet cho huấn luyện (gitignore)
 ├── results/             Kết quả thực nghiệm: summary + hình commit, từng lần chạy gitignore
-├── docs/                Tài liệu
-│   ├── proposal/        Đề cương, checklist, nhật ký
+├── docs/                Tài liệu kỹ thuật (công khai được)
 │   ├── data/            Schema database, mô tả dữ liệu KTTV và địa giới
 │   ├── decisions/       ADR: quyết định thiết kế đánh số
 │   ├── api/             Ảnh chụp OpenAPI theo phiên bản
 │   ├── models/          Model card cho mỗi mô hình lên production
-│   ├── report/          Báo cáo cuối chương 1–8
-│   └── slides/          Slide, kịch bản demo
+│   └── private/         SUBMODULE → repo private: đề cương, góp ý, nhật ký, báo cáo, slide
 ├── pyproject.toml       Gốc uv workspace; phiên bản DUY NHẤT của hệ thống
 ├── CHANGELOG.md         Lịch sử thay đổi theo phiên bản
 ├── .env.example         Mẫu biến môi trường (không commit .env)
@@ -78,7 +76,7 @@ Mỗi thư mục cấp 1 và cấp 2 có `README.md` mô tả chức năng, nộ
 | Chương 5.9 – Phân tán | `infra/`, `research/chaos/` |
 | Chương 6 – Mã nguồn, kiểm thử | `*/tests/` trong từng package và app |
 | Chương 7 – Thực nghiệm | `research/experiments/`, `research/benchmarks/`, `results/` |
-| Báo cáo, slide | `docs/report/`, `docs/slides/` |
+| Đề cương, báo cáo, slide | repo private (`docs/private/`) |
 
 ---
 
@@ -123,7 +121,7 @@ Repo mới có **khung thư mục, README và cấu hình gốc**. Code và tài
 
 | Hiện ở | Sẽ chuyển tới |
 |---|---|
-| `bigdatanckh/de_cuong_nghien_cuu.md`, `checklist_de_cuong.md` | `docs/proposal/` |
+| `bigdatanckh/de_cuong_nghien_cuu.md`, `checklist_de_cuong.md` | repo private, `proposal/` |
 | `bigdatanckh/vietnam_gis_schema.md`, `datamongo/README.md` | `docs/data/` |
 | `datamongo/kttv_*.py` | `pipelines/ingest/kttv/` |
 | `bigdatanckh/etl/fetch_admin_units.py`, `create_admin_units.py` | `pipelines/ingest/admin_units/` |
