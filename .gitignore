@@ -45,3 +45,6 @@ pipelines/r/renv/library/
 Thumbs.db
 .vscode/
 .idea/
+
+# Cấu hình Claude Code cục bộ (agent cài từ docs/agents, không công khai)
+.claude/
