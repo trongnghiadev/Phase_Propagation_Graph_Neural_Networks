@@ -117,21 +117,18 @@ Commit theo [Conventional Commits](https://www.conventionalcommits.org/vi/v1.0.0
 
 ## Hiện trạng
 
-Repo mới có **khung thư mục, README và cấu hình gốc**. Code và tài liệu đã làm vẫn ở ngoài repo, chưa chuyển vào:
-
-| Hiện ở | Sẽ chuyển tới |
+| Phần | Đã có trong repo |
 |---|---|
-| `bigdatanckh/de_cuong_nghien_cuu.md`, `checklist_de_cuong.md` | repo private, `proposal/` |
-| `bigdatanckh/vietnam_gis_schema.md`, `datamongo/README.md` | `docs/data/` |
-| `datamongo/kttv_*.py` | `pipelines/ingest/kttv/` |
-| `bigdatanckh/etl/fetch_admin_units.py`, `create_admin_units.py` | `pipelines/ingest/admin_units/` |
-| `bigdatanckh/etl/create_stations.py` | `pipelines/ingest/stations/` (tọa độ tách ra `config/stations.yaml`) |
-| `bigdatanckh/backend/` | `apps/api/`; phần khóa, kết nối tách vào `packages/vngis/` |
-| `bigdatanckh/deploy/` | `infra/compose/`, `infra/scripts/` |
-| `bigdatanckh/data/admin_units/` | `data/admin_units/` |
-| `datamongo/KTTV/` (PDF, khoảng 1,1 GB) | `data/raw/kttv/` — **không commit** |
+| Nạp dữ liệu | `pipelines/ingest/`: parser bản tin KTTV, địa giới cũ/mới, danh mục trạm |
+| Dữ liệu tệp | `data/admin_units/` (địa giới gốc), `data/manifest.yaml` |
+| Thư viện chung | `packages/vngis`: `locks` (Redlock, fencing token), `text` (chuẩn hóa tên) |
+| API | `apps/api`: bản tối giản `/health`, `/stations`, `/lock/{resource}` |
+| Hạ tầng | `infra/compose/` (profile `ha`, `spark`, `shard`), `infra/scripts/migrate-data.ps1` |
+| Tài liệu | `docs/data/` (schema, dữ liệu KTTV), `docs/decisions/` (ADR 0001–0004), đề cương và checklist trong `docs/private/proposal/` |
 
-Database `vietnam_gis` hiện có 9 collection dữ liệu (bản tin KTTV, PDF gốc, MERIT, OSM, trạm, địa giới). Chi tiết sẽ ở `docs/data/vietnam_gis_schema.md`.
+Chưa có: Spark, R, PhaseGNN, worker, web, migration, schema JSON, thực nghiệm. PDF bản tin KTTV (khoảng 1,1 GB) để ngoài repo, đặt vào `data/raw/kttv/` khi cần chạy lại parser (không commit).
+
+Database `vietnam_gis` hiện có 8 collection dữ liệu: `hydromet_bulletins`, `hydromet_bulletin_files`, `merit_river_reaches`, `waterways_segments`, `stations`, `admin_units`, `admin_unit_mappings`, `province_timeline`. Chi tiết: [docs/data/vietnam_gis_schema.md](docs/data/vietnam_gis_schema.md).
 
 ---
 

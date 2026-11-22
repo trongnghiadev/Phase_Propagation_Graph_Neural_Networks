@@ -1,0 +1,398 @@
+# =============================================================================
+# Cụm phân tán GIẢ LẬP trên một máy cho đề tài:
+#   Hệ thống quản lý dữ liệu phân tán tích hợp dự báo đỉnh mực nước trên mạng
+#   lưới sông Việt Nam bằng mạng nơ-ron đồ thị lan truyền pha
+#
+# Profiles (bật theo kịch bản, xem infra/compose/README.md):
+#   ha     Kịch bản A – chịu lỗi: MongoDB replica set 3 node, Redis Sentinel,
+#          3 node Redis cho Redlock, 3 API sau Nginx, mongo-express
+#   spark  Spark standalone: 1 master + N worker (--scale spark-worker=N)
+#   shard  Kịch bản B – mở rộng: MongoDB sharded cluster (config + 2 shard + mongos)
+#
+#   docker compose -f infra/compose/docker-compose.yml --profile ha up -d --build
+#   docker compose -f infra/compose/docker-compose.yml --profile spark up -d --scale spark-worker=2
+#   docker compose -f infra/compose/docker-compose.yml --profile shard up -d
+#
+# Cổng dùng riêng, KHÔNG trùng cụm cũ (spark-mongodb-gis: 27017, 8080, 8081, 7077)
+# nên chạy song song được trong lúc chuyển dữ liệu:
+#   MongoDB rs0      mongo1:27101  mongo2:27102  mongo3:27103
+#   mongos (shard)   localhost:27200
+#   Redis cache      localhost:6380 (master ban đầu), Sentinel 26381-26383
+#   Redis lock       localhost:6391-6393
+#   Nginx → API      http://localhost:8088
+#   mongo-express    http://localhost:8082
+#   Spark master UI  http://localhost:8090   (spark://localhost:7078)
+#
+# Môi trường dev: KHÔNG bật xác thực MongoDB/Redis. Không mở các cổng này ra mạng ngoài.
+# =============================================================================
+
+name: gis-dist
+
+x-mongo-node: &mongo-node
+  image: mongo:8.0
+  restart: unless-stopped
+  profiles: ["ha"]
+  cpus: 1.0
+  mem_limit: 1g
+  networks: [gisnet]
+
+x-redis-small: &redis-small
+  image: redis:7.4-alpine
+  restart: unless-stopped
+  profiles: ["ha"]
+  cpus: 0.25
+  networks: [gisnet]
+
+x-api: &api
+  build:
+    context: ../..                    # gốc repo: cần packages/vngis
+    dockerfile: apps/api/Dockerfile
+  image: gis-dist-api:local
+  restart: unless-stopped
+  profiles: ["ha"]
+  cpus: 0.5
+  mem_limit: 256m
+  environment: &api-env
+    TZ: Asia/Ho_Chi_Minh
+    MONGO_URI: mongodb://mongo1:27101,mongo2:27102,mongo3:27103/?replicaSet=rs0&w=majority&readConcernLevel=majority
+    MONGO_DB: vietnam_gis
+    REDIS_SENTINELS: sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
+    REDIS_SENTINEL_MASTER: cache
+    REDIS_LOCK_NODES: redis-lock-1:6379,redis-lock-2:6379,redis-lock-3:6379
+  depends_on:
+    mongo-init:
+      condition: service_completed_successfully
+    sentinel-1:
+      condition: service_started
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health/live',timeout=3)"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+  networks: [gisnet]
+
+x-spark: &spark
+  image: gis-spark:local          # image có sẵn MongoDB Spark Connector (dự án tienxuly)
+  restart: unless-stopped
+  profiles: ["spark"]
+  environment: &spark-env
+    TZ: Asia/Ho_Chi_Minh
+    SPARK_MASTER_HOST: spark-master
+    SPARK_LOCAL_DIRS: /tmp/spark-local
+    PYSPARK_PYTHON: /usr/bin/python3
+    PYSPARK_DRIVER_PYTHON: /usr/bin/python3
+    # Kịch bản A đọc từ secondary; kịch bản B đổi sang mongodb://mongos:27200
+    MONGODB_URI: mongodb://mongo1:27101,mongo2:27102,mongo3:27103/?replicaSet=rs0&readPreference=secondaryPreferred
+    MONGODB_DB: vietnam_gis
+  volumes:
+    - ../..:/opt/spark/work/project:ro
+  networks: [gisnet]
+
+services:
+  # ===========================================================================
+  # KỊCH BẢN A (profile "ha") – MongoDB replica set rs0
+  # Mỗi node nghe cùng một cổng bên trong và bên ngoài container, để tên host
+  # replica set công bố (mongo1:27101...) dùng được cả trong Docker lẫn trên Windows
+  # (cần thêm "127.0.0.1 mongo1 mongo2 mongo3" vào file hosts của Windows).
+  # ===========================================================================
+  mongo1:
+    <<: *mongo-node
+    container_name: gis-dist-mongo1
+    hostname: mongo1
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27101", "--wiredTigerCacheSizeGB", "0.5"]
+    ports: ["27101:27101"]
+    volumes: ["mongo1-data:/data/db", "mongo1-config:/data/configdb"]
+    healthcheck: &mongo-health
+      test: ["CMD-SHELL", "mongosh --quiet --port $${MONGO_PORT} --eval 'db.adminCommand({ping:1}).ok' | grep -q 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    environment: { MONGO_PORT: "27101" }
+
+  mongo2:
+    <<: *mongo-node
+    container_name: gis-dist-mongo2
+    hostname: mongo2
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27102", "--wiredTigerCacheSizeGB", "0.5"]
+    ports: ["27102:27102"]
+    volumes: ["mongo2-data:/data/db", "mongo2-config:/data/configdb"]
+    healthcheck: *mongo-health
+    environment: { MONGO_PORT: "27102" }
+
+  mongo3:
+    <<: *mongo-node
+    container_name: gis-dist-mongo3
+    hostname: mongo3
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27103", "--wiredTigerCacheSizeGB", "0.5"]
+    ports: ["27103:27103"]
+    volumes: ["mongo3-data:/data/db", "mongo3-config:/data/configdb"]
+    healthcheck: *mongo-health
+    environment: { MONGO_PORT: "27103" }
+
+  # Khởi tạo replica set một lần (idempotent), rồi thoát
+  mongo-init:
+    image: mongo:8.0
+    container_name: gis-dist-mongo-init
+    profiles: ["ha"]
+    restart: "no"
+    depends_on:
+      mongo1: { condition: service_healthy }
+      mongo2: { condition: service_healthy }
+      mongo3: { condition: service_healthy }
+    volumes: ["./mongo:/scripts:ro"]
+    command: ["mongosh", "--quiet", "--host", "mongo1", "--port", "27101", "/scripts/init-rs.js"]
+    networks: [gisnet]
+
+  # ---------------------------------------------------------------------------
+  # Redis cache: master + replica, chuyển dự phòng bằng 3 Sentinel (quorum 2)
+  # ---------------------------------------------------------------------------
+  redis-cache:
+    <<: *redis-small
+    container_name: gis-dist-redis-cache
+    hostname: redis-cache
+    mem_limit: 320m
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru",
+              "--save", "", "--appendonly", "no", "--replica-announce-ip", "redis-cache"]
+    ports: ["6380:6379"]
+
+  redis-cache-replica:
+    <<: *redis-small
+    container_name: gis-dist-redis-cache-replica
+    hostname: redis-cache-replica
+    mem_limit: 320m
+    depends_on: [redis-cache]
+    command: ["redis-server", "--replicaof", "redis-cache", "6379", "--maxmemory", "256mb",
+              "--maxmemory-policy", "allkeys-lru", "--save", "", "--appendonly", "no",
+              "--replica-announce-ip", "redis-cache-replica"]
+
+  sentinel-1: &sentinel
+    <<: *redis-small
+    container_name: gis-dist-sentinel-1
+    hostname: sentinel-1
+    mem_limit: 64m
+    depends_on: [redis-cache, redis-cache-replica]
+    volumes: ["./redis/sentinel.conf:/etc/redis/sentinel.conf.tpl:ro"]
+    # Sentinel ghi lại file cấu hình khi chuyển master, nên chép ra bản ghi được
+    command: ["sh", "-c", "cp /etc/redis/sentinel.conf.tpl /data/sentinel.conf && exec redis-sentinel /data/sentinel.conf"]
+    ports: ["26381:26379"]
+
+  sentinel-2:
+    <<: *sentinel
+    container_name: gis-dist-sentinel-2
+    hostname: sentinel-2
+    ports: ["26382:26379"]
+
+  sentinel-3:
+    <<: *sentinel
+    container_name: gis-dist-sentinel-3
+    hostname: sentinel-3
+    ports: ["26383:26379"]
+
+  # ---------------------------------------------------------------------------
+  # 3 node Redis ĐỘC LẬP cho Redlock (không replica, không persistence)
+  # ---------------------------------------------------------------------------
+  redis-lock-1: &redis-lock
+    <<: *redis-small
+    container_name: gis-dist-redis-lock-1
+    hostname: redis-lock-1
+    mem_limit: 96m
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "noeviction",
+              "--save", "", "--appendonly", "no"]
+    ports: ["6391:6379"]
+
+  redis-lock-2:
+    <<: *redis-lock
+    container_name: gis-dist-redis-lock-2
+    hostname: redis-lock-2
+    ports: ["6392:6379"]
+
+  redis-lock-3:
+    <<: *redis-lock
+    container_name: gis-dist-redis-lock-3
+    hostname: redis-lock-3
+    ports: ["6393:6379"]
+
+  # ---------------------------------------------------------------------------
+  # 3 instance API (FastAPI) + Nginx cân bằng tải
+  # ---------------------------------------------------------------------------
+  api-1:
+    <<: *api
+    container_name: gis-dist-api-1
+    hostname: api-1
+    environment: { <<: *api-env, INSTANCE: api-1 }
+
+  api-2:
+    <<: *api
+    container_name: gis-dist-api-2
+    hostname: api-2
+    environment: { <<: *api-env, INSTANCE: api-2 }
+
+  api-3:
+    <<: *api
+    container_name: gis-dist-api-3
+    hostname: api-3
+    environment: { <<: *api-env, INSTANCE: api-3 }
+
+  nginx:
+    image: nginx:1.27.5-alpine
+    container_name: gis-dist-nginx
+    restart: unless-stopped
+    profiles: ["ha"]
+    cpus: 0.25
+    mem_limit: 64m
+    depends_on: [api-1, api-2, api-3]
+    volumes: ["./nginx/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    ports: ["8088:80"]
+    networks: [gisnet]
+
+  mongo-express:
+    image: mongo-express:1.0.2
+    container_name: gis-dist-mongo-express
+    restart: unless-stopped
+    profiles: ["ha"]
+    mem_limit: 128m
+    depends_on:
+      mongo-init: { condition: service_completed_successfully }
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://mongo1:27101,mongo2:27102,mongo3:27103/?replicaSet=rs0
+      ME_CONFIG_MONGODB_ENABLE_ADMIN: "false"
+      ME_CONFIG_BASICAUTH: "false"
+      ME_CONFIG_OPTIONS: "--jsonMode=loose"
+    ports: ["8082:8081"]
+    networks: [gisnet]
+
+  # ===========================================================================
+  # Spark standalone (profile "spark"): 1 master + N worker
+  #   --scale spark-worker=1|2|3
+  # ===========================================================================
+  spark-master:
+    <<: *spark
+    container_name: gis-dist-spark-master
+    hostname: spark-master
+    cpus: 0.5
+    mem_limit: 768m
+    environment: { <<: *spark-env, SPARK_DAEMON_MEMORY: "512m" }
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master",
+              "--host", "spark-master", "--port", "7077", "--webui-port", "8080"]
+    ports: ["8090:8080", "7078:7077"]
+
+  spark-worker:
+    <<: *spark
+    cpus: 2.0
+    mem_limit: 2g
+    depends_on: [spark-master]
+    environment: { <<: *spark-env, SPARK_WORKER_MEMORY: "1536m", SPARK_WORKER_CORES: "2" }
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker",
+              "spark://spark-master:7077", "--cores", "2", "--memory", "1536m"]
+
+  # ===========================================================================
+  # KỊCH BẢN B (profile "shard") – MongoDB sharded cluster
+  # Mỗi shard là replica set 1 node (đủ để minh họa mở rộng, KHÔNG minh họa chịu lỗi).
+  # ===========================================================================
+  cfg1:
+    image: mongo:8.0
+    container_name: gis-dist-cfg1
+    hostname: cfg1
+    restart: unless-stopped
+    profiles: ["shard"]
+    cpus: 0.5
+    mem_limit: 512m
+    command: ["mongod", "--configsvr", "--replSet", "cfgrs", "--bind_ip_all", "--port", "27201",
+              "--wiredTigerCacheSizeGB", "0.25"]
+    volumes: ["cfg1-data:/data/configdb"]
+    healthcheck:
+      <<: *mongo-health
+    environment: { MONGO_PORT: "27201" }
+    networks: [gisnet]
+
+  shard1:
+    image: mongo:8.0
+    container_name: gis-dist-shard1
+    hostname: shard1
+    restart: unless-stopped
+    profiles: ["shard"]
+    cpus: 1.0
+    mem_limit: 1g
+    command: ["mongod", "--shardsvr", "--replSet", "sh1", "--bind_ip_all", "--port", "27211",
+              "--wiredTigerCacheSizeGB", "0.5"]
+    volumes: ["shard1-data:/data/db"]
+    healthcheck:
+      <<: *mongo-health
+    environment: { MONGO_PORT: "27211" }
+    networks: [gisnet]
+
+  shard2:
+    image: mongo:8.0
+    container_name: gis-dist-shard2
+    hostname: shard2
+    restart: unless-stopped
+    profiles: ["shard"]
+    cpus: 1.0
+    mem_limit: 1g
+    command: ["mongod", "--shardsvr", "--replSet", "sh2", "--bind_ip_all", "--port", "27212",
+              "--wiredTigerCacheSizeGB", "0.5"]
+    volumes: ["shard2-data:/data/db"]
+    healthcheck:
+      <<: *mongo-health
+    environment: { MONGO_PORT: "27212" }
+    networks: [gisnet]
+
+  # Khởi tạo 3 replica set (cfgrs, sh1, sh2), idempotent
+  shard-rs-init:
+    image: mongo:8.0
+    container_name: gis-dist-shard-rs-init
+    profiles: ["shard"]
+    restart: "no"
+    depends_on:
+      cfg1: { condition: service_healthy }
+      shard1: { condition: service_healthy }
+      shard2: { condition: service_healthy }
+    volumes: ["./mongo:/scripts:ro"]
+    command: ["sh", "/scripts/init-shard-rs.sh"]
+    networks: [gisnet]
+
+  mongos:
+    image: mongo:8.0
+    container_name: gis-dist-mongos
+    hostname: mongos
+    restart: unless-stopped
+    profiles: ["shard"]
+    cpus: 0.5
+    mem_limit: 384m
+    depends_on:
+      shard-rs-init: { condition: service_completed_successfully }
+    command: ["mongos", "--configdb", "cfgrs/cfg1:27201", "--bind_ip_all", "--port", "27200"]
+    ports: ["27200:27200"]
+    healthcheck:
+      <<: *mongo-health
+    environment: { MONGO_PORT: "27200" }
+    networks: [gisnet]
+
+  # Thêm shard, bật sharding, tạo collection phân mảnh (idempotent)
+  shard-init:
+    image: mongo:8.0
+    container_name: gis-dist-shard-init
+    profiles: ["shard"]
+    restart: "no"
+    depends_on:
+      mongos: { condition: service_healthy }
+    volumes: ["./mongo:/scripts:ro"]
+    command: ["mongosh", "--quiet", "--host", "mongos", "--port", "27200", "/scripts/init-shard.js"]
+    networks: [gisnet]
+
+volumes:
+  mongo1-data:
+  mongo1-config:
+  mongo2-data:
+  mongo2-config:
+  mongo3-data:
+  mongo3-config:
+  cfg1-data:
+  shard1-data:
+  shard2-data:
+
+networks:
+  gisnet:
+    name: gis-dist-net
+    driver: bridge

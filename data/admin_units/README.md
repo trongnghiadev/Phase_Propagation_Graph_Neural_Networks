@@ -11,4 +11,4 @@
 
 Nguồn: https://provinces.open-api.vn/ (tải 22/11/2026). sha256 ghi trong `data/manifest.yaml`.
 
-**Hiện trạng:** các file đang ở `bigdatanckh/data/admin_units/`, chưa chép vào đây.
+Tải lại: `python -X utf8 pipelines/ingest/admin_units/fetch_admin_units.py` (có resume). Nạp vào MongoDB: `python -X utf8 pipelines/ingest/admin_units/create_admin_units.py [mongodb_uri]`.

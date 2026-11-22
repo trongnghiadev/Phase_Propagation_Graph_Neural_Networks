@@ -1,0 +1,6 @@
+# Chép file này thành %USERPROFILE%\.wslconfig rồi chạy "wsl --shutdown" và mở lại Docker Desktop.
+# Máy 16 GB RAM: cấp 10 GB cho Docker (WSL2), để lại khoảng 6 GB cho Windows.
+[wsl2]
+memory=10GB
+processors=8
+swap=4GB

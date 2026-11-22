@@ -9,3 +9,6 @@
 *.pdf binary
 *.png binary
 *.parquet binary
+# Dữ liệu: giữ nguyên từng byte để sha256 trong data/manifest.yaml luôn khớp
+data/**/*.json  -text
+data/**/*.jsonl -text

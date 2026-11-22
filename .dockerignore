@@ -1,0 +1,12 @@
+# Build context là gốc repo: loại phần lớn, chỉ cần packages/ và apps/
+.git
+docs
+data
+results
+research
+infra/backup
+**/__pycache__
+**/node_modules
+**/.venv
+*.archive
+*.parquet

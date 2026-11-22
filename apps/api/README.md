@@ -13,4 +13,10 @@
 
 **Phiên bản API:** mọi đường dẫn có tiền tố `/api/v1`. Thay đổi phá vỡ thì tạo `/api/v2`, giữ v1 tới khi frontend chuyển xong. Ảnh chụp hợp đồng: `docs/api/openapi-v1.json`.
 
-**Hiện trạng:** bản tối giản (`/health`, `/stations`, `/lock/{resource}`) đang ở `bigdatanckh/backend/`, chưa chuyển vào đây.
+**Hiện trạng:** bản tối giản ở `src/api/main.py`: `/health/live`, `/health`, `/stations`, `/lock/{resource}` (chưa có tiền tố `/api/v1`). Khóa phân tán và fencing token dùng `vngis.locks`.
+
+**Build:** từ gốc repo, vì image cần cả `packages/vngis`:
+
+```powershell
+docker build -f apps/api/Dockerfile -t gis-dist-api:local .
+```

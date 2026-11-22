@@ -1,0 +1,9 @@
+{
+ "source": "https://provinces.open-api.vn",
+ "fetched_at": "2026-11-22T06:05:13.804158+00:00",
+ "files": {
+  "v1_depth3.json": "/api/v1/?depth=3",
+  "v2_depth2.json": "/api/v2/?depth=2",
+  "v2_to_legacies.jsonl": "/api/v2/w/{code}/to-legacies/"
+ }
+}

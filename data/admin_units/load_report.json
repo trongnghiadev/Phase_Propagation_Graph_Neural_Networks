@@ -1,0 +1,38 @@
+{
+ "units": {
+  "before_2025_07/district": 696,
+  "before_2025_07/province": 63,
+  "before_2025_07/ward": 10051,
+  "from_2025_07/province": 34,
+  "from_2025_07/ward": 3321
+ },
+ "mapping_pairs": 10554,
+ "new_wards_with_mapping": 3316,
+ "new_wards_without_mapping": [
+  11948,
+  19742,
+  20333,
+  21548,
+  26732
+ ],
+ "old_wards_mapped": 10023,
+ "old_wards_total": 10051,
+ "old_wards_split": 440,
+ "legacy_codes_not_in_v1": [],
+ "old_provinces_split": {},
+ "timeline": {
+  "provinces": 97,
+  "new_unchanged": 11,
+  "new_merged": 23,
+  "same_code_different_name": [
+   "15: Tỉnh Yên Bái → Tỉnh Lào Cai",
+   "24: Tỉnh Bắc Giang → Tỉnh Bắc Ninh",
+   "44: Tỉnh Quảng Bình → Tỉnh Quảng Trị",
+   "52: Tỉnh Bình Định → Tỉnh Gia Lai",
+   "80: Tỉnh Long An → Tỉnh Tây Ninh",
+   "82: Tỉnh Tiền Giang → Tỉnh Đồng Tháp",
+   "91: Tỉnh Kiên Giang → Tỉnh An Giang"
+  ]
+ },
+ "loaded_at": "2026-11-22T06:05:20.526421+00:00"
+}
