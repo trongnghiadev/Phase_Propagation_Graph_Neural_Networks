@@ -4,7 +4,7 @@
 
 | Nội dung | Mô tả |
 |---|---|
-| `default.yaml` | Cấu hình mặc định (`config_version: 1`): MongoDB (URI, database `vietnam_gis`, tên collection), Redis cache/khóa, mốc địa giới `2025-06-30T17:00:00Z` (= 01/07/2025 00:00 giờ Việt Nam), giới hạn "đổi tên chậm" của nhãn tỉnh `admin.max_label_lag_days` (31 ngày), bán kính gán trạm 3000 m, gốc cây MERIT 44045960, ngưỡng uparea, TTL cache cơ bản, scheduler |
+| `default.yaml` | Cấu hình mặc định (`config_version: 1`): MongoDB (URI, database `vietnam_gis`, tên collection), Redis cache/khóa, mốc địa giới `2025-06-30T17:00:00Z` (= 01/07/2025 00:00 giờ Việt Nam), giới hạn "đổi tên chậm" của nhãn tỉnh `admin.max_label_lag_days` (31 ngày), bán kính gán trạm 3000 m, gốc cây MERIT 44045960, ngưỡng uparea, TTL cache cơ bản, scheduler, tham số QC bản tin `qc` (R1–R3, `rules_version`, `audit_pending_grace_s`; bản sao `vngis.qc_rules.DEFAULT_PARAMS` cho job Spark, test giữ khớp) |
 | `stations.yaml` | **Tọa độ ước lượng** (chưa chính thức) của trạm mực nước, hồ chứa, trạm mưa và tỉnh cũ/mới của trạm; đọc bởi `pipelines/ingest/stations/create_stations.py` qua `vngis.config.load_stations_catalog` (thiếu khóa, sai kiểu → dừng, báo theo đường dẫn khóa) |
 | [`env/`](env/) | Ghi đè theo môi trường: `dev`, `test`, `cluster` |
 

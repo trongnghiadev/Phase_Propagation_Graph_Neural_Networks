@@ -1,0 +1,4 @@
+station,n_days,mean_peak_m,max_peak_m,n_exceed_I,n_exceed_II,n_exceed_III,n_days_with_threshold
+PHU_AN,3585,1.2289,1.78,496,362,212,3585
+NHA_BE,2406,1.238,1.78,320,191,123,2406
+THU_DAU_MOT,474,1.3863,1.88,70,66,96,474

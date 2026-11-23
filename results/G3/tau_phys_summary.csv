@@ -1,0 +1,3 @@
+dir,n_edges,tau_min_h,tau_median_h,tau_max_h,tau_sum_h,celerity_min_ms,celerity_median_ms,celerity_max_ms
+down,645,0.005087,0.460949,12.752609,650.203567,0.412546,4.939770,8.000000
+up,646,0.071679,2.301906,50.579065,3355.798310,0.300000,0.555212,4.827239

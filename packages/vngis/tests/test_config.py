@@ -20,6 +20,10 @@ DEFAULT = {
     "admin": {"effective_utc": "2025-06-30T17:00:00Z", "eras": ["before_2025_07", "from_2025_07"]},
     "stations": {"snap_radius_m": 3000, "basin_root_comid": 44045960},
     "cache": {"ttl_s": {"stats": 86400}},
+    "qc": {"rules_version": 1, "reference_station": "VUNG_TAU",
+           "r1": {"p_low": 0.001, "p_high": 0.999, "margin": 0.1, "physical_m": {"default": [-3.5, 3.5]}},
+           "r2": {"min_gap_m": 0.0},
+           "r3": {"max_ref_gap_h": 14.0, "iqr_k": 3.0, "min_dev_h": 3.0, "min_samples": 100}},
 }
 
 

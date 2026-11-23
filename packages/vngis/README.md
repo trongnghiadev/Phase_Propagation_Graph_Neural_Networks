@@ -11,12 +11,14 @@
 | `admin.py` | **đã có** | `BEFORE`, `FROM`, `EFFECTIVE_UTC`; `era_of(dt)`, `find_province(db, era, label)`, `province_at(db, dt)`, `successor_of(db, old_code)` trên `province_timeline` |
 | `province_labels.py` | **đã có** | gán `{era, code}` cho nhãn tỉnh trong bản tin (hồ chứa): thời kỳ theo ngày quan trắc, quy tắc "đổi tên chậm" giới hạn `admin.max_label_lag_days`. Dùng chung cho `create_stations.py` và job G0 |
 | `bulletins.py` | **đã có** | `duplicate_exclusions`: bản tin chính trùng sha256 → bản bị loại (G0 và `create_stations.py`) |
+| `qc_rules.py` | **đã có** | QC bản tin, thuần Python: quy tắc R1–R3 (`r1_check`, `r2_check`, `r3_check`, `evaluate_group`), `DEFAULT_PARAMS` (= `config/default.yaml` mục `qc`), khóa cờ `flag_id`, `effective` (giá trị sau quyết định), `plan_updates` (gộp kết quả quy tắc vào `qc_flags`, không đụng field quyết định), validator/index của `qc_flags`, `audit_logs`. Dùng ở job Spark QC và G0 |
+| `qc.py` | **đã có** | ghi quyết định QC có kiểm toán (pymongo): `decide` (`find_one_and_update` có điều kiện `version`, `VersionConflict`), `create_manual_flag`, `update_bulletin_fields` (metadata bản tin được phép, điều kiện giá trị cũ), `record_review`, `reconcile_pending`, `ensure_collections`. Dùng ở CLI `pipelines/qc/qc_decide.py`, API về sau |
 | `cache.py` | dự kiến | cache-aside, khóa cache theo phiên bản, chống stampede (TTL đã có trong `config/default.yaml`, mục `cache`) |
 | `models/` | dự kiến | pydantic: `Station`, `TideExtreme`, `Forecast`… khớp `schemas/` |
 
 Cấu trúc: `src/vngis/`, `tests/`, `pyproject.toml`. Phụ thuộc: pymongo, redis, pydantic, pyyaml.
 
-**Phần thuần Python** (chỉ thư viện chuẩn khi chạy): `text`, `admin`, `province_labels`, `bulletins`. Job Spark (image không có pymongo/pydantic/pyyaml, Python 3.10) chỉ import các module này, qua `--py-files` hoặc thêm `packages/vngis/src` vào `sys.path` (`pipelines/spark/common/__init__.py`). Test `test_province_labels.py` kiểm tra điều này.
+**Phần thuần Python** (chỉ thư viện chuẩn khi chạy): `text`, `admin`, `province_labels`, `bulletins`, `qc_rules` (danh sách `qc_rules.PURE_MODULES`; `pipelines/spark/common/pyfiles.ship_vngis` chỉ gửi các module này sang executor; test `test_module_thuan_khong_can_pymongo_pydantic_yaml` import chúng khi chặn pymongo/pydantic/yaml/redis). Job Spark (image không có pymongo/pydantic/pyyaml, Python 3.10) chỉ import các module này, qua `--py-files` hoặc thêm `packages/vngis/src` vào `sys.path` (`pipelines/spark/common/__init__.py`). Test `test_province_labels.py` kiểm tra điều này.
 
 ## Cấu hình (`vngis.config`)
 
@@ -62,6 +64,42 @@ runs = assign_runs([(observation_date, "Tây Ninh"), ...], timeline, max_lag_day
 
 `vngis.bulletins.duplicate_exclusions`: chọn bản tin bỏ đi khi nhiều bản tin chính trùng sha256 (dùng chung cho G0 và `create_stations.py`).
 
+## QC (`vngis.qc_rules`, `vngis.qc`)
+
+```python
+from vngis.db import get_db
+from vngis import qc
+db = get_db()
+f = qc.get_flag(db, qc.flag_id("BIEN_HOA", "high", ts))      # _id = "tide_extremes:BIEN_HOA:high:<ts UTC ISO>"
+qc.decide(db, f["_id"], "rejected", reason="…", decided_by="…", expected_version=f["version"])
+```
+
+- `qc_flags`: một document cho mỗi phần tử bị gắn cờ, `_id` ổn định theo (collection, station, kind, ts); field
+  `value` (giá trị gốc lúc gắn cờ), `decided_value` (giá trị quyết định đang gắn vào), `current_value` (giá trị gốc mới
+  phát hiện khi lệch), `value_mismatch`, `rules` [{rule, detail, metric}], `origin` (`auto`/`manual`), `status`
+  (`suspect`/`confirmed_ok`/`rejected`/`corrected`), `corrected_value`, `reason`, `decided_by`, `decided_at`,
+  `source_file`, `first_flagged_run`, `last_seen_run`, `auto_cleared`, `rules_version`, `created_at`, `updated_at`,
+  `version`, `retired`/`retired_at`/`retired_by`/`retired_reason` (cờ mồ côi). Validator: `corrected` ⇔ có
+  `corrected_value` (nhánh `corrected` bắt buộc field này).
+- Hiệu lực (`is_active`): không `retired`, và (có quyết định, hoặc cờ thủ công, hoặc suspect chưa `auto_cleared`).
+- Job tự động chỉ sửa field của quy tắc; quyết định của người không bao giờ bị ghi đè. Quy tắc không còn kích hoạt:
+  cờ `auto` chưa ai xem thì xóa, còn lại đặt `auto_cleared: true`; cờ `retired` không bị đụng.
+- `audit_logs`: `at`, `actor`, `action` (`qc_decision`, `qc_flag_create`, `qc_flag_retire`, `bulletin_metadata`,
+  `review_confirmed`), `collection`, `doc_id`, `target`, `before`/`after` (status, giá trị hiệu lực…; với bản tin là
+  từng field), `reason`, `state`.
+- Mọi lệnh ghi dùng chung `_audited`, write concern `majority`: replica set/mongos thì ghi dữ liệu và audit trong một
+  transaction; một node thì audit `pending` → ghi có điều kiện → `applied` (điều kiện `{_id, state: "pending"}`,
+  không khớp → `AuditStateError`). Chắc chắn không ghi được (điều kiện không khớp, trùng khóa) → xóa pending, ném
+  `VersionConflict`/`FieldConflict`/`FlagExists`; lỗi mơ hồ (mạng, timeout) → giữ pending. `reconcile_pending(db,
+  grace_s)` chỉ xử lý bản pending cũ hơn `grace_s` (`qc.audit_pending_grace_s`, 600 s) và so NỘI DUNG theo `action`.
+- `update_bulletin_fields` kiểm tra kiểu: `source.is_primary` bool, `bulletin_date` datetime có múi giờ, `weekday`,
+  `qc_note` chuỗi hoặc null (sai → `ValueError`).
+- **Đường thoát cho cờ `value_mismatch`:** khi giá trị gốc đổi sau khi đã quyết định, G0/job QC gắn `value_mismatch:
+  true` và `current_value`. Người xem **quyết định lại** (`qc.decide`): quyết định gắn vào `decided_value`, `value` giữ
+  nguyên làm mốc lúc gắn cờ, `current_value` giữ lại làm giá trị đã thấy, `value_mismatch` đặt `false`. Job QC lần sau
+  so giá trị gốc hiện tại với `decided_value`, nên khi G0 chưa kịp cập nhật `tide_extremes` thì không gắn lại mismatch
+  vô hạn (cờ không mắc kẹt). Chi tiết: `pipelines/qc/README.md`.
+
 ## Test
 
 ```powershell
@@ -69,4 +107,5 @@ docker run --rm -v "<gốc repo>:/repo" -w /repo python:3.12-slim sh -c "pip -q 
 ```
 
 - Không cần Redis thật (`test_locks.py` dùng client giả).
+- `test_qc.py` tạo database tạm `vngis_test_qc_<hex>` rồi xóa (không ghi vào `vietnam_gis`); gồm test xung đột version (6 luồng ghi cùng version, chỉ 1 thắng), lỗi mơ hồ giữ pending, `reconcile_pending` cho 3 loại action và ngưỡng grace, kiểu field bản tin, `retire`.
 - Test đánh dấu `mongo` cần MongoDB có `province_timeline` (chỉ đọc); tự bỏ qua khi không kết nối được. Chọn server bằng `VNGIS_TEST_MONGO_URI` (mặc định `mongodb://localhost:27017`) và `VNGIS_TEST_MONGO_DB` (mặc định `vietnam_gis`); chạy trong container thì thêm `--network <mạng của MongoDB>` và `-e VNGIS_TEST_MONGO_URI=mongodb://<host>:27017`.

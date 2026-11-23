@@ -1,0 +1,14 @@
+qc,qc_flag,n
+ok,(null),121337
+not_occurred,(null),4105
+missing,(null),3391
+ok,suspect,343
+no_data,(null),86
+no_value,(null),75
+ok,confirmed_ok,35
+bad_time,(null),22
+duplicate_time,(null),13
+excel_error,(null),9
+unparseable,(null),2
+not_occurred,confirmed_ok,1
+rejected,rejected,1

@@ -147,3 +147,33 @@ def parse_iso_utc(s: str) -> datetime:
     dt = datetime.fromisoformat(base + ("." + (frac + "000000")[:6] if frac else "")
                                 + ("+00:00" if tz in (None, "Z") else tz))
     return dt.astimezone(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# QC: cờ mồ côi, G0 dở dang (thuần Python, dùng ở G0 và job QC)
+# ---------------------------------------------------------------------------
+def classify_unmatched(flags: list[dict], unmatched_ids: set[str]) -> tuple[list[dict], list[dict]]:
+    """Cờ có hiệu lực mà phần tử không còn trong `tide_extremes` (ví dụ đổi bản chính) → (bỏ qua, chặn).
+
+    Bỏ qua (G0 cảnh báo, không áp; job QC xóa ở lần chạy sau): cờ `auto` chưa ai xem (`qc_rules.is_decided` sai).
+    Chặn (G0 dừng mã 1): cờ đã có quyết định hoặc cờ thủ công – người phải xem rồi `qc_decide.py retire`.
+    """
+    from vngis.qc_rules import is_decided
+    skip, block = [], []
+    for f in flags:
+        if f["_id"] not in unmatched_ids:
+            continue
+        (skip if f.get("origin", "auto") == "auto" and not is_decided(f) else block).append(f)
+    return skip, block
+
+
+def g0_unsettled(jobs: list[dict], prevs: list[str]) -> str | None:
+    """Lý do G0 còn dở thay thế (job QC phải dừng, mã 4), hoặc None: còn `<tên>__prev`, hoặc có run G0
+    `failed`/`running` đã thay (`replaced`/`replacing`) sau lần `ok` gần nhất."""
+    if prevs:
+        return f"còn bản sao lưu {prevs} của G0 (đang chạy hoặc hỏng giữa chừng)"
+    bad = pending_rollback(jobs, "", True)
+    if bad:
+        return (f"run G0 {bad['_id']} (status {bad.get('status')}) đã thay {bad.get('replaced') or bad.get('replacing')} "
+                f"rồi dừng giữa chừng sau lần ok gần nhất")
+    return None

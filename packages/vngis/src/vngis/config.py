@@ -196,6 +196,44 @@ class StationsConfig(_Model):
     min_uparea_km2: dict[str, PositiveFloat] = {}
 
 
+class QcR1Config(_Model):
+    p_low: float = Field(ge=0, le=1)
+    p_high: float = Field(ge=0, le=1)
+    margin: float = Field(ge=0)
+    physical_m: dict[str, tuple[float, float]] = {}
+
+    @model_validator(mode="after")
+    def _check(self) -> "QcR1Config":
+        if self.p_low >= self.p_high:
+            raise ValueError("p_low phải nhỏ hơn p_high")
+        bad = [k for k, (lo, hi) in self.physical_m.items() if lo >= hi]
+        if bad:
+            raise ValueError(f"physical_m: min phải nhỏ hơn max ({bad})")
+        return self
+
+
+class QcR2Config(_Model):
+    min_gap_m: float = Field(0.0, ge=0)
+
+
+class QcR3Config(_Model):
+    max_ref_gap_h: PositiveFloat
+    iqr_k: float = Field(ge=0)
+    min_dev_h: float = Field(ge=0)
+    min_samples: PositiveInt
+    min_ref_peaks_per_day: int = Field(0, ge=0, le=4)
+
+
+class QcConfig(_Model):
+    """Tham số QC bản tin (`vngis.qc_rules`); job Spark dùng bản sao `DEFAULT_PARAMS` (test giữ khớp)."""
+    rules_version: PositiveInt
+    reference_station: str = Field(min_length=1)
+    r1: QcR1Config
+    r2: QcR2Config
+    r3: QcR3Config
+    audit_pending_grace_s: PositiveInt = 600
+
+
 class CacheConfig(_Model):
     ttl_s: dict[str, PositiveInt]
     jitter: float = Field(0.1, ge=0, le=0.5)
@@ -216,6 +254,7 @@ class Config(_Model):
     admin: AdminConfig
     stations: StationsConfig
     cache: CacheConfig
+    qc: QcConfig
     scheduler: SchedulerConfig = SchedulerConfig()
 
     @field_validator("config_version")

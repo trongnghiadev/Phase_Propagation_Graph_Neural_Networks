@@ -16,7 +16,21 @@
 - `pipelines/ingest/stations/create_stations.py` đọc tọa độ/tham số từ `config/` qua `vngis.config`.
 - Job PySpark G0 (`pipelines/spark/flatten/`): `hydromet_bulletins` → `tide_extremes` (time series), `official_forecasts`, `reservoir_daily`, `rainfall_daily`; nạp qua staging có kiểm tra, sao lưu `__prev`, khóa `job_locks`, nhật ký `jobs`.
 
+- QC số liệu bản tin (GĐ2.3): `vngis.qc_rules` (thuần Python: quy tắc R1 ngoài khoảng hợp lý theo phân vị/ngưỡng vật lý của trạm, R2 đỉnh thấp hơn chân cùng ngày, R3 giờ đỉnh lệch so với Vũng Tàu + độ trễ điển hình; khóa cờ, gộp vào `qc_flags` không ghi đè quyết định của người; validator/index `qc_flags`, `audit_logs`); `config/default.yaml` mục `qc` và `vngis.config.QcConfig`.
+- `vngis.qc`: ghi quyết định QC có kiểm toán (`find_one_and_update` có điều kiện `version`, `VersionConflict`; `audit_logs` trong transaction hoặc pending → applied), cờ thủ công, sửa metadata bản tin được phép có điều kiện giá trị cũ, ghi lần kiểm tra tay không đổi dữ liệu.
+- CLI `pipelines/qc/qc_decide.py` (list/show/decide/flag/bulletin-set/review/ensure/reconcile).
+- Job PySpark QC `pipelines/spark/qc/qc_tide_extremes.py`: R1–R3 chạy trên executor (gửi `vngis` bằng `addPyFile`), ghi `qc_flags`, xuất `results/qc/summary.csv`, `exceedance.csv` (số ngày vượt BĐ I/II/III theo cấp báo động của chính bản tin, K9) và `results/qc/runs/<run_id>/`.
+- `pipelines/spark/common/jobrun.py` (`JobRun`: run_id, khóa `job_locks`, nhật ký `jobs`, dùng chung cho G0 và QC), `common/pyfiles.py` (`ship_vngis`); `read_mongo(options=…)`.
+
 ### Sửa
+- `vngis.qc`: mọi lệnh ghi (`decide`, `create_manual_flag`, `retire_flag`, `update_bulletin_fields`) dùng chung `_audited` với write concern `majority` (transaction khi có replica set); lỗi mơ hồ giữ audit `pending`, chỉ xóa khi chắc chắn không ghi được; đặt `applied` có điều kiện `{_id, state: "pending"}` (`AuditStateError`). `reconcile_pending` so nội dung theo `action` (`qc_decision`, `qc_flag_create`, `qc_flag_retire`, `bulletin_metadata`; trước đây luôn tra `qc_flags` nên xóa nhầm audit `bulletin_metadata`) và chỉ xử lý bản cũ hơn `qc.audit_pending_grace_s` (600 s). `update_bulletin_fields` kiểm tra kiểu từng field, xung đột báo `FieldConflict` (field, giá trị mong đợi, giá trị hiện có). Thêm `retire_flag` (cờ mồ côi).
+- Cờ `value_mismatch` có đường thoát (sửa theo ý kiến reviewer 23/11/2026): `vngis.qc.decide` gắn quyết định vào `decided_value` (giá trị người xem đã xem) và giữ `current_value` (giá trị đã thấy), `value` giữ nguyên làm mốc lúc gắn cờ; `vngis.qc_rules.plan_one` so với `decided_value` và không gắn lại mismatch khi G0 chưa kịp cập nhật `tide_extremes` (trước đây cờ mắc kẹt vô hạn, không có đường thoát); G0 so `raw_value` với `decided_value`; validator `qc_flags` thêm `decided_value`; `qc_decide.py list --mismatch`.
+- `vngis.qc_rules`: R2 chỉ gắn cặp vi phạm lớn nhất trong ngày (177 → 154 cờ R2); cờ thủ công luôn có hiệu lực, cờ `retired` hết hiệu lực và job không đụng tới; tập tham chiếu R3 bỏ đỉnh Vũng Tàu `rejected`; validator nhánh `corrected` bắt buộc `corrected_value`; `PURE_MODULES` (executor chỉ nhận module thuần).
+- G0: cờ mồ côi `auto` chưa quyết định → cảnh báo, bỏ qua (job QC xóa sau); cờ đã quyết định/thủ công mồ côi → chặn, hướng dẫn `qc_decide.py retire`; quyết định mà giá trị gốc đã đổi → không áp, `qc_flag = "value_mismatch"`.
+- Job QC dừng mã 4 khi G0 còn dở thay thế (`flatten/rules.g0_unsettled`, dùng lại `pending_rollback`).
+- CLI `qc_decide.py`: lệnh `retire`, `reconcile --grace-s`; lỗi argparse trả mã 1 (mã 2 chỉ dành cho xung đột), mã 3 khi audit không còn pending.
+- Sau kiểm tra tay K1–K6 (23/11/2026): G0 dùng 3.595 bản tin (danh sách bản trùng sha256 bị bỏ nay rỗng), `tide_extremes` 129.420 document, không còn `issued_date_note`; `stations.bulletin_rows`/`n_bulletins` đếm trên 3.595 bản tin.
+- G0: áp `qc_flags` vào `tide_extremes` (`rejected` → `value: null`; `corrected` → `corrected_value`; thêm `raw_value`, `raw_qc`, `qc_flag` cho mọi document); kiểm tra số lượng tính theo giá trị gốc và theo công thức N_src − R_num + C_null; không chạy khi job QC đang giữ khóa; `rainfall_daily` không có số và không có cờ → `flag: "missing"` (validator bắt buộc một trong hai).
 - `norm_name` chuẩn hóa NFC trước khi so tiền tố (chữ tổ hợp NFD) và gộp mọi khoảng trắng: hết `name_norm` có hai dấu cách (11 đơn vị trong `admin_units`, ví dụ "ba ria vung tau"); bỏ các bản sao trong `pipelines/ingest/*` và `pipelines/spark/common/text.py`.
 - Tỉnh của hồ chứa: so nhãn theo `norm_name`, thời kỳ theo ngày quan trắc (ADR 0003), "đổi tên chậm" chỉ khi nhãn mới xuất hiện trong `max_label_lag_days`; ngoài giới hạn không tự lùi về thời kỳ cũ; nhãn rỗng không lỗi. `stations.admin_history` của hồ Dầu Tiếng: đoạn "Tây Ninh" 01–06/07/2025 nay là Tây Ninh cũ (72), không phải 80.
 - G0: `tide_extremes.meta` chỉ `{station, kind}` (72.155 → khoảng 17–18 nghìn bucket); kiểm tra số lượng staging trước khi thay; staging có hậu tố `run_id`; `writeConcern: majority`; dùng `MONGO_URI`/`MONGO_DB`; `reservoir_daily.issued_date` nhất quán với `official_forecasts` (thêm `issued_date_note`).
@@ -31,3 +45,43 @@
 - `vngis.province_labels`: `provisional` chỉ khi bản ghi cuối < mốc + `max_label_lag_days` (không gồm đầu mút).
 - `infra/compose`: API đặt `APP_ENV: cluster`.
 - `vngis` hỗ trợ Python ≥ 3.10 (image Spark); `infra/compose` (profile spark) dùng `MONGO_URI`/`MONGO_DB`; image API chép `config/` và đặt `VNGIS_CONFIG_DIR`.
+
+### Đặc tính và phân tích (PySpark)
+
+- G1 `pipelines/spark/features/graph_build.py`: dựng đồ thị hai chiều từ cây MERIT `44045960`
+  (1.073 reach) – 645 cạnh `down` + 646 cạnh `up` (1.291 cạnh); nút ảo `SEA_VUNGTAU`; cạnh ảo hồ chứa;
+  tỉa theo `uparea ≥ 100 km²` (1.073 → 646 nút); `graph_edges` có validator `$jsonSchema` + index
+  `{src,dst,dir}` unique, `{dir,src}`, `{dst}`; ghi `data/processed/graph/{edges,nodes}.parquet`.
+- G3 `pipelines/spark/features/tau_phys.py`: τ vật lý theo cạnh – `tau_down` (Manning kinematic wave,
+  `c = 5/3 · v`) và `tau_up` (shallow water, `c = √(g·h)` trừ vận tốc dòng chảy); `slope = 0` thay bằng
+  trung vị cùng `order`, giữ `slope_raw`/`slope_used`; kẹp vận tốc, assert τ hợp lệ;
+  `results/G3/tau_phys_summary.csv` + `tau_from_sea_by_station.csv`.
+- G4 `pipelines/spark/features/rainfall_by_node.py`: mưa theo nút từ `rainfall_daily` (fallback dựa trạm
+  cho sản phẩm vệ tinh chưa có) – 10 trạm trong bán kính 40 km, trọng số theo `uparea`, chuẩn hoá tổng = 1;
+  `rain_mm_d1/d3/d7` ra `data/processed/features/rain_by_node/year=*/*.parquet` (2.322.370 dòng).
+- G5 `pipelines/spark/features/build_training_set.py`: mẫu huấn luyện (trạm × ngày) từ `tide_extremes`
+  (qc = ok, không suspect) – 32.352 dòng, cột đỉnh/chân + `peakN_day_offset`, `missing_peakN`,
+  `exceed_level` theo `alarm_history`, hồ chứa, mưa, `lunar_day`, `moon_phase`, `astro_*` (đọc
+  `data/processed/features/astro_tide.csv` của R nếu có, không có thì null + cảnh báo);
+  **kiểm tra rò rỉ** `max_obs_day < day` (0 vi phạm); `_meta.json` có `data_snapshot` + ranh giới tập.
+- Q1–Q7 `pipelines/spark/analytics/`: 7 job truy vấn (đỉnh triều & vượt cấp báo động, hồ chứa,
+  MERIT/OSM, toàn vẹn dữ liệu, ghép OSM ↔ MERIT, đường tới cửa sả, độ chính xác dự báo nghiệp vụ);
+  mỗi job ghi CSV + `README.md` vào `results/Q<n>/`; cache Redis tuỳ chọn qua `REDIS_URL`
+  (thiếu thì bỏ qua có cảnh báo).
+
+### Sửa (đặc tính và phân tích)
+- `common/session.py`: `MongoAdmin.command` **tự giải mã JSON mở rộng** của MongoDB
+  (`decode_extjson`) – driver Java `toJson()` trả canonical extended JSON nên BSON `int64` thành
+  `{"$numberLong": "…"}` và BSON `Date` thành `{"$date": …}`. Trước đó COMID đọc từ `graph_edges` là
+  dict nên so khớp khoá thất bại (Q6: `max_tau_up_h` luôn bằng 0). `_iso`/`from_date`/`_vn_date` ở
+  `flatten/`, `qc/`, `features/` nhận cả hai dạng.
+- `build_training_set.adm_max`: dùng `{$group: {_id: null, m: {$max: "$ts"}}}` thay cho
+  `{$project: {m: {$max: "$ts"}}}` – dạng `$project` chỉ lấy giá trị tài liệu **đầu tiên**, làm
+  `data_snapshot.max_timestamps` trong `_meta.json` sai (báo `2016-12-30` thay vì `2026-11-10`).
+- `common/session.py`: `_parse_iso` chấp nhận phần thập phân 2 chữ số (`...46.21+00:00`) mà
+  `datetime.fromisoformat` của Python 3.10 từ chối.
+- `analytics/q6_paths_to_outlet.py`: khoá `tau_up` theo COMID kiểu `int` (khớp với đường đi) và
+  chuẩn hoá `src`/`dst` qua `_comid()`.
+- `pipelines/spark/README.md`: tên file job trong bảng Q1–Q7 và lệnh chạy đã đúng tên file thật;
+  ghi rõ job `features/` cần `--master "local[*]"` (lỗi `ChecksumFileSystem` `_temporary` khi ghi
+  Parquet trên volume Windows gắn vào container).

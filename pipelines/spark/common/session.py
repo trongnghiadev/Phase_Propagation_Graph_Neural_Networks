@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -55,10 +56,17 @@ def build_session(app_name: str, uri: str, db: str = DEFAULT_DB) -> SparkSession
             .getOrCreate())
 
 
+SINGLE_PARTITIONER = "com.mongodb.spark.sql.connector.read.partitioner.SinglePartitionPartitioner"
+
+
 def read_mongo(spark: SparkSession, collection: str, schema: StructType | None = None,
-               pipeline: list[dict] | None = None, db: str = DEFAULT_DB) -> DataFrame:
-    """Đọc một collection; `pipeline` ($match/$project) được đẩy xuống MongoDB."""
+               pipeline: list[dict] | None = None, db: str = DEFAULT_DB,
+               options: dict[str, str] | None = None) -> DataFrame:
+    """Đọc một collection; `pipeline` ($match/$project) được đẩy xuống MongoDB; `options`: tùy chọn connector
+    (ví dụ `{"partitioner": SINGLE_PARTITIONER}` cho time series, vốn là view)."""
     r = spark.read.format("mongodb").option("database", db).option("collection", collection)
+    for k, v in (options or {}).items():
+        r = r.option(k, v)
     if pipeline:
         r = r.option("aggregation.pipeline", json.dumps(pipeline, ensure_ascii=False))
     if schema is not None:
@@ -81,6 +89,62 @@ def write_mongo(df: DataFrame, collection: str, db: str = DEFAULT_DB) -> None:
 def bson_date(dt: datetime) -> dict:
     """Datetime aware → JSON mở rộng dạng canonical cho `Document.parse`."""
     return {"$date": {"$numberLong": str(int(dt.astimezone(timezone.utc).timestamp() * 1000))}}
+
+
+def _parse_iso(s: str) -> datetime:
+    """Parse ISO-8601 do MongoDB sinh ra (Python 3.10 `fromisoformat` thiếu hỗ trợ).
+
+    Driver Java có thể ghi `2026-11-23T13:30:46.21+00:00` (2 chữ số phần thập phân) —
+    `datetime.fromisoformat` của Python 3.10 chỉ chấp nhận đúng 3 hoặc 6 chữ số.
+    """
+    txt = s.strip()
+    if txt.endswith("Z"):
+        txt = txt[:-1] + "+00:00"
+    # Chuẩn hoá phần thập phân về đúng 6 chữ số (micro giây).
+    m = re.search(r"\.(\d+)", txt)
+    if m and len(m.group(1)) != 6:
+        frac = m.group(1)[:6].ljust(6, "0")
+        txt = txt[:m.start(1)] + frac + txt[m.end(1):]
+    try:
+        return datetime.fromisoformat(txt)
+    except ValueError:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+def decode_extjson(obj):
+    """Giải mã JSON mở rộng (canonical/relaxed) của MongoDB về kiểu Python.
+
+    Driver Java `toJson()` sinh **canonical extended JSON**: BSON `int64` → `{"$numberLong": "…"}`,
+    BSON `int32` → `{"$numberInt": "…"}`, BSON `double` → `{"$numberDouble": "…"}`,
+    BSON `Date` → `{"$date": {"$numberLong": "…"}}` hoặc `{"$date": "ISO"}`,
+    `ObjectId` → `{"$oid": "…"}`.
+
+    Không giải mã thì COMID đọc từ MongoDB thành dict thay vì số → so khớp khoá thất bại
+    (ví dụ Q6: `max_tau_up_h` luôn bằng 0 vì `str(src)` không bằng `"44042931"`).
+    """
+    if isinstance(obj, dict):
+        if len(obj) == 1:
+            if "$numberLong" in obj:
+                return int(obj["$numberLong"])
+            if "$numberInt" in obj:
+                return int(obj["$numberInt"])
+            if "$numberDouble" in obj:
+                return float(obj["$numberDouble"])
+            if "$numberDecimal" in obj:
+                return float(obj["$numberDecimal"])
+            if "$oid" in obj:
+                return str(obj["$oid"])
+            if "$date" in obj:
+                d = obj["$date"]
+                if isinstance(d, dict) and "$numberLong" in d:
+                    return datetime.fromtimestamp(int(d["$numberLong"]) / 1000, tz=timezone.utc)
+                if isinstance(d, str):
+                    return _parse_iso(d)
+                return d
+        return {k: decode_extjson(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [decode_extjson(v) for v in obj]
+    return obj
 
 
 class JobLockError(RuntimeError):
@@ -107,7 +171,9 @@ class MongoAdmin:
     def command(self, cmd: dict, admin: bool = False) -> dict:
         doc = self._jvm.org.bson.Document.parse(json.dumps(cmd, ensure_ascii=False))
         target = self._client.getDatabase("admin") if admin else self._db
-        return json.loads(target.runCommand(doc).toJson())
+        # `toJson()` của driver Java trả về canonical extended JSON → phải giải mã
+        # để COMID/`$numberLong` thành số thật, nếu không các phép so khớp khoá sẽ hỏng.
+        return decode_extjson(json.loads(target.runCommand(doc).toJson()))
 
     def aggregate(self, collection: str, pipeline: list[dict], write: bool = False,
                   bypass_validation: bool = False) -> list[dict]:

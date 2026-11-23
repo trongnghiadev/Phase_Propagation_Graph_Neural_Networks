@@ -56,6 +56,26 @@ stations:
     water_level: 1000
     reservoir: 500
 
+qc:                                # QC số liệu bản tin (GĐ2.3); bản sao mặc định: vngis.qc_rules.DEFAULT_PARAMS
+  rules_version: 1                 # tăng khi đổi quy tắc/tham số (ghi vào qc_flags.rules_version)
+  reference_station: VUNG_TAU      # trạm biển tham chiếu cho R3 (mã trong stations)
+  r1:                              # giá trị ngoài khoảng hợp lý của (trạm, đỉnh/chân)
+    p_low: 0.001                   # phân vị 0,1%
+    p_high: 0.999                  # phân vị 99,9%
+    margin: 0.1                    # biên = margin × (p_high − p_low), cộng ra hai phía
+    physical_m:                    # ngưỡng vật lý [min, max] (m); Vũng Tàu mốc Hải đồ, trạm sông mốc khác
+      default: [-3.5, 3.5]
+      VUNG_TAU: [-1.0, 5.0]
+  r2:                              # đỉnh thấp hơn chân cùng ngày quan trắc
+    min_gap_m: 0.0                 # chỉ gắn cờ khi thấp hơn quá ngần này
+  r3:                              # giờ đỉnh lệch so với đỉnh Vũng Tàu trước đó + độ trễ điển hình (trạm sông)
+    max_ref_gap_h: 14.0            # đỉnh Vũng Tàu tham chiếu không sớm hơn ngần này giờ
+    iqr_k: 3.0                     # giới hạn = max(iqr_k × IQR, min_dev_h) quanh trung vị độ trễ của trạm
+    min_dev_h: 3.0
+    min_samples: 100               # trạm ít độ trễ hơn thì không xét R3
+    min_ref_peaks_per_day: 2       # ngày tham chiếu ít đỉnh Vũng Tàu hơn (đỉnh "không xảy ra") thì không xét
+  audit_pending_grace_s: 600       # vngis.qc.reconcile_pending chỉ xử lý audit pending cũ hơn ngần này giây
+
 cache:                             # TTL cơ bản (giây), đề cương 5.5
   ttl_s:
     stats: 86400                   # stats:tide:*, stats:res:*

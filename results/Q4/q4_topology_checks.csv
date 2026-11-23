@@ -1,0 +1,7 @@
+check,result,value,unit
+cây lưu vực không có chu trình hướng xuôi và mỗi nút ≤ 1 hạ nguồn,đạt,1073,reach
+cửa sản duy nhất (nút không có hạ nguồn trong cây),đạt,1,nút
+mọi nút trong cây đi được về cửa sản theo NextDownID,đạt,1073,reach
+số điểm hội tụ (nhiều reach đổ về cùng một hạ nguồn),đặc trưng hợp lệ của lưu vực thật (không phải lỗi),535,nút
+`graph_edges` đã được G1 nạp,đạt,1291,cạnh
+số nút có trong `graph_edges` (đã tỉa),đã tỉa theo `uparea` ≥ ngưỡng,646,nút

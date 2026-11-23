@@ -1,0 +1,4 @@
+buffer_m,n_matches,n_osm_matched,n_merit_matched,pct_osm_matched,pct_merit_matched,mean_distance_m
+50.0,3199,1950,872,5.016,81.267,7.53
+100.0,3683,2140,898,5.505,83.691,15.83
+250.0,4331,2419,923,6.222,86.021,38.05

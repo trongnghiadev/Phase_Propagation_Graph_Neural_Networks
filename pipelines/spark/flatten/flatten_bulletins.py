@@ -24,12 +24,17 @@ tra được mã, 3 job đang chạy nơi khác, 4 còn `__prev` của lần ch�
 5 mất khóa giữa chừng, 6 lỗi không lường trước. Trạng thái `jobs.status`: running → ok / failed / dry_run / blocked
 (mã 4); rolled_back (sau --ack-rollback). Trước MỖI lần thay ghi `replacing = <tên>`; ngay sau lệnh thay thành
 công ghi `replaced` (trước khi đếm lại), để process chết giữa chừng vẫn để lại dấu vết.
+
+QC (GĐ2.3): đọc `qc_flags` (cờ có hiệu lực, `vngis.qc_rules.is_active`) và áp vào `tide_extremes`:
+`rejected` → `value = null`, `qc = "rejected"`; `corrected` → `value = corrected_value`, `qc = "corrected"`;
+`suspect`/`confirmed_ok` giữ `value`, `qc`. Mọi document có `raw_value`, `raw_qc` (giá trị/qc gốc của bản tin) và
+`qc_flag` (status của cờ, null nếu không có cờ). Không chạy khi job QC đang giữ khóa (mã thoát 3).
+`rainfall_daily`: không có số và bản tin không ghi cờ → `flag = "missing"`.
 """
 from __future__ import annotations
 
 import argparse
 import os
-import secrets
 import sys
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -39,12 +44,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pyspark.sql import DataFrame, functions as F  # noqa: E402
 from pyspark.sql.window import Window  # noqa: E402
 
+from common.jobrun import JobRun  # noqa: E402
 from common.session import (JobLockError, LockLostError, MongoAdmin, bson_date, build_session, env_db, env_uri,  # noqa: E402
                             read_mongo, write_mongo)
 from flatten import rules  # noqa: E402
 from flatten.schemas import BULLETIN, PROVINCE, STATION  # noqa: E402
+from vngis import qc_rules as QC  # noqa: E402
 
 JOB = "g0_flatten_bulletins"
+QC_JOB = "qc_tide_extremes"
 NAMES = ("tide_extremes", "official_forecasts", "reservoir_daily", "rainfall_daily")
 PRIMARY_MATCH = {"source.is_primary": True, "bulletin_type": "tide_forecast_5day"}
 SOURCE_PIPELINE = [{"$match": PRIMARY_MATCH}, {"$project": {"full_text": 0}}]
@@ -124,7 +132,7 @@ SPECS = {
     "rainfall_daily": {
         "validator": {"$jsonSchema": {
             "bsonType": "object",
-            "required": ["date", "day", "station", "rainfall_mm", "source_file"],
+            "required": ["date", "day", "station", "rainfall_mm", "flag", "source_file"],
             "properties": {
                 "date": {"bsonType": "date"},
                 "day": DAY,
@@ -132,7 +140,11 @@ SPECS = {
                 "rainfall_mm": NUM_OR_NULL,
                 "flag": STR_OR_NULL,
                 "source_file": {"bsonType": "string"},
-            }}},
+            },
+            # không có số thì phải có cờ (cờ gốc của bản tin hoặc "missing")
+            "anyOf": [{"properties": {"rainfall_mm": {"bsonType": ["double", "int", "long"]}}},
+                      {"properties": {"flag": {"bsonType": "string"}}}],
+        }},
         "indexes": [
             {"key": {"station": 1, "date": 1}, "name": "station_date_unique", "unique": True},
         ],
@@ -198,9 +210,60 @@ def build_tide_extremes(b: DataFrame, lookup: DataFrame) -> DataFrame:
     return attach_code(x, lookup, "tide", "station_name", "station")
 
 
+VALUE_MISMATCH = "value_mismatch"
+
+
+def apply_qc_flags(x: DataFrame, flags: DataFrame) -> DataFrame:
+    """Áp cờ QC có hiệu lực (cùng quy tắc với `vngis.qc_rules.effective`). `flags` (`qc_flags_df`): f_id, f_station,
+    f_kind, f_t (epoch s), f_status, f_cv, f_value (giá trị lúc gắn cờ), f_decided. Thêm `raw_value`, `raw_qc` (gốc),
+    `qc_flag` (status, null nếu không có cờ) và `_f_status`, `_f_id` (để đếm; không ghi ra).
+
+    Cờ ĐÃ CÓ QUYẾT ĐỊNH mà giá trị lúc gắn cờ ≠ giá trị gốc hiện tại (bản tin đổi sau khi người quyết định):
+    KHÔNG áp quyết định (value/qc giữ gốc), `qc_flag = "value_mismatch"`; job QC sẽ ghi `value_mismatch` vào cờ.
+    """
+    j = x.join(F.broadcast(flags), (x["station"] == flags["f_station"]) & (x["kind"] == flags["f_kind"])
+               & (x["ts"].cast("long") == flags["f_t"]), "left")
+    mismatch = F.coalesce(F.col("f_decided") & ~F.col("value").eqNullSafe(F.col("f_value")), F.lit(False))
+    st = F.when(mismatch, F.lit(None).cast("string")).otherwise(F.col("f_status"))
+    value = (F.when(st == "rejected", F.lit(None).cast("double"))
+              .when(st == "corrected", F.col("f_cv")).otherwise(F.col("value")))
+    qc = F.when(st.isin("rejected", "corrected"), st).otherwise(F.col("qc"))
+    flag = F.when(mismatch, F.lit(VALUE_MISMATCH)).otherwise(F.col("f_status"))
+    return j.select("station_name", "kind", "source_file", "ts", "ts_placeholder", "station",
+                    value.alias("value"), qc.alias("qc"), F.col("value").alias("raw_value"),
+                    F.col("qc").alias("raw_qc"), flag.alias("qc_flag"), F.col("f_status").alias("_f_status"),
+                    F.col("f_id").alias("_f_id"))
+
+
+def _bound_value(flag: dict) -> float | None:
+    """Giá trị mà quyết định đang gắn vào: `decided_value` nếu có (người xem đã quyết định với giá trị đó), ngược lại
+    `value` (giá trị lúc gắn cờ). G0 so giá trị gốc hiện tại với kết quả này để biết quyết định còn hợp lệ không.
+
+    `decided_value` có thể `null` (quyết định chưa gắn giá trị nào, ví dụ cờ `suspect` bị bỏ quyết định) → khi đó
+    dùng `value`.
+    """
+    dv = flag.get("decided_value")
+    if dv is not None:
+        return float(dv)
+    v = flag.get("value")
+    return None if v is None else float(v)
+
+
+def qc_flags_df(spark, flags: list[dict]) -> DataFrame:
+    """`f_value` = giá trị mà quyết định đang gắn vào (`decided_value` nếu có, không thì `value`): G0 so giá trị
+    gốc hiện tại với nó để biết quyết định còn hợp lệ không (cờ `value_mismatch`)."""
+    rows = [(f["_id"], f["station"], f["kind"], int(_iso(f["ts"]).timestamp()), f["status"],
+             None if f.get("corrected_value") is None else float(f["corrected_value"]),
+             None if _bound_value(f) is None else float(_bound_value(f)),
+             f["status"] in QC.DECIDED) for f in flags]
+    return spark.createDataFrame(rows, "f_id string, f_station string, f_kind string, f_t long, f_status string, "
+                                       "f_cv double, f_value double, f_decided boolean")
+
+
 def to_tide_docs(x: DataFrame) -> DataFrame:
     # meta chỉ {station, kind}; source_file, qc, ts_placeholder là field thường (ít bucket hơn)
-    return x.select("ts", F.struct("station", "kind").alias("meta"), "value", "qc", "ts_placeholder", "source_file")
+    return x.select("ts", F.struct("station", "kind").alias("meta"), "value", "qc", "ts_placeholder", "source_file",
+                    "raw_value", "raw_qc", "qc_flag")
 
 
 def build_official_forecasts(b: DataFrame, lookup: DataFrame) -> DataFrame:
@@ -268,8 +331,10 @@ def to_reservoir_docs(r: DataFrame) -> DataFrame:
 def build_rainfall(b: DataFrame, lookup: DataFrame) -> DataFrame:
     x = b.select("source_file", "observation_date", F.col("rainfall.period").alias("period"),
                  F.explode("rainfall.stations").alias("s"))
+    # không có số và bản tin không ghi cờ → "missing" (như tide_extremes)
+    flag = F.coalesce(F.col("s.flag"), F.when(F.col("s.rainfall_mm").isNull(), F.lit("missing")))
     x = x.select("source_file", "observation_date", "period", F.col("s.station").alias("station_name"),
-                 F.col("s.rainfall_mm").alias("rainfall_mm"), F.col("s.flag").alias("flag"))
+                 F.col("s.rainfall_mm").alias("rainfall_mm"), flag.alias("flag"))
     return attach_code(x, lookup, "rain", "station_name", "station")
 
 
@@ -296,14 +361,23 @@ class Report:
 
 
 def _iso(v) -> datetime:
+    # `MongoAdmin.command` đã giải mã JSON mở rộng → ngày giờ BSON về kiểu `datetime`.
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
     s = v["$date"] if isinstance(v, dict) else v
     if isinstance(s, dict):  # canonical {"$numberLong": ...}
         return datetime.fromtimestamp(int(s["$numberLong"]) / 1000, tz=timezone.utc)
     return rules.parse_iso_utc(s)
 
 
-def check_tide_counts(adm: MongoAdmin, rep: Report, staging: str, excluded: list[str]) -> int:
-    """Trả về số document kỳ vọng của tide_extremes (= tổng ô đỉnh/chân trong bản tin chính đã bỏ trùng)."""
+def check_tide_counts(adm: MongoAdmin, rep: Report, staging: str, excluded: list[str], qc_counts: dict) -> int:
+    """Kiểm tra số lượng `tide_extremes` sau khi áp `qc_flags`; trả về số document kỳ vọng
+    (= tổng ô đỉnh/chân trong bản tin chính đã bỏ trùng). `qc_counts`: số cờ có hiệu lực theo status.
+
+    Công thức (README mục G0): N_raw = N_src, N_raw_time = N_src_time; N_value = N_src − R_num + C_null;
+    N_ok = N_src_time − D_ok, với R_num = số `rejected` có giá trị gốc, C_null = số `corrected` có giá trị gốc null,
+    D_ok = số `rejected`/`corrected` có qc gốc ok/duplicate_time.
+    """
     src_match = {**PRIMARY_MATCH, "source_file": {"$nin": excluded}}
     elements = [
         {"$match": src_match},
@@ -318,16 +392,49 @@ def check_tide_counts(adm: MongoAdmin, rep: Report, staging: str, excluded: list
     ]
     src = adm.aggregate("hydromet_bulletins", elements)[0]
     raw_all = adm.aggregate("hydromet_bulletins", [{"$match": PRIMARY_MATCH}] + elements[1:])[0]
+    ok_qc = ["ok", "duplicate_time"]
     got_total = adm.count(staging)
+    got_raw = adm.count(staging, {"raw_value": {"$ne": None}})
+    got_raw_ok = adm.count(staging, {"raw_qc": {"$in": ok_qc}})
     got_num = adm.count(staging, {"value": {"$ne": None}})
-    got_ok = adm.count(staging, {"qc": {"$in": ["ok", "duplicate_time"]}})
-    rep.add("tide_extremes: số bản ghi value != null = số đỉnh/chân có số (aggregation độc lập)",
-            got_num == src["num"],
-            f"tide_extremes={got_num}, bản tin={src['num']} (toàn bộ bản chính trước khi bỏ bản trùng: "
-            f"{raw_all['num']}); có số và có giờ: {src['num_time']} = qc ok + duplicate_time {got_ok}")
-    rep.add("tide_extremes: tổng số phần tử", got_total == src["total"] and got_ok == src["num_time"],
+    got_ok = adm.count(staging, {"qc": {"$in": ok_qc}})
+    r_num = adm.count(staging, {"qc": "rejected", "raw_value": {"$ne": None}})
+    c_null = adm.count(staging, {"qc": "corrected", "raw_value": None})
+    d_ok = adm.count(staging, {"qc": {"$in": ["rejected", "corrected"]}, "raw_qc": {"$in": ok_qc}})
+    rep.add("tide_extremes: số bản ghi raw_value != null = số đỉnh/chân có số (aggregation độc lập)",
+            got_raw == src["num"] and got_raw_ok == src["num_time"],
+            f"raw_value={got_raw}, bản tin={src['num']} (toàn bộ bản chính trước khi bỏ bản trùng: "
+            f"{raw_all['num']}); có số và có giờ: {src['num_time']} = raw_qc ok + duplicate_time {got_raw_ok}")
+    rep.add("tide_extremes: value != null = N_src − R_num + C_null; qc ok + duplicate_time = N_src_time − D_ok",
+            got_num == src["num"] - r_num + c_null and got_ok == src["num_time"] - d_ok,
+            f"value={got_num} = {src['num']} − {r_num} + {c_null}; ok={got_ok} = {src['num_time']} − {d_ok}")
+    per = {s: adm.count(staging, {"qc_flag": s}) for s in (*QC.STATUSES, VALUE_MISMATCH)}
+    n_rej, n_cor = adm.count(staging, {"qc": "rejected"}), adm.count(staging, {"qc": "corrected"})
+    rep.add("tide_extremes: mỗi cờ QC có hiệu lực áp đúng một phần tử (value_mismatch: không áp)",
+            all(per[s] == qc_counts.get(s, 0) for s in (*QC.STATUSES, VALUE_MISMATCH))
+            and n_rej == qc_counts.get("rejected", 0) and n_cor == qc_counts.get("corrected", 0),
+            f"qc_flag theo status {per}; qc_flags {qc_counts}; qc rejected {n_rej}, corrected {n_cor}")
+    rep.add("tide_extremes: tổng số phần tử", got_total == src["total"],
             f"tide_extremes={got_total}, bản tin={src['total']}")
     return int(src["total"])
+
+
+def load_qc_flags(adm: MongoAdmin) -> list[dict]:
+    """Cờ có hiệu lực của `tide_extremes` trong `qc_flags` (rỗng nếu chưa có collection)."""
+    if not adm.exists(QC.FLAGS):
+        return []
+    docs = adm.aggregate(QC.FLAGS, [{"$match": {"collection": QC.COLLECTION}},
+                                    {"$project": {"station": 1, "kind": 1, "ts": 1, "status": 1, "value": 1,
+                                                  "decided_value": 1, "corrected_value": 1, "auto_cleared": 1,
+                                                  "origin": 1, "decided_at": 1, "retired": 1}}])
+    return [d for d in docs if QC.is_active(d)]
+
+
+def check_rainfall(adm: MongoAdmin, rep: Report, staging: str) -> None:
+    bad = adm.count(staging, {"rainfall_mm": None, "flag": None})
+    missing = adm.count(staging, {"flag": "missing"})
+    rep.add("rainfall_daily: không có số thì có cờ (flag 'missing' khi bản tin không ghi cờ)", bad == 0,
+            f"rainfall_mm null và flag null: {bad}; flag missing: {missing}")
 
 
 def check_forecasts(adm: MongoAdmin, rep: Report, staging: str, excluded: list[str]) -> int:
@@ -374,7 +481,7 @@ def check_tide_duplicates(adm: MongoAdmin, rep: Report, staging: str) -> None:
 
 
 def check_sample_times(adm: MongoAdmin, rep: Report, staging: str, code_to_name: dict[str, str]) -> None:
-    sample = adm.aggregate(staging, [{"$match": {"qc": "ok"}}, {"$sample": {"size": 5}}])
+    sample = adm.aggregate(staging, [{"$match": {"qc": "ok", "qc_flag": None}}, {"$sample": {"size": 5}}])
     lines, ok_all = [], True
     for s in sample:
         ts = _iso(s["ts"])
@@ -584,37 +691,32 @@ def main(argv: list[str] | None = None) -> int:
                          "rồi thoát (không chạy G0)")
     args = ap.parse_args(argv)
 
-    generated_at = datetime.now(timezone.utc)
-    run_id = generated_at.strftime("%Y%m%dT%H%M%SZ") + "_" + secrets.token_hex(3)
-    staging = {n: f"{n}{STAGING}_{run_id}" for n in NAMES}
-    print(f"run_id={run_id} db={args.db}", flush=True)
-
     spark = build_session(JOB, args.uri, args.db)
     spark.sparkContext.setLogLevel("WARN")
     adm = MongoAdmin(spark, args.uri, args.db)
+    run = JobRun(adm, JOB, args.lock_ttl_s)
+    run_id = run.run_id
+    staging = {n: f"{n}{STAGING}_{run_id}" for n in NAMES}
+    print(f"run_id={run_id} db={args.db}", flush=True)
     rep = Report()
-    status, locked = "failed", False
-
-    def job_update(fields: dict) -> None:
-        adm.upsert("jobs", {"_id": run_id}, {"$set": fields})
-
-    def hold_lock() -> None:
-        """Gia hạn khóa trước mỗi pha dài và xác nhận vẫn giữ (mất khóa → LockLostError, dừng không thay)."""
-        adm.renew_lock(JOB, run_id, args.lock_ttl_s)
+    status = "failed"
+    job_update = run.update
+    hold_lock = run.hold          # gia hạn khóa và xác nhận vẫn giữ (mất khóa → LockLostError, dừng không thay)
 
     try:
         try:
-            adm.acquire_lock(JOB, run_id, args.lock_ttl_s)
-            locked = True
+            run.acquire()
         except JobLockError as e:
             print(f"Dừng: {e}", flush=True)
             return 3
         if args.ack_rollback:
             status = "ack"
             return ack_rollback(adm, args.ack_rollback)
-        job_update({"job": JOB, "run_id": run_id, "generated_at": bson_date(generated_at), "status": "running",
-                    "db": args.db, "dry_run": args.dry_run, "max_lag_days": args.max_lag_days,
-                    "staging": staging, "replaced": []})
+        run.start(db=args.db, dry_run=args.dry_run, max_lag_days=args.max_lag_days, staging=staging, replaced=[])
+        other = run.other_running(QC_JOB)
+        if other:
+            print(f"Dừng: job QC đang chạy (khóa {other}); G0 đọc qc_flags nên chạy lại sau.", flush=True)
+            return 3
         if not args.dry_run:
             check_prev_safe(adm, run_id)              # dừng sớm, trước khi làm việc nặng
         drop_stale_staging(adm, run_id, args.lock_ttl_s)
@@ -637,7 +739,40 @@ def main(argv: list[str] | None = None) -> int:
         code_to_name = {s["code"]: s["name"] for s in st_rows}
         timeline = [r.asDict() for r in read_mongo(spark, "province_timeline", PROVINCE, db=args.db).collect()]
 
-        tide = build_tide_extremes(b, lookup).cache()
+        # ---- Cờ QC có hiệu lực (qc_flags) → áp vào tide_extremes --------------
+        qc_list = load_qc_flags(adm)
+        tide_raw = build_tide_extremes(b, lookup).cache()
+        keys = tide_raw.select(F.col("station").alias("f_station"), F.col("kind").alias("f_kind"),
+                               F.col("ts").cast("long").alias("f_t"))
+        all_flags = qc_flags_df(spark, qc_list)
+        unmatched_ids = {r["f_id"] for r in all_flags.join(keys, ["f_station", "f_kind", "f_t"], "left_anti")
+                         .select("f_id").collect()}
+        qc_skip, qc_block = rules.classify_unmatched(qc_list, unmatched_ids)
+        for f in qc_skip:
+            print(f"[CẢNH BÁO] cờ auto chưa quyết định {f['_id']}: phần tử không còn trong bản tin chính; bỏ qua "
+                  f"(job QC sẽ xóa ở lần chạy sau)", flush=True)
+        for f in qc_block:
+            print(f"[CHẶN] cờ {f['_id']} (status {f['status']}, origin {f.get('origin')}) đã có quyết định/thủ công "
+                  f"nhưng phần tử không còn: xem lại rồi chạy pipelines/qc/qc_decide.py retire {f['_id']} "
+                  f"--reason ... --by ... --version <v>", flush=True)
+        applied = [f for f in qc_list if f["_id"] not in unmatched_ids]
+        flags = qc_flags_df(spark, applied).cache()
+        tide = apply_qc_flags(tide_raw, flags).cache()
+        mism = [r.asDict() for r in tide.filter(F.col("qc_flag") == VALUE_MISMATCH)
+                .select("_f_id", "_f_status", "raw_value").collect()]
+        for m in mism:
+            print(f"[CẢNH BÁO] {m['_f_id']} ({m['_f_status']}): giá trị gốc hiện tại {m['raw_value']} khác giá trị lúc "
+                  f"quyết định; KHÔNG áp quyết định (qc_flag = value_mismatch)", flush=True)
+        mism_ids = {m["_f_id"] for m in mism}
+        qc_counts = {s_: sum(1 for f in applied if f["status"] == s_ and f["_id"] not in mism_ids)
+                     for s_ in QC.STATUSES}
+        qc_counts[VALUE_MISMATCH] = len(mism_ids)
+        rep.add("qc_flags: cờ có quyết định/thủ công đều trỏ tới một phần tử tide_extremes", not qc_block,
+                f"{len(qc_list)} cờ có hiệu lực; áp {qc_counts}; mồ côi bỏ qua (auto, chưa quyết định) "
+                f"{len(qc_skip)}; mồ côi chặn {len(qc_block)}" + (f": {[f['_id'] for f in qc_block[:5]]}" if qc_block
+                                                                 else ""))
+        job_update({"qc_flags_applied": qc_counts, "qc_flags_orphan_skipped": [f["_id"] for f in qc_skip],
+                    "qc_flags_orphan_blocking": [f["_id"] for f in qc_block]})
         fc = build_official_forecasts(b, lookup).cache()
         res_rows = build_reservoir_rows(b, lookup)
         res, runs, p_unmatched = attach_province(spark, res_rows, timeline, args.max_lag_days)
@@ -670,6 +805,10 @@ def main(argv: list[str] | None = None) -> int:
                       + ("  [provisional: đoạn cuối dữ liệu, còn trong hạn đổi tên chậm]" if p.provisional else "")
                       + (f"  KHÔNG KHỚP: {p.reason}" if not p.matched else ""), flush=True)
         if not rep.ok:
+            if qc_block and all(ok for n, ok, _ in rep.items if not n.startswith("qc_flags")):
+                print("Dừng: có cờ QC đã quyết định/thủ công không khớp phần tử nào (xem [CHẶN] ở trên); giữ nguyên "
+                      "bản chính.", flush=True)
+                return 1
             print("Dừng: có tên không tra được mã.", flush=True)
             return 2
 
@@ -688,13 +827,14 @@ def main(argv: list[str] | None = None) -> int:
         # ---- Kiểm tra bắt buộc (gồm số lượng so với kỳ vọng) ----------------
         hold_lock()
         expected = {
-            "tide_extremes": check_tide_counts(adm, rep, staging["tide_extremes"], excluded),
+            "tide_extremes": check_tide_counts(adm, rep, staging["tide_extremes"], excluded, qc_counts),
             "official_forecasts": check_forecasts(adm, rep, staging["official_forecasts"], excluded),
             "reservoir_daily": n_res_rows,
             "rainfall_daily": rain.count(),
         }
         check_tide_duplicates(adm, rep, staging["tide_extremes"])
         check_sample_times(adm, rep, staging["tide_extremes"], code_to_name)
+        check_rainfall(adm, rep, staging["rainfall_daily"])
         for name in NAMES:
             got = adm.count(staging[name])
             rep.add(f"{name}: số document staging = số kỳ vọng", got == expected[name], f"{got} / {expected[name]}")
@@ -742,16 +882,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         # Nhả khóa trong try/finally riêng: ghi jobs lỗi chỉ log, không chặn nhả khóa.
         try:
-            if locked:
-                if status != "ack":                     # --ack-rollback không tạo bản ghi jobs cho chính nó
-                    try:
-                        job_update({"status": status, "finished_at": bson_date(datetime.now(timezone.utc))})
-                    except Exception as e:  # noqa: BLE001
-                        print(f"[JOBS] không ghi được trạng thái cuối ({status}): {e}", flush=True)
-                try:
-                    adm.release_lock(JOB, run_id)
-                except Exception as e:  # noqa: BLE001
-                    print(f"[KHÓA] không nhả được khóa {JOB}/{run_id} (tự hết hạn theo TTL): {e}", flush=True)
+            run.finish(None if status == "ack" else status)   # --ack-rollback không tạo bản ghi jobs cho chính nó
         finally:
             try:
                 adm.close()

@@ -17,6 +17,7 @@ REPO_CONFIG = next((d / "config" for d in Path(__file__).resolve().parents if (d
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "mongo: cần MongoDB thật (bỏ qua khi không kết nối được)")
+    config.addinivalue_line("markers", "replset: cần MongoDB replica set (VNGIS_TEST_RS_URI; bỏ qua khi không có)")
 
 
 @pytest.fixture(scope="session")

@@ -203,5 +203,28 @@ class TestStationsAndDuplicates(unittest.TestCase):
         self.assertEqual([(o["source_file"], o["kept"]) for o in out], [("2019/01/10/a.pdf", "2020/01/10/a.pdf")])
 
 
+class TestQcHelpers(unittest.TestCase):
+    def test_classify_unmatched(self):
+        flags = [{"_id": "a", "origin": "auto", "status": "suspect", "decided_at": None},
+                 {"_id": "b", "origin": "auto", "status": "rejected", "decided_at": 1},
+                 {"_id": "c", "origin": "manual", "status": "suspect", "decided_at": 1},
+                 {"_id": "d", "origin": "auto", "status": "suspect", "decided_at": None}]
+        skip, block = rules.classify_unmatched(flags, {"a", "b", "c"})
+        self.assertEqual([f["_id"] for f in skip], ["a"])
+        self.assertEqual([f["_id"] for f in block], ["b", "c"])
+        self.assertEqual(rules.classify_unmatched(flags, set()), ([], []))
+
+    def test_g0_unsettled(self):
+        t = lambda h: datetime(2026, 11, 23, h, tzinfo=timezone.utc)  # noqa: E731
+        ok = {"_id": "r1", "status": "ok", "generated_at": t(1)}
+        self.assertIsNone(rules.g0_unsettled([ok], []))
+        self.assertIn("__prev", rules.g0_unsettled([ok], ["tide_extremes__prev"]))
+        bad = {"_id": "r2", "status": "failed", "replaced": ["tide_extremes"], "generated_at": t(2)}
+        self.assertIn("r2", rules.g0_unsettled([ok, bad], []))
+        # hỏng TRƯỚC lần ok gần nhất: đã ổn
+        self.assertIsNone(rules.g0_unsettled([{**bad, "generated_at": t(0)}, ok], []))
+        self.assertIsNone(rules.g0_unsettled([ok, {**bad, "replaced": [], "replacing": None}], []))
+
+
 if __name__ == "__main__":
     unittest.main()

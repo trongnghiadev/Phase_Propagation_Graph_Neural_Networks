@@ -1,0 +1,13 @@
+station,name,comid,kind,tau_from_sea_h
+NHA_BE,Nhà Bè,44042931,water_level,3.8161
+BEN_LUC,Bến Lức,44043086,water_level,5.3537
+TAN_AN,Tân An,44042875,water_level,6.1273
+PHU_AN,Phú An,44043114,water_level,6.1787
+THU_DAU_MOT,Thủ Dầu Một,44043137,water_level,9.7893
+BIEN_HOA,Biên Hòa,44042941,water_level,10.268
+GO_DAU_HA,Gò Dầu Hạ,44043119,water_level,19.3233
+RES_TRI_AN,Trị An,44042950,reservoir,29.0343
+DAU_TIENG,Dầu Tiếng,44043239,water_level,35.4406
+RES_DAU_TIENG,Dầu Tiếng,44043239,reservoir,35.4406
+RES_SR_P_MIENG,Sr.P.Miêng,44045216,reservoir,55.8908
+RES_THAC_MO,Thác Mơ,44043222,reservoir,103.7624

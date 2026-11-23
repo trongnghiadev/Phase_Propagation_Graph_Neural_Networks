@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/trongnghiadev/Phase_Propagation_Graph_Neural_Networks/schemas/prediction/v1.schema.json",
+  "title": "Ban du bao dung chung cho moi mo hinh (v1)",
+  "description": "Dinh dang du bao chung: moi mo hinh (B0, B_KTTV, B_harm, B1, B2, B3, B4, B5, PhaseGNN) xuat ra ban ghi dung schema nay, de ham danh gia (pipelines/r/evaluation.R) dung duoc cho tat ca. Do cuong 4.5, checklist GD4.5.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["model", "station", "issued_date", "target_date", "lead_day", "peak_idx", "h_q10", "h_q50", "h_q90", "t_peak"],
+  "properties": {
+    "model": {
+      "type": "string",
+      "description": "Ten mo hinh, vd 'B0', 'B_KTTV', 'B_harm', 'B1', 'B2', 'B3', 'B4', 'B5a', 'B5b', 'phasegnn-vN'.",
+      "minLength": 1
+    },
+    "station": {
+      "type": "string",
+      "description": "Ma tram trong collection 'stations' (vd 'PHU_AN').",
+      "minLength": 1
+    },
+    "issued_date": {
+      "type": "string",
+      "description": "Ngay phat du bao (giao dien) theo YYYY-MM-DD, gio Viet Nam.",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "target_date": {
+      "type": "string",
+      "description": "Ngay du bao (ngay quan sat) theo YYYY-MM-DD, gio Viet Nam.",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "lead_day": {
+      "type": "integer",
+      "description": "Chan troi: ngay phat ban tin = 1. Khoang 1..5.",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "peak_idx": {
+      "type": "integer",
+      "description": "Chi so dinh trieu trong ngay: 0 = dinh thu nhat, 1 = dinh thu hai.",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "h_q10": {
+      "type": ["number", "null"],
+      "description": "Do cao dinh muc 10% (m). null = mo hinh khong cho phan vi."
+    },
+    "h_q50": {
+      "type": ["number", "null"],
+      "description": "Do cao dinh trung vị (m)."
+    },
+    "h_q90": {
+      "type": ["number", "null"],
+      "description": "Do cao dinh muc 90% (m)."
+    },
+    "t_peak": {
+      "type": ["string", "null"],
+      "description": "Thoi diem dinh du bao theo ISO 8601 co UTC (vd '2024-03-10T02:00:00Z'). null = khong du doan duoc.",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    }
+  }
+}

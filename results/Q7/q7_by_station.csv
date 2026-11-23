@@ -1,0 +1,4 @@
+station,n_pairs,mae_height_m,max_abs_err_h,mae_peak_hour_h,year_first,year_last
+PHU_AN,68263,0.0934,31.35,0.6971,2017,2026
+NHA_BE,68045,0.1011,3.15,0.7165,2017,2026
+THU_DAU_MOT,9171,0.1063,1.09,0.7456,2025,2026

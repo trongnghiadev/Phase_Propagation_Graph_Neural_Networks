@@ -1,0 +1,202 @@
+{
+  "generated": "2026-11-23",
+  "status": "applied",
+  "applied": {"date": "2026-11-23", "by": "manual_review", "decision": "quyết định của người dùng: K1 rejected (không dùng alternative corrected); K5 hai mục confirmed_ok; K6 áp dụng đủ 9 thay đổi source.is_primary; K2 chỉ bulletin_date, weekday và qc_note (bulletin_no, bulletin_seq, lunar_date.day không đổi)", "tool": "pipelines/qc/qc_decide.py"},
+  "notes": "ts theo UTC; ngày *_vn theo giờ Việt Nam. qc_flags: chỉ K1 thay đổi giá trị; K5 là xác nhận ok. metadata_changes: thay đổi hydromet_bulletins đề xuất cho K2/K6, cần ghi audit_logs và chạy lại G0.",
+  "qc_flags": [
+    {
+      "id": "K1-1",
+      "item": "K1",
+      "collection": "tide_extremes",
+      "station": "BIEN_HOA",
+      "kind": "high",
+      "ts": "2021-04-17T02:00:00Z",
+      "source_file": "2021/04/18/HCMC_TVHN_20210418.pdf",
+      "value_before": 11.18,
+      "qc_before": "ok",
+      "status": "rejected",
+      "corrected_value": null,
+      "confidence": "high",
+      "reason": "PDF gốc in 11.18 (không phải lỗi parse); vượt xa phân vị 99% (2,01 m) và chuỗi liền kề (1,05–1,36 m); nhiều khả năng gõ thừa \"1\" (1,18 m) nhưng PDF không thể hiện giá trị đúng",
+      "alternative": {
+        "status": "corrected",
+        "corrected_value": 1.18,
+        "confidence": "medium",
+        "reason": "suy luận gõ thừa chữ số; không có trong nguồn"
+      }
+    },
+    {
+      "id": "K5-1",
+      "item": "K5",
+      "collection": "tide_extremes",
+      "station": "*",
+      "kind": "*",
+      "ts": null,
+      "observation_day_vn": "2025-12-26",
+      "source_file": "2025/12/27/HCMC_TVHN_20251227.pdf",
+      "status": "ok",
+      "corrected_value": null,
+      "confidence": "high",
+      "reason": "Chép tay từ PDF không có lớp chữ; đối chiếu ảnh trang: 208/208 ô (thực đo, dự báo, hồ) khớp; giữ nguyên"
+    },
+    {
+      "id": "K5-2",
+      "item": "K5",
+      "collection": "hydromet_bulletins",
+      "station": null,
+      "kind": "salinity_intrusion_survey",
+      "ts": null,
+      "observation_day_vn": "2021-06-10",
+      "source_file": "2021/06/10/khac/HCMC_TVHN_20210610_KSTVXNMT06D110062021pdf.pdf",
+      "status": "ok",
+      "corrected_value": null,
+      "confidence": "high",
+      "reason": "Bản scan chép tay; đối chiếu ảnh: 126/126 ô bảng và các giá trị tổng hợp khớp; giữ nguyên"
+    }
+  ],
+  "metadata_changes": [
+    {
+      "id": "K6-1",
+      "item": "K6",
+      "collection": "hydromet_bulletins",
+      "source_file": "2019/01/10/HCMC_TVHN_20190110.pdf",
+      "field": "source.is_primary",
+      "before": true,
+      "after": false,
+      "confidence": "high",
+      "reason": "Trùng sha256 với bản chính 2020/01/10/HCMC_TVHN_20200110.pdf; ngày thật 2020-01-10; file nằm sai thư mục ngày"
+    },
+    {
+      "id": "K6-2",
+      "item": "K6",
+      "collection": "hydromet_bulletins",
+      "source_file": "2019/02/11/HCMC_TVHN_20190211.pdf",
+      "field": "source.is_primary",
+      "before": true,
+      "after": false,
+      "confidence": "high",
+      "reason": "Trùng sha256 với bản chính 2020/02/11/HCMC_TVHN_20200211.pdf; ngày thật 2020-02-11; file nằm sai thư mục ngày"
+    },
+    {
+      "id": "K6-3",
+      "item": "K6",
+      "collection": "hydromet_bulletins",
+      "source_file": "2020/02/07/HCMC_TVHN_20200207.pdf",
+      "field": "source.is_primary",
+      "before": true,
+      "after": false,
+      "confidence": "high",
+      "reason": "Trùng sha256 với bản chính 2021/02/07/HCMC_TVHN_20210207.pdf; ngày thật 2021-02-07; file nằm sai thư mục ngày"
+    },
+    {
+      "id": "K6-4",
+      "item": "K6",
+      "collection": "hydromet_bulletins",
+      "source_file": "2020/07/05/HCMC_TVHN_20200705.pdf",
+      "field": "source.is_primary",
+      "before": true,
+      "after": false,
+      "confidence": "high",
+      "reason": "Trùng sha256 với bản chính 2020/07/06/HCMC_TVHN_20200706.pdf; ngày thật 2020-07-06; file nằm sai thư mục ngày"
+    },
+    {
+      "id": "K6-5",
+      "item": "K6",
+      "collection": "hydromet_bulletins",
+      "source_file": "2019/01/10/khac/HCMC_TVHN_20190110_Bantinngay10012019pdf.pdf",
+      "field": "source.is_primary",
+      "before": false,
+      "after": true,
+      "confidence": "high",
+      "reason": "Bản thật duy nhất của ngày bản tin 2019-01-10 (số 010/2019); ngày này không có bản chính nào; bổ sung ngày quan trắc 2019-01-09 cho G0"
+    },
+    {
+      "id": "K6-6",
+      "item": "K6",
+      "collection": "hydromet_bulletins",
+      "source_file": "2019/02/11/khac/HCMC_TVHN_20190211_Bantinngay11022019pdf.pdf",
+      "field": "source.is_primary",
+      "before": false,
+      "after": true,
+      "confidence": "high",
+      "reason": "Bản thật duy nhất của ngày bản tin 2019-02-11 (số 042/2019); ngày này không có bản chính nào; bổ sung ngày quan trắc 2019-02-10 cho G0"
+    },
+    {
+      "id": "K6-7",
+      "item": "K6",
+      "collection": "hydromet_bulletins",
+      "source_file": "2020/02/07/khac/HCMC_TVHN_20200207_Bantinngay07022020pdf.pdf",
+      "field": "source.is_primary",
+      "before": false,
+      "after": true,
+      "confidence": "high",
+      "reason": "Bản thật duy nhất của ngày bản tin 2020-02-07 (số 038/2020); ngày này không có bản chính nào; bổ sung ngày quan trắc 2020-02-06 cho G0"
+    },
+    {
+      "id": "K6-8",
+      "item": "K6",
+      "collection": "hydromet_bulletins",
+      "source_file": "2020/07/05/khac/HCMC_TVHN_20200705_HOCMTVHN202007051030pdf.pdf",
+      "field": "source.is_primary",
+      "before": false,
+      "after": true,
+      "confidence": "high",
+      "reason": "Bản thật duy nhất của ngày bản tin 2020-07-05 (số 187/2020); ngày này không có bản chính nào; bổ sung ngày quan trắc 2020-07-04 cho G0"
+    },
+    {
+      "id": "K6-9",
+      "item": "K2/K6",
+      "collection": "hydromet_bulletins",
+      "source_file": "2025/08/30/khac/HCMC_TVHN_20250830_Bntinngy3082025pdf.pdf",
+      "field": "source.is_primary",
+      "before": false,
+      "after": true,
+      "confidence": "high",
+      "reason": "Bản thật duy nhất của ngày bản tin 2026-08-30 (số 242/2026); ngày này không có bản chính nào; bổ sung ngày quan trắc 2026-08-29 cho G0"
+    },
+    {
+      "id": "K2-1",
+      "item": "K2",
+      "collection": "hydromet_bulletins",
+      "source_file": "2025/11/08/HCMC_TVHN_20251108.pdf",
+      "changes": [
+        {
+          "field": "bulletin_date",
+          "before": "2025-11-06T17:00:00Z",
+          "after": "2025-11-07T17:00:00Z",
+          "confidence": "high"
+        },
+        {
+          "field": "weekday",
+          "before": "Thứ Sáu",
+          "after": "Thứ Bảy",
+          "confidence": "high"
+        },
+        {
+          "field": "bulletin_no",
+          "before": "311/2025",
+          "after": "312/2025",
+          "confidence": "medium"
+        },
+        {
+          "field": "bulletin_seq",
+          "before": 311,
+          "after": 312,
+          "confidence": "medium"
+        },
+        {
+          "field": "lunar_date.day",
+          "before": 18,
+          "after": 19,
+          "confidence": "medium"
+        }
+      ],
+      "reason": "Tiêu đề chép lại của bản 07/11 (số 311, thứ Sáu 07/11, âm lịch 18/9) nhưng số liệu thuộc bản 08/11: thực đo ngày 07/11, mưa đến 7h 08/11, dự báo 08–12/11, số liệu khác bản 07/11; số 312 bị thiếu giữa 311 và 313. G0 đã đúng (observation_date, issued_date_note); chỉ bulletin_date trong hydromet_bulletins sai"
+    }
+  ],
+  "no_change": {
+    "K3": "15/15 mẫu (seed 20261123) và 73/73 bản qua 6 điều kiện; không sửa",
+    "K4": "6/6 bản: Phú An 1,30/1,40/1,50 m khớp PDF và bản liền kề; không sửa",
+    "K2_khac_copies": "6 bản khac/ (K2 #1–#4, #9, #10) là bản sao của bản chính ngày khác; không sửa"
+  }
+}
