@@ -35,7 +35,9 @@ apps/web/out/
 # R
 .Rhistory
 .RData
+.Rproj.user/
 pipelines/r/renv/library/
+.rlib/
 
 # Notebook checkpoints
 .ipynb_checkpoints/
