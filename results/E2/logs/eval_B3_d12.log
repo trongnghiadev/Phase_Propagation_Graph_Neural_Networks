@@ -1,4 +1,0 @@
-[eval] tập test: 300 ngày phát bản tin, 2574 mẫu
-[eval] 25740 bản ghi dự báo
-[eval] B3: MAE đỉnh = 0.6822 m | MAE giờ = 0.665 h | 25740 bản ghi
-[eval] ghi kết quả vào results/E2/B3_d12

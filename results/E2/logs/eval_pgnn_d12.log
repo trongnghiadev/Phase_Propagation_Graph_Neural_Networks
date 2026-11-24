@@ -1,4 +1,0 @@
-[eval] tập test: 300 ngày phát bản tin, 2574 mẫu
-[eval] 25740 bản ghi dự báo
-[eval] phasegnn-v1: MAE đỉnh = 0.6993 m | MAE giờ = 0.700 h | 25740 bản ghi
-[eval] ghi kết quả vào results/E2/phasegnn_d12

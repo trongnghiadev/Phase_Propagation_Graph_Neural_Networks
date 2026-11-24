@@ -1,2 +1,0 @@
-"component","model","slope","slope_se","p_value","r_squared","n","intercept"
-"M2","log(amp_ratio) ~ log(dist_to_root_km)",-0.591355772423974,0.297226602688976,0.0937707473756718,0.397495033485141,8,2.52174021584455
