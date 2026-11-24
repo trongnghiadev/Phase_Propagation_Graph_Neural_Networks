@@ -152,6 +152,9 @@ def _register_events(target: FastAPI) -> None:
     @target.on_event("startup")
     async def on_startup() -> None:  # pragma: no cover - chạy khi app khởi động
         configure_logging(state.config.app.log_level, instance=state.instance)
+        # Kiểm tra khoá ký JWT ngay lúc khởi động: thiếu/yếu ở môi trường không phải dev/test →
+        # JwtConfigError, uvicorn dừng với thông báo rõ (không đợi tới request đăng nhập đầu tiên).
+        _ = state.jwt
         log.info("API khởi động: instance=%s env=%s api_prefix=%s",
                  state.instance, state.config.env, API_PREFIX)
         try:

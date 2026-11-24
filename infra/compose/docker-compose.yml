@@ -60,6 +60,9 @@ x-api: &api
     REDIS_SENTINELS: sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
     REDIS_SENTINEL_MASTER: cache
     REDIS_LOCK_NODES: redis-lock-1:6379,redis-lock-2:6379,redis-lock-3:6379
+    # Bắt buộc (>= 32 byte) khi APP_ENV=cluster: đặt trong infra/compose/.env (không commit).
+    # Thiếu hoặc quá ngắn → API dừng ngay lúc khởi động với thông báo rõ (api.auth.jwt.resolve_secret).
+    AUTH_SECRET: ${AUTH_SECRET:-}
   depends_on:
     mongo-init:
       condition: service_completed_successfully

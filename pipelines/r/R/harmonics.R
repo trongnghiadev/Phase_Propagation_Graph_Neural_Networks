@@ -234,3 +234,38 @@ phase_lag_hours <- function(phase_a, phase_b, period_h, wrap = FALSE) {
   d <- if (isTRUE(wrap)) phase_diff_deg(phase_a, phase_b) else phase_diff_unwrapped(phase_a, phase_b)
   d / (360 / period_h)
 }
+
+# ---------------------------------------------------------------------------
+# GIAI DOAN FIT -- chong ro ri tap test (sua loi 24/11/2026)
+# ---------------------------------------------------------------------------
+# Truoc day `harmonic.R` fit tren `FIT_YEARS <- 2017:2026` => he so dieu hoa da
+# "nhin thay" ca tap test (tu 2024-07-01). File `astro_tide*.csv` sinh ra la du
+# bao B_harm, dau vao B1 va cot `astro_*` cua G5/PhaseGNN => ro ri.
+#
+# `harmonic_fit_window(cfg)`: khoang ngay [from, to] cua cac tap trong
+#   `cfg$harmonic_fit_splits` (mac dinh "train"), `cfg` = `load_splits()`.
+harmonic_fit_window <- function(cfg) {
+  sp <- cfg$splits[cfg$harmonic_fit_splits]
+  w <- c(min(vapply(sp, `[`, "", 1)), max(vapply(sp, `[`, "", 2)))
+  if (w[2] >= cfg$test_from)
+    stop("Giai doan fit dieu hoa (", w[1], " -> ", w[2], ") cham tap test (tu ",
+         cfg$test_from, ")", call. = FALSE)
+  w
+}
+
+# `in_fit_window(day, window)`: TRUE voi ngay quan sat nam trong `window`.
+in_fit_window <- function(day, window) {
+  d <- substr(as.character(day), 1, 10)
+  !is.na(d) & d >= window[1] & d <= window[2]
+}
+
+# KIEM TRA TU DONG: du lieu dua vao `fit_harmonics` khong duoc chua ngay >= mo'c
+# test. Goi ngay truoc MOI lan fit; vi pham -> dung script (stop).
+assert_no_test_days <- function(day, test_from, what = "fit dieu hoa") {
+  d <- substr(as.character(day), 1, 10)
+  bad <- !is.na(d) & d >= test_from
+  if (any(bad))
+    stop(sprintf("[RO RI] %s chua %d moc tu ngay >= %s (lon nhat %s)", what, sum(bad),
+                 test_from, max(d[bad])), call. = FALSE)
+  invisible(TRUE)
+}

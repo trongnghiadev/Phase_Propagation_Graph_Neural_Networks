@@ -120,7 +120,7 @@ Mọi ngày giờ lưu BSON Date UTC; chuỗi ngày (`day`, `issued_date`, `targ
 - `meta` chỉ gồm `{station, kind}` (khóa nhận dạng chuỗi). `qc`, `ts_placeholder`, `source_file` là field thường:
   mỗi giá trị khác nhau của `meta` mở bucket riêng, nên để `source_file`/`qc` trong `meta` làm mỗi bucket chỉ chứa
   vài document của một bản tin. Đổi sang meta 2 khóa: **72.155 → 17.390 / 18.158 bucket** (`db.system.buckets.tide_extremes`,
-  hai lần chạy; số bucket phụ thuộc thứ tự connector ghi song song), cùng 129.240 document. Lọc theo `qc`/`source_file` vẫn được (field thường của time series).
+  hai lần chạy; số bucket phụ thuộc thứ tự connector ghi song song), cùng 129.240 document (số lúc đo, trước K2/K6; nay 129.420). Lọc theo `qc`/`source_file` vẫn được (field thường của time series).
 - `meta.station`: mã trong `stations` tra theo tên chuẩn hoặc alias, chỉ trong `kind` ∈ {`water_level`, `sea_level`}.
 - **Giữ cả phần tử không có số** (quyết định cho mục checklist GĐ2.2): mọi ô đỉnh/chân của bản tin đều có một document, để
   chuỗi thời gian biết rõ ô nào trống và vì sao. Phần tử có cờ thì `value: null`, `qc` = cờ của bản tin.

@@ -232,6 +232,8 @@ def test_prepare_sample_keeps_observed_hours():
     _S.target_low_hours = np.zeros((t_out, 2), dtype=np.float32)
     _S.peak_heights = np.zeros(t_out, dtype=np.float32)
     _S.peak_hours = np.zeros(t_out, dtype=np.float32)
+    _S.targets_scaled = _S.targets.copy()
+    _S.peak_heights_scaled = _S.peak_heights.copy()
 
     sub = StationSubgraph(
         node_ids=["SEA", "ST"], node_index={"SEA": 0, "ST": 1},
@@ -274,6 +276,8 @@ def test_prepare_sample_grid_clock_is_not_overwriting_features():
     _S.target_low_hours = np.zeros((2, 2), dtype=np.float32)
     _S.peak_heights = np.zeros(2, dtype=np.float32)
     _S.peak_hours = np.zeros(2, dtype=np.float32)
+    _S.targets_scaled = _S.targets.copy()
+    _S.peak_heights_scaled = _S.peak_heights.copy()
 
     sub = StationSubgraph(
         node_ids=["SEA", "ST"], node_index={"SEA": 0, "ST": 1},

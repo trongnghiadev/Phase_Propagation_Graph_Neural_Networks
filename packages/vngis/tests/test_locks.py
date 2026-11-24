@@ -151,3 +151,105 @@ def test_next_fence_tang_dan_theo_tai_nguyen():
     db = type("DB", (), {"lock_fences": FakeFences()})()
     assert [next_fence(db, "reload"), next_fence(db, "reload"), next_fence(db, "other")] == [1, 2, 1]
     assert db.lock_fences.calls[0] == ({"_id": "reload"}, {"$inc": {"fence": 1}}, True)
+
+
+class RacyFences(FakeFences):
+    """Mô phỏng worker khác tăng bộ đếm ngay sau lệnh của ta: `find_one` thấy giá trị mới hơn."""
+
+    def find_one(self, flt):
+        return {"_id": flt["_id"], "fence": self.docs[flt["_id"]]["fence"] + 100}
+
+
+def test_next_fence_dung_gia_tri_tra_ve_khong_doc_lai():
+    db = type("DB", (), {"lock_fences": RacyFences()})()
+    assert [next_fence(db, "r"), next_fence(db, "r")] == [1, 2]
+
+
+def test_watchdog_gia_han_moi_ttl_chia_3():
+    from vngis.locks import Lock, Watchdog
+    wd = Watchdog(backend=None, lock=Lock("k", "t", 2, 1000.0, ttl_ms=30_000))
+    assert wd.interval_s == 10.0
+
+
+# ---------------------------------------------------------------- LockGuard -------
+class SlowFenceDB:
+    """`lock_fences` giả: lệnh tăng fence "mất" `delay_s` giây (đẩy đồng hồ giả lên)."""
+
+    def __init__(self, clock, delay_s):
+        self.clock, self.delay_s = clock, delay_s
+        self.lock_fences = self
+
+    def find_one_and_update(self, flt, update, upsert, return_document):
+        self.clock[0] += self.delay_s
+        return {"_id": flt["_id"], "fence": 7}
+
+
+def _guard_with_clock(monkeypatch, delay_s, *, extend_ok):
+    from vngis.locks import LockGuard
+    clock = [100.0]
+    monkeypatch.setattr(locks.time, "monotonic", lambda: clock[0])
+    nodes = [FakeRedis(), FakeRedis(), FakeRedis()]
+    rl = make(*nodes)
+    if not extend_ok:
+        rl.extend = lambda lock, ttl: False
+    g = LockGuard(rl, db=SlowFenceDB(clock, delay_s), resource="r", ttl_ms=1000)
+    return g, nodes
+
+
+def test_guard_fence_cham_qua_validity_va_gia_han_that_bai_thi_lock_lost(monkeypatch):
+    g, nodes = _guard_with_clock(monkeypatch, delay_s=5.0, extend_ok=False)
+    with pytest.raises(locks.LockLost):
+        g.acquire()
+    assert g.lock is None and all("lock:r" not in n.store for n in nodes)   # đã nhả khóa
+
+
+def test_guard_fence_cham_nhung_gia_han_duoc_thi_tra_fence(monkeypatch):
+    g, _ = _guard_with_clock(monkeypatch, delay_s=5.0, extend_ok=True)
+    try:
+        assert g.acquire().fence == 7
+    finally:
+        g.release()
+
+
+def test_guard_fence_nhanh_khong_can_gia_han(monkeypatch):
+    g, _ = _guard_with_clock(monkeypatch, delay_s=0.01, extend_ok=False)
+    try:
+        assert g.acquire().fence == 7
+    finally:
+        g.release()
+
+
+class InsertOnlyColl:
+    """Collection giả: chưa có bản ghi; `find_one` sau insert là lỗi (không được đọc lại)."""
+
+    def __init__(self):
+        self.inserted = []
+
+    def find_one_and_update(self, *a, **k):
+        return None
+
+    def insert_one(self, doc):
+        self.inserted.append(doc)
+
+    def find_one(self, *a, **k):
+        raise AssertionError("write() không được đọc lại bằng find_one sau insert")
+
+
+def test_guard_write_khong_doc_lai_sau_insert():
+    from vngis.locks import Lock, LockGuard
+    coll = InsertOnlyColl()
+    g = LockGuard(backend=None, db={"job_state": coll}, resource="r")
+    g.lock = Lock("lock:r", "t", 1, 1000.0, fence=5)
+    out = g.write({}, {"state": "running"})
+    assert out == {"_id": "r", "state": "running", "last_fence": 5}
+    assert coll.inserted == [out]
+
+
+def test_guard_write_mat_khoa_thi_khong_ghi():
+    from vngis.locks import Lock, LockGuard
+    coll = InsertOnlyColl()
+    g = LockGuard(backend=None, db={"job_state": coll}, resource="r")
+    g.lock = Lock("lock:r", "t", 1, 1000.0, fence=5, lost=True)
+    with pytest.raises(locks.LockLost):
+        g.write({}, {"state": "running"})
+    assert coll.inserted == []

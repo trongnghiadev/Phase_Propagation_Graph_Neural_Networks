@@ -17,6 +17,42 @@ repo_root <- function() {
 p_res <- function(...) file.path(repo_root(), "results", ...)
 p_data <- function(...) file.path(repo_root(), "data", ...)
 
+# ---------------------------------------------------------------------------
+# Bien chia tap -- `config/splits.json` (nguon DUY NHAT, dung chung voi
+# `phasegnn.data.SPLITS` va Spark G5 `features/splits.py`; khong viet cung).
+# ---------------------------------------------------------------------------
+# Thu tu do: bien `PGNN_SPLITS_FILE` -> `VNGIS_CONFIG_DIR/splits.json` ->
+# `<repo>/config/splits.json`. Tra ve list(splits = list(train = c(from, to), ...),
+# harmonic_fit_splits = c("train", ...), test_from = "YYYY-MM-DD", path = ...).
+load_splits <- function(path = NULL) {
+  if (is.null(path)) {
+    path <- Sys.getenv("PGNN_SPLITS_FILE", unset = "")
+    if (!nzchar(path)) {
+      cd <- Sys.getenv("VNGIS_CONFIG_DIR", unset = "")
+      path <- if (nzchar(cd) && file.exists(file.path(cd, "splits.json")))
+        file.path(cd, "splits.json") else file.path(repo_root(), "config", "splits.json")
+    }
+  }
+  if (!file.exists(path)) stop("Khong tim thay cau hinh chia tap: ", path, call. = FALSE)
+  raw <- jsonlite::fromJSON(path, simplifyVector = TRUE)
+  sp <- list()
+  for (nm in c("train", "val", "test")) {
+    e <- raw$splits[[nm]]
+    if (is.null(e)) stop(path, ": thieu tap ", nm, call. = FALSE)
+    a <- as.character(e$from); b <- as.character(e$to)
+    if (is.na(as.Date(a, "%Y-%m-%d")) || is.na(as.Date(b, "%Y-%m-%d")) || a > b)
+      stop(path, ": tap ", nm, " sai dinh dang/khoang: ", a, " -> ", b, call. = FALSE)
+    sp[[nm]] <- c(a, b)
+  }
+  if (!(sp$train[2] < sp$val[1] && sp$val[2] < sp$test[1]))
+    stop(path, ": cac tap phai noi tiep, khong chong nhau", call. = FALSE)
+  fit <- as.character(raw$harmonic_fit_splits %||% "train")
+  if ("test" %in% fit || !all(fit %in% names(sp)))
+    stop(path, ": harmonic_fit_splits khong hop le (khong duoc chua 'test'): ",
+         paste(fit, collapse = ","), call. = FALSE)
+  list(splits = sp, harmonic_fit_splits = fit, test_from = sp$test[1], path = path)
+}
+
 # Tao thu muc (khong loi neu da ton tai).
 ensure_dir <- function(path) {
   if (!dir.exists(path)) dir.create(path, recursive = TRUE, showWarnings = FALSE)

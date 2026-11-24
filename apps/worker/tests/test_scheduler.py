@@ -143,7 +143,10 @@ def test_scheduler_job_chay_va_ghi_trang_thai(fake_db, fake_lock):
     try:
         # APScheduler chỉ nhận job sau khi scheduler đã start.
         sched.start()
-        sched.date("now", datetime.datetime.now() + datetime.timedelta(milliseconds=50), job)
+        # Datetime CÓ múi giờ: scheduler chạy theo Asia/Ho_Chi_Minh, datetime naive (giờ UTC của
+        # container) bị hiểu là giờ VN → lệch 7 giờ về quá khứ → misfire, job không chạy.
+        run_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(milliseconds=50)
+        sched.date("now", run_at, job)
         for _ in range(100):
             if calls:
                 break

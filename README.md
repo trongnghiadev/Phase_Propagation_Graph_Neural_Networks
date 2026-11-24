@@ -116,18 +116,35 @@ Commit theo [Conventional Commits](https://www.conventionalcommits.org/vi/v1.0.0
 
 ## Hiện trạng
 
+Bảng dưới chỉ ghi phần **đã có code trong repo**; mức hoàn thành và kết quả kiểm thử của từng phần xem README trong thư mục tương ứng.
+
 | Phần | Đã có trong repo |
 |---|---|
-| Nạp dữ liệu | `pipelines/ingest/`: parser bản tin KTTV, địa giới cũ/mới, danh mục trạm |
+| Nạp dữ liệu | `pipelines/ingest/`: parser bản tin KTTV (có chế độ nạp qua staging), địa giới cũ/mới, danh mục trạm |
 | Dữ liệu tệp | `data/admin_units/` (địa giới gốc), `data/manifest.yaml` |
-| Thư viện chung | `packages/vngis`: `locks` (Redlock, fencing token), `text` (chuẩn hóa tên) |
-| API | `apps/api`: bản tối giản `/health`, `/stations`, `/lock/{resource}` |
+| Thư viện chung | `packages/vngis`: `config`, `db`, `text` (chuẩn hóa tên), `admin`, `province_labels`, `bulletins`, `qc_rules` (quy tắc QC R1–R3), `qc` (ghi quyết định QC có kiểm toán), `locks` (Redlock, fencing token), `cache`, `atomic_reload` |
+| Spark | `pipelines/spark/`: G0 làm phẳng bản tin (`flatten/`), QC số liệu triều (`qc/`), truy vấn Q1–Q7 (`analytics/`), đặc trưng G1, G3, G4, G5 (`features/`); dùng chung khóa `job_locks` và nhật ký `jobs` |
+| QC | `pipelines/qc/qc_decide.py`: CLI xem cờ và ghi quyết định QC (`qc_flags` + `audit_logs`) |
+| R | `pipelines/r/`: thống kê mô tả, phân tích điều hòa, độ trễ pha, hàm đánh giá chung |
+| Mô hình | `packages/phasegnn`: PhaseGNN, biến thể B3–B5, mô hình cơ sở B0, B_harm, B_KTTV, B1, B2 |
+| Ứng dụng | `apps/api` (FastAPI: xác thực JWT, phân quyền Bitmask, router `/api/v1`), `apps/worker` (APScheduler, khóa phân tán), `apps/web` (Next.js + Leaflet) |
+| Hợp đồng dữ liệu | `schemas/prediction/v1.schema.json`, `schemas/features/v1.md`. `schemas/mongo/` và `migrations/mongo/` mới có README, chưa có validator/migration |
+| Kết quả | `results/`: Q1–Q7, G3, G4, E1, E2, E5, E8, `baselines`, `qc` |
 | Hạ tầng | `infra/compose/` (profile `ha`, `spark`, `shard`), `infra/scripts/migrate-data.ps1` |
-| Tài liệu | submodule `docs/` (private): schema, dữ liệu KTTV, ADR 0001–0005, đề cương, checklist |
+| Tài liệu | submodule `docs/` (private): schema, dữ liệu KTTV, ADR 0001–0008, đề cương, checklist |
 
-Chưa có: Spark, R, PhaseGNN, worker, web, migration, schema JSON, thực nghiệm. PDF bản tin KTTV (khoảng 1,1 GB) để ngoài repo, đặt vào `data/raw/kttv/` khi cần chạy lại parser (không commit).
+`results/` chỉ commit bảng tổng hợp (CSV nhỏ) và hình. Không commit: từng lần chạy (`runs/`), log, checkpoint mô hình, file tạm, mẫu chạy thử, dự báo hoặc mẫu theo từng bản ghi (lớn, sinh lại được và dẫn xuất từ số liệu KTTV); xem `.gitignore`. PDF bản tin KTTV (khoảng 1,1 GB) để ngoài repo, đặt vào `data/raw/kttv/` khi cần chạy lại parser (không commit).
 
-Database `vietnam_gis` hiện có 12 collection dữ liệu: `hydromet_bulletins`, `hydromet_bulletin_files`, `merit_river_reaches`, `waterways_segments`, `stations`, `admin_units`, `admin_unit_mappings`, `province_timeline` và 4 collection do job G0 (`pipelines/spark/flatten/`) sinh ra từ bản tin: `tide_extremes` (time series), `official_forecasts`, `reservoir_daily`, `rainfall_daily`. Thêm 2 collection vận hành của job: `job_locks` (khóa chống chạy chồng), `jobs` (nhật ký lần chạy). Chi tiết: `docs/data/vietnam_gis_schema.md` (private).
+Database `vietnam_gis` hiện có 22 collection:
+
+- **Dữ liệu nguồn:** `hydromet_bulletins`, `hydromet_bulletin_files`, `merit_river_reaches`, `waterways_segments`, `stations`, `admin_units`, `admin_unit_mappings`, `province_timeline`.
+- **Do job G0 sinh từ bản tin** (`pipelines/spark/flatten/`): `tide_extremes` (time series), `official_forecasts`, `reservoir_daily`, `rainfall_daily`.
+- **QC số liệu** (`pipelines/spark/qc/`, `pipelines/qc/`): `qc_flags` (cờ và quyết định, tách khỏi dữ liệu), `audit_logs` (nhật ký mọi thay đổi do người ghi).
+- **Đặc trưng:** `graph_edges` (đồ thị hai chiều, G1/G3).
+- **Ứng dụng:** `users`, `roles`, `forecasts`, `alerts`, `lock_fences` (bộ đếm fencing token).
+- **Vận hành job:** `job_locks` (khóa chống chạy chồng), `jobs` (nhật ký lần chạy).
+
+Chi tiết: `docs/data/vietnam_gis_schema.md` (private).
 
 ---
 

@@ -31,7 +31,8 @@ from enum import IntFlag
 from typing import Any
 
 __all__ = ["P", "ROLES", "ROLE_MASKS", "has", "mask_of", "role_mask", "PERM_ALL", "MAX_BITS",
-           "flag_names", "mask_from_names", "validate_mask"]
+           "flag_names", "mask_from_names", "validate_mask", "KNOWN_PERM_COLLECTIONS",
+           "validate_perm_collection"]
 
 
 class P(IntFlag):
@@ -133,6 +134,33 @@ def mask_from_names(names: list[str] | tuple[str, ...]) -> int:
             raise ValueError(f"quyền không hợp lệ: {n!r} (hợp lệ: {[f.name for f in P]})")
         out |= int(getattr(P, key))
     return out
+
+
+def _known_collections() -> frozenset[str]:
+    """Tên được phép làm khoá trong `users.perm`: `"*"`, collection logic của `vngis.config.Collections`,
+    và các phạm vi quyền không phải collection mà router dùng (`cache`, `locks`, `system`, `rivers`)."""
+    names = {"*", "cache", "locks", "system", "rivers"}
+    try:
+        from vngis.config import Collections
+        names |= set(Collections.model_fields)
+    except Exception:  # noqa: BLE001 - thiếu vngis (không xảy ra khi cài đủ) → danh sách tối thiểu
+        names |= {"hydromet_bulletins", "hydromet_bulletin_files", "stations", "admin_units",
+                  "admin_unit_mappings", "province_timeline", "users", "roles", "forecasts", "alerts",
+                  "models", "jobs", "tide_extremes", "reservoir_daily", "qc_flags", "audit_logs"}
+    return frozenset(names)
+
+
+#: Collection (khoá của `users.perm`) được phép cấp quyền.
+KNOWN_PERM_COLLECTIONS: frozenset[str] = _known_collections()
+
+
+def validate_perm_collection(name: str) -> str:
+    """Tên collection hợp lệ để làm khoá trong `perm` — chặn tiêm đường dẫn (`perm.a.b`, `$set`…)."""
+    if not isinstance(name, str) or not name or "." in name or "$" in name or "\x00" in name:
+        raise ValueError(f"tên collection không hợp lệ: {name!r} (không được rỗng, chứa '.' hoặc '$')")
+    if name not in KNOWN_PERM_COLLECTIONS:
+        raise ValueError(f"collection không có trong danh sách đã biết: {name!r}")
+    return name
 
 
 def validate_mask(mask: int) -> int:

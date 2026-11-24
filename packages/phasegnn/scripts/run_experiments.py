@@ -201,22 +201,13 @@ def _add_days(day: str, n: int) -> str:
 
 
 def _hours_to_iso(day: str, hour: float) -> str | None:
-    """Giờ trong ngày (giờ VN) → ISO 8601 UTC."""
-    from datetime import date, timedelta
-    if hour is None or not np.isfinite(hour):
-        return None
-    total = int(round(float(hour) * 60.0)) % (24 * 60)
-    hh, mm = divmod(total, 60)
-    y, m, d = (int(x) for x in day.split("-"))
-    dt = date(y, m, d)
-    shift, hh_utc = divmod(hh - 7, 24)
-    if shift < 0:
-        dt -= timedelta(days=1)
-        hh_utc += 24
-    elif shift > 0:
-        dt += timedelta(days=1)
-        hh_utc -= 24
-    return f"{dt.isoformat()}T{hh_utc:02d}:{mm:02d}:00Z"
+    """Giờ trong ngày (giờ VN) → ISO 8601 UTC — dùng chung `phasegnn.baselines._hours_to_iso`.
+
+    (Bản chép cũ ở đây cộng thêm 24 giờ khi giờ VN < 7 → chuỗi sai kiểu `T41:04:00Z`, làm
+    `t_peak` của B2/PhaseGNN không đọc được; sửa 24/11/2026.)
+    """
+    from phasegnn.baselines import _hours_to_iso as _impl
+    return _impl(day, hour)
 
 
 # ---------------------------------------------------------------------------

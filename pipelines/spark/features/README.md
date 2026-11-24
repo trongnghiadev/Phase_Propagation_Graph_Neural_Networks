@@ -11,10 +11,23 @@ quy hoạch mưa theo nút (G4), dựng tập huấn luyện Parquet (G5) — ch
 | `build_training_set.py` | G5 – tập huấn luyện (một dòng cho mỗi trạm–ngày) | `data/processed/features/g5/year=*/part-*.parquet`, `_meta.json` |
 | `rules.py` | quy tắc thuần Python dùng chung (topology, tỉa, vật lý, ngày đỉnh) | — |
 | `rain_rules.py` | quy tắc thuần Python của G4 (gán trọng số) — tách riêng để test không cần Spark | — |
+| `splits.py` | đọc `config/splits.json` (biên train/val/test — nguồn duy nhất, dùng chung với `phasegnn` và R); `astro_leak_reason` | — |
+| `outdir.py` | ghi thư mục Parquet kiểu `<đích>.tmp_<run_id>` → đổi tên (`publish`), dọn lần chạy hỏng (`recover`) | — |
+| `g0guard.py` | chặn job đọc đầu ra G0 khi G0 đang chạy (mã 3) hoặc còn dở thay thế (`g0_unsettled`, mã 4) — như job QC | — |
 
 Tất cả job dùng chung `common/session.py` (`build_session`, `read_mongo`, `write_mongo`, `MongoAdmin`)
 và `common/jobrun.py` (`JobRun`: khoá `job_locks`, nhật ký `jobs`, `run.hold()`), ghi với
 `writeConcern: {w: "majority"}`.
+
+**Ghi Parquet (sửa 24/11/2026).** G1, G3, G4, G5 không còn `rmtree`/`mode("overwrite")` thẳng vào đích: ghi vào
+`<đích>.tmp_<run_id>`, kiểm tra xong mới đổi tên (`features/outdir.py::publish`); bản cũ giữ nguyên tới lúc đó
+(G1/G3 chỉ công bố Parquet sau khi đã thay `graph_edges`; kiểm tra hỏng hoặc `--dry-run` → bản cũ không đổi).
+Hai lệnh `os.rename` liên tiếp (POSIX không đổi tên đè lên thư mục không rỗng): chết giữa chừng thì bản cũ
+còn ở `<đích>.old_<run_id>` và lần chạy sau tự khôi phục (`recover`).
+
+**Khóa G0.** G5 (đọc `tide_extremes`, `reservoir_daily`, `rainfall_daily`) và G4 (đọc `rainfall_daily`) kiểm tra
+khóa `g0_flatten_bulletins` và `flatten.rules.g0_unsettled` sau khi giữ khóa của mình, như job QC: G0 đang chạy →
+mã 3; G0 còn dở thay thế → mã 4 (`jobs.status = blocked`).
 
 ---
 
@@ -265,7 +278,7 @@ Cột `max_obs_day` = ngày quan sát **mới nhất** thực sự được dùn
 Số dòng theo năm: 2016: 9 · 2017: 3.265 · 2018: 3.276 · 2019: 3.285 · 2020: 3.294 ·
 2021: 3.276 · 2022: 3.275 · 2023: 3.267 · 2024: 3.294 · 2025: 3.285 · 2026: 2.826.
 
-### Chia tập (đã chốt, không đổi)
+### Chia tập (đọc từ `config/splits.json`, không viết cứng)
 
 | Tập | Từ | Đến | Số ngày-quan-sát |
 |---|---|---|---:|
@@ -276,9 +289,11 @@ Số dòng theo năm: 2016: 9 · 2017: 3.265 · 2018: 3.276 · 2019: 3.285 · 20
 ### Cột thiên văn
 
 `astro_h1`, `astro_h2`, `astro_t1_h`, `astro_t2_h` lấy từ
-`data/processed/features/astro_tide.csv` (do R sinh). **Hiện chưa có file này** → job in cảnh báo
-`[CẢNH BÁO] thiếu data/processed/features/astro_tide.csv – cột astro_* để null` và ghi `null`.
-Khi R có file, chạy lại G5 là đủ (không cần sửa code).
+`data/processed/features/astro_tide.csv` (do R sinh). Lần chạy G5 ngày 2026-11-23 chưa có file này nên
+`astro_*` = null (`_meta.json: astro_merged = false`). **Từ 24/11/2026** G5 đòi kèm
+`astro_tide_meta.json` (do `harmonic.R` mới ghi) và dừng (mã 1) nếu thiếu meta hoặc `fit_to >= test.from`:
+file `astro_tide.csv` hiện có là bản cũ, fit trên 2017–2026 (gồm tập test) → phải chạy lại
+`pipelines/r/harmonic.R` trước khi chạy lại G5. Giai đoạn fit được ghi vào `_meta.json` (`astro_fit`).
 
 `moon_phase` để `null` (chưa có bảng tra trăng trong CSDL); `lunar_day` lấy từ
 `hydromet_bulletins.lunar_date.day`.

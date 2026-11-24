@@ -11,8 +11,12 @@
   `topo_level_down/up`, `length_km`, `slope_raw`, `station_codes`).
 * `data/processed/features/astro_tide.csv` — triều thiên văn (dùng cho `B_harm`).
 
-**Chia tập** (đã chốt ở `schemas/features/v1.md`, khớp G5):
-train 2017-01-01→2022-12-31, val 2023-01-01→2024-06-30, test 2024-07-01→2026-11-23.
+**Chia tập** đọc từ `config/splits.json` (nguồn duy nhất, dùng chung với Spark G5 và R;
+giá trị hiện tại: train 2017-01-01→2022-12-31, val 2023-01-01→2024-06-30, test 2024-07-01→2026-11-23).
+
+**Triều thiên văn.** `astro_tide*.csv` do `pipelines/r/harmonic.R` sinh kèm
+`astro_tide_meta.json` (khoảng ngày đã fit). `check_astro_provenance` từ chối file fit trên
+ngày ≥ mốc test (rò rỉ) hoặc không có meta.
 
 **Cửa sổ mẫu.** Mỗi mẫu gồm `T_in` ngày quan trọc (đầu vào) và `T_out` ngày dự báo (nhãn),
 theo đề cương 5.2.6: `T_in = 14`, `T_out = 5`. Ngày phát bản tin = ngày dự báo thứ 1.
@@ -35,12 +39,52 @@ from typing import Iterable, Iterator, Sequence
 import numpy as np
 import pandas as pd
 
-#: Biên chia tập (khớp `pipelines/spark/features/build_training_set.py`).
-SPLITS: dict[str, tuple[str, str]] = {
-    "train": ("2017-01-01", "2022-12-31"),
-    "val": ("2023-01-01", "2024-06-30"),
-    "test": ("2024-07-01", "2026-11-23"),
-}
+#: Tên file cấu hình biên chia tập (nguồn duy nhất, dùng chung với Spark G5 và R).
+SPLITS_FILE_NAME = "splits.json"
+
+
+def splits_config_path() -> Path:
+    """Đường dẫn `config/splits.json`.
+
+    Thứ tự dò: biến môi trường `PGNN_SPLITS_FILE` → `VNGIS_CONFIG_DIR/splits.json` →
+    `<gốc repo>/config/splits.json`.
+    """
+    env = os.environ.get("PGNN_SPLITS_FILE")
+    if env:
+        return Path(env)
+    cfg_dir = os.environ.get("VNGIS_CONFIG_DIR")
+    if cfg_dir and (Path(cfg_dir) / SPLITS_FILE_NAME).is_file():
+        return Path(cfg_dir) / SPLITS_FILE_NAME
+    return _find_repo_root() / "config" / SPLITS_FILE_NAME
+
+
+def load_split_config(path: str | os.PathLike | None = None) -> dict:
+    """Đọc `config/splits.json` → `{"splits": {name: (from, to)}, "harmonic_fit_splits": [...]}`.
+
+    Không có giá trị mặc định viết cứng trong code: thiếu file hoặc sai định dạng → lỗi ngay.
+    """
+    f = Path(path) if path is not None else splits_config_path()
+    if not f.is_file():
+        raise FileNotFoundError(
+            f"không tìm thấy cấu hình chia tập {f} (đặt PGNN_SPLITS_FILE hoặc VNGIS_CONFIG_DIR)")
+    with open(f, encoding="utf-8") as fh:
+        raw = json.load(fh)
+    sp = raw.get("splits") or {}
+    out: dict[str, tuple[str, str]] = {}
+    for name in ("train", "val", "test"):
+        if name not in sp:
+            raise ValueError(f"{f}: thiếu tập {name!r}")
+        a, b = str(sp[name]["from"]), str(sp[name]["to"])
+        date.fromisoformat(a), date.fromisoformat(b)  # sai định dạng → ValueError
+        if a > b:
+            raise ValueError(f"{f}: tập {name}: from {a} > to {b}")
+        out[name] = (a, b)
+    if not (out["train"][1] < out["val"][0] and out["val"][1] < out["test"][0]):
+        raise ValueError(f"{f}: các tập phải nối tiếp, không chồng nhau: {out}")
+    fit = list(raw.get("harmonic_fit_splits") or ["train"])
+    if "test" in fit or any(x not in out for x in fit):
+        raise ValueError(f"{f}: harmonic_fit_splits không hợp lệ (không được chứa 'test'): {fit}")
+    return {"splits": out, "harmonic_fit_splits": fit, "path": str(f)}
 
 #: Số ngày quan trọc và ngày dự báo (đề cương 5.2.6).
 DEFAULT_T_IN = 14
@@ -91,6 +135,14 @@ def _find_repo_root() -> Path:
     return here.parents[4] if len(here.parents) > 4 else here.parent
 
 
+#: Biên chia tập — đọc từ `config/splits.json` (khớp Spark G5 và R, không viết cứng).
+SPLITS: dict[str, tuple[str, str]] = load_split_config()["splits"]
+
+#: Ngày đầu tiên của tập test: mọi thứ "fit" (chuẩn hoá, điều hòa thủy triều, hồi quy) phải
+#: chỉ dùng ngày < mốc này.
+TEST_START: str = SPLITS["test"][0]
+
+
 def default_paths(root: str | os.PathLike | None = None) -> dict[str, Path]:
     """Đường dẫn mặc định tới các nguồn dữ liệu (tương đối tới gốc repo)."""
     if root is None:
@@ -103,6 +155,8 @@ def default_paths(root: str | os.PathLike | None = None) -> dict[str, Path]:
         "edges_fallback": root / "data" / "processed" / "graph" / "edges.parquet",
         "nodes": root / "data" / "processed" / "graph" / "nodes.parquet",
         "astro": root / "data" / "processed" / "features" / "astro_tide.csv",
+        "astro_meta": root / "data" / "processed" / "features" / "astro_tide_meta.json",
+        "astro_by_station": root / "results" / "E1" / "astro_tide_by_station.csv",
     }
 
 
@@ -382,12 +436,47 @@ def load_g5_meta(g5_dir: Path | None = None, paths: dict[str, Path] | None = Non
         return json.load(fh)
 
 
-def load_astro_tide(path: Path | None = None, paths: dict[str, Path] | None = None) -> pd.DataFrame:
-    """Nạp CSV triều thiên văn (`day`, `h1`, `h2`, `t1_h`, `t2_h`)."""
+class AstroLeakError(ValueError):
+    """Triều thiên văn được fit trên dữ liệu của tập test (hoặc không rõ nguồn gốc)."""
+
+
+def check_astro_provenance(meta_path: Path | None = None,
+                           splits: dict[str, tuple[str, str]] | None = None) -> dict:
+    """Kiểm tra `astro_tide_meta.json`: khoảng fit điều hòa phải kết thúc **trước** mốc test.
+
+    Trả về nội dung meta nếu hợp lệ; nếu thiếu meta (file astro do phiên bản cũ của
+    `harmonic.R` sinh, fit trên 2017–2026) hoặc `fit_to >= test.from` → `AstroLeakError`.
+    """
+    sp = splits or SPLITS
+    test_from = sp["test"][0]
+    f = Path(meta_path) if meta_path is not None else default_paths()["astro_meta"]
+    if not f.is_file():
+        raise AstroLeakError(
+            f"thiếu {f}: không xác định được giai đoạn fit điều hòa của triều thiên văn "
+            f"(bản cũ fit trên cả tập test). Chạy lại pipelines/r/harmonic.R.")
+    with open(f, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    fit_to = str(meta.get("fit_to") or "")
+    if not fit_to or fit_to >= test_from:
+        raise AstroLeakError(
+            f"{f}: điều hòa fit tới {fit_to or '?'} — phải < mốc test {test_from}. "
+            f"Chạy lại pipelines/r/harmonic.R.")
+    return meta
+
+
+def load_astro_tide(path: Path | None = None, paths: dict[str, Path] | None = None,
+                    check_leak: bool = True) -> pd.DataFrame:
+    """Nạp CSV triều thiên văn (`day`, `h1`, `h2`, `t1_h`, `t2_h`).
+
+    `check_leak=True` (mặc định): gọi `check_astro_provenance` trước khi đọc.
+    """
     p = paths or default_paths()
     f = path or p["astro"]
     if not f.exists():
         return pd.DataFrame(columns=["day", "h1", "h2", "t1_h", "t2_h"])
+    if check_leak:
+        check_astro_provenance(Path(f).with_name("astro_tide_meta.json")
+                               if path is not None else p["astro_meta"])
     df = pd.read_csv(f, dtype={"day": str})
     df.columns = [c.strip() for c in df.columns]
     df["day"] = df["day"].astype(str)
@@ -558,6 +647,12 @@ class SampleSet:
         return main_weight if station in MAIN_STATIONS else aux_weight
 
 
+def calendar_days(first: str, last: str) -> list[str]:
+    """Mọi ngày lịch từ `first` tới `last` (hai đầu tính cả), dạng YYYY-MM-DD."""
+    d0, d1 = date.fromisoformat(str(first)[:10]), date.fromisoformat(str(last)[:10])
+    return [(d0 + timedelta(days=i)).isoformat() for i in range((d1 - d0).days + 1)]
+
+
 def _day_range(start: str, n: int) -> list[str]:
     d0 = date.fromisoformat(start)
     return [(d0 + timedelta(days=i)).isoformat() for i in range(n)]
@@ -570,7 +665,8 @@ def build_samples(df: pd.DataFrame, station: str, days: Sequence[str], t_in: int
                   height_scale: "HeightScale | None" = None) -> list[WindowSample]:
     """Dựng mẫu cửa sổ cho một trạm.
 
-    Với ngày phát bản tin `issue` = ngày dự báo thứ 1:
+    `days` phải là **lưới ngày lịch liên tục** (xem `calendar_days`); phần tử thứ `i` là
+    ngày thứ `i`. Với ngày phát bản tin `issue` = ngày dự báo thứ 1:
     * đầu vào: `issue − t_in` … `issue − 1` (tất cả `< issue` ⇒ không rò rỉ);
     * nhãn: `issue` … `issue + t_out − 1` (độ cao đỉnh 1, đỉnh 2 và giờ tương ứng).
 
@@ -581,8 +677,11 @@ def build_samples(df: pd.DataFrame, station: str, days: Sequence[str], t_in: int
     if sub.empty:
         return []
     feat_cols = [c for c in feature_names if c in sub.columns]
-    days = list(days)
+    days = [str(d)[:10] for d in days]
     n_days = len(days)
+    if n_days and days != calendar_days(days[0], days[-1]):
+        raise ValueError("build_samples: `days` phải là lưới ngày lịch liên tục, tăng dần "
+                         "(dùng calendar_days); cửa sổ đếm theo ngày lịch, không theo vị trí")
 
     # --- ánh xạ day → hàng trong bảng con ---------------------------------
     sub = sub.drop_duplicates(subset=["day"]).set_index("day")
@@ -640,6 +739,10 @@ def build_samples(df: pd.DataFrame, station: str, days: Sequence[str], t_in: int
             continue
         sl = slice(i, i + t_out)
         tg = np.stack([h1[sl], h2[sl]], axis=1).astype(np.float32)
+        # Không có nhãn đỉnh nào trong cả cửa sổ dự báo (mọi ngày đều thiếu) → không học /
+        # không chấm được gì, bỏ mẫu. Nhãn thiếu một phần vẫn giữ (NaN = mặt nạ).
+        if not np.isfinite(tg).any():
+            continue
         tg_low = np.stack([l1[sl], l2[sl]], axis=1).astype(np.float32)
         pk_h = peak_h_all[sl].astype(np.float32)
         # **Nhãn ở thang chuẩn hoá** (cùng thang với đầu vào) — xem `HeightScale`.
@@ -692,10 +795,6 @@ def build_dataset(df: pd.DataFrame, split: str, t_in: int = DEFAULT_T_IN,
     st_list = list(stations) if stations is not None else sorted(sub["station"].unique().tolist())
     feat_cols = [c for c in feature_names if c in df.columns]
 
-    # Ngày dùng chung cho mọi trạm (lưới ngày liên tục) để cửa sổ khớp nhau.
-    day_lo = max(lo, "2016-12-31")
-    all_days = pd.date_range(day_lo, hi, freq="D").strftime("%Y-%m-%d").tolist()
-
     per_station: list[list[WindowSample]] = []
     per_station_scalers: list[FeatureScaler] = []
     out_hscale = height_scale
@@ -705,7 +804,12 @@ def build_dataset(df: pd.DataFrame, split: str, t_in: int = DEFAULT_T_IN,
         sdf = sub[sub["station"] == st]
         if sdf.empty:
             continue
-        days = sorted(sdf["day"].unique().tolist())
+        # **Lưới ngày LIÊN TỤC theo lịch** (từ ngày đầu tới ngày cuối có dữ liệu của trạm
+        # trong tập chia): cửa sổ `T_in`/`T_out` đếm theo ngày lịch, không theo vị trí phần
+        # tử. Ngày thiếu dữ liệu → hàng NaN (đầu vào → 0 sau chuẩn hoá, nhãn NaN = bỏ qua
+        # trong hàm mất mát/chấm điểm). Trước 24/11/2026 lưới chỉ gồm ngày có dữ liệu nên
+        # một ngày thiếu làm cửa sổ "nhảy" qua ngày đó và nhãn lead k lệch sang ngày khác.
+        days = calendar_days(sdf["day"].min(), sdf["day"].max())
         if fit_scaler:
             raw = sdf.set_index("day").reindex(days)[feat_cols].to_numpy(dtype=np.float32)
             s = FeatureScaler().fit(raw)

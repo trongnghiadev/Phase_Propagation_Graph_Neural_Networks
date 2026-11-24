@@ -1,13 +1,17 @@
 #!/usr/bin/env Rscript
 # evaluation.R -- Chay ham danh gia CHUNG cho MOI mo hinh (Chuong 4, muc 4.5).
 #
-#   Rscript pipelines/r/evaluation.R [--pred PATH ...] [--obs-only]
+#   Rscript pipelines/r/evaluation.R [--pred PATH ...] [--split test|val|train|all] [--obs-only]
+#
+# `--split` (mac dinh `test`): chi danh gia ban ghi co `target_date` thuoc tap do
+# (bien lay tu `config/splits.json`). `all` = toan giai doan (cach cu; B_harm/B0
+# khi do gom ca giai doan fit -> trong mau).
 #
 # LAM GI:
 #  1. Doc du bao chinh thuc (KTTV) tu `official_forecasts` -> baseline `B_KTTV`.
 #  2. Sinh du bao "moc" cho cac mo hinh co san de kiem chung pipeline:
-#       - B0     : climatology (trung binh cac dinh cung ngay lich trong lich su)
-#       - B_harm : trieu thien van du tinh (tu `harmonic.R`)
+#       - B0     : climatology (trung binh cac dinh cung ngay lich, CHI tren tap train)
+#       - B_harm : trieu thien van du tinh (tu `harmonic.R`, fit tren tap train)
 #       - B_KTTV : du bao chinh thuc
 #  3. Tinh day du chi so: MAE, RMSE, bias (DeltaH), DeltaT, NSE, KGE,
 #     POD/FAR/CSI (bao dong), skill so voi KTTV.
@@ -96,6 +100,16 @@ opt_out <- get_opt("--out-dir")
 if (length(opt_out) && nzchar(opt_out)) OUT_E5 <- opt_out
 ensure_dir(OUT_E5)
 NO_PLOT <- "--no-plot" %in% argv
+SPLIT_CFG <- load_splits()
+opt_split <- get_opt("--split")
+EVAL_SPLIT <- if (length(opt_split) && nzchar(opt_split)) opt_split else "test"
+if (!EVAL_SPLIT %in% c(names(SPLIT_CFG$splits), "all"))
+  stop("--split phai la train/val/test/all, nhan: ", EVAL_SPLIT, call. = FALSE)
+EVAL_WINDOW <- if (EVAL_SPLIT == "all") c("0000-01-01", "9999-12-31") else SPLIT_CFG$splits[[EVAL_SPLIT]]
+TRAIN_WINDOW <- SPLIT_CFG$splits$train
+say2("== Tap danh gia: ", EVAL_SPLIT, " (", EVAL_WINDOW[1], " -> ", EVAL_WINDOW[2], ")")
+# Mo hinh khong phu thuoc chan troi (ghep cap kiem dinh voi MOI (issued_date, lead_day)).
+HORIZON_FREE <- c("B0", "B_harm")
 if (length(opt_pred)) {
   say2("== File du bao ngoai ==")
   for (p in opt_pred) say2("   ", p)
@@ -168,7 +182,11 @@ if (!is.null(ktv)) {
 
 # --- B0: climatology (trung binh cac dinh cung ngay lich trong lich su) ---
 say2("\n== Du bao climatology (B0) ==")
-clim_parts <- lapply(split(obs, obs$station), function(d) {
+# CHI dung tap train de tinh climatology (truoc day dung moi nam, ke ca nam dang
+# du bao va tap test -> ro ri).
+obs_train <- obs[in_fit_window(obs$day, TRAIN_WINDOW), , drop = FALSE]
+assert_no_test_days(obs_train$day, SPLIT_CFG$test_from, "climatology B0")
+clim_parts <- lapply(split(obs_train, obs_train$station), function(d) {
   d$md <- format(as.Date(d$day), "%m-%d")
   d$yr <- as.integer(substr(d$day, 1, 4))
   # trung binh theo (md) tren cac nam truoc, loai bo nam du bao
@@ -304,13 +322,16 @@ all_pred <- do.call(rbind, lapply(preds, function(d) {
 }))
 rownames(all_pred) <- NULL
 say2("\ntong so ban ghi du bao: ", nrow(all_pred))
+all_pred <- all_pred[in_fit_window(all_pred$target_date, EVAL_WINDOW), , drop = FALSE]
+rownames(all_pred) <- NULL
+say2("ban ghi trong tap danh gia ", EVAL_SPLIT, ": ", nrow(all_pred))
 
 # ---------------------------------------------------------------------------
 # 3. Danh gia
 # ---------------------------------------------------------------------------
 say2("\n== Danh gia ==")
 ev <- evaluate_predictions(all_pred, obs, exceed_thresholds = thr_list,
-                           obs_exceed = obs_exceed)
+                           obs_exceed = obs_exceed, horizon_free = HORIZON_FREE)
 m <- ev$matched
 say2("so cap ghep duoc: ", nrow(m), " / ", nrow(all_pred), " ban ghi")
 
@@ -328,13 +349,21 @@ if (!is.null(ev$overall)) {
     write_csv_df(ev$tests$dm, file.path(OUT_E5, "evaluation_diebold_mariano.csv"))
   }
   if (!is.null(ev$tests)) {
-    tt <- do.call(rbind, c(
-      if (!is.null(ev$tests$wilcoxon))
-        cbind(test = "wilcoxon", ev$tests$wilcoxon[, c("model_a", "model_b", "n_pairs",
-          "stat_w", "p_value", "p_holm")], stringsAsFactors = FALSE),
-      if (!is.null(ev$tests$dm))
-        cbind(test = "diebold_mariano", ev$tests$dm[, c("model_a", "model_b", "n",
-          "dm_t", "p_value", "p_holm")], stringsAsFactors = FALSE)))
+    tt_parts <- list()
+    if (!is.null(ev$tests$wilcoxon)) {
+      w <- ev$tests$wilcoxon
+      tt_parts[[1]] <- data.frame(test = "wilcoxon_abs_error", model_a = w$model_a,
+                                  model_b = w$model_b, n = w$n_pairs, stat = w$stat_w,
+                                  p_value = w$p_value, p_holm = w$p_holm)
+    }
+    if (!is.null(ev$tests$dm)) {
+      d <- ev$tests$dm
+      tt_parts[[length(tt_parts) + 1L]] <- data.frame(
+        test = "diebold_mariano_abs", model_a = d$model_a, model_b = d$model_b, n = d$n,
+        stat = d$dm_t, p_value = d$p_value, p_holm = d$p_holm)
+    }
+    tt <- do.call(rbind, tt_parts)
+    tt$split <- EVAL_SPLIT
     write_csv_df(tt, file.path(OUT_E5, "evaluation_tests.csv"))
   }
   say2("\n-- Chi so tong hop --")

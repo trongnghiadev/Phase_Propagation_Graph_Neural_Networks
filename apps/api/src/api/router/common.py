@@ -17,7 +17,8 @@ from fastapi import HTTPException, status
 from vngis.admin import BEFORE, ERAS, FROM, VN_TZ, era_of
 
 __all__ = ["VN_TZ", "BEFORE", "FROM", "ERAS", "era_of", "clean", "to_vn_date", "to_vn_datetime",
-           "parse_day", "parse_dt", "check_era", "HttpError", "obj_id", "page"]
+           "parse_day", "parse_dt", "check_era", "HttpError", "obj_id", "page", "acquire_guard",
+           "guard_check", "qc_http_error"]
 
 #: Lỗi HTTP kèm mã trạng thái nghiệp vụ.
 HttpError = HTTPException
@@ -132,3 +133,52 @@ def day_bounds(d_from: datetime | None, d_to: datetime | None) -> dict:
     end = d_to or datetime.now(timezone.utc)
     start = d_from or (end - timedelta(days=30))
     return {"from": start, "to": end}
+
+
+# ------------------------------------------------------------------ khoá + QC --------
+def acquire_guard(guard: Any, *, busy_detail: str) -> None:
+    """`guard.acquire()`; bận → 423, mất khoá ngay lúc lấy fence → 503."""
+    from vngis.locks import LockBusy, LockLost
+
+    try:
+        guard.acquire()
+    except LockBusy as e:
+        raise HTTPException(status.HTTP_423_LOCKED, detail=f"{busy_detail}: {e}") from None
+    except LockLost as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e),
+                            headers={"Retry-After": "1"}) from None
+
+
+def guard_check(guard: Any) -> None:
+    """Gọi NGAY trước mỗi lệnh ghi khi đang giữ `LockGuard`: đã mất khoá (watchdog gia hạn thất bại)
+    thì dừng, trả 503 — không ghi khi tiến trình khác có thể đang giữ khoá."""
+    from vngis.locks import LockLost
+
+    try:
+        guard.check()
+    except LockLost as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e),
+                            headers={"Retry-After": "1"}) from None
+
+
+def qc_http_error(e: Exception) -> HTTPException:
+    """Đổi lỗi của `vngis.qc` thành HTTP: không có → 404, xung đột → 409, dữ liệu sai → 422."""
+    from vngis import qc
+
+    if isinstance(e, qc.VersionConflict):
+        return HTTPException(status.HTTP_409_CONFLICT,
+                             detail={"error": "xung đột phiên bản", "flag_id": e.flag_id,
+                                     "expected": e.expected, "current": e.current})
+    if isinstance(e, qc.FieldConflict):
+        return HTTPException(status.HTTP_409_CONFLICT,
+                             detail={"error": "giá trị hiện tại khác giá trị mong đợi", "field": e.field,
+                                     "expected": clean(e.expected), "current": clean(e.current)})
+    if isinstance(e, qc.FlagExists):
+        return HTTPException(status.HTTP_409_CONFLICT, detail=str(e))
+    if isinstance(e, qc.FlagNotFound):
+        return HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
+    if isinstance(e, ValueError):
+        return HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    if isinstance(e, qc.AuditStateError):
+        return HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    raise e

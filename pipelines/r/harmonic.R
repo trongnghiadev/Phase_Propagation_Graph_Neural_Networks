@@ -10,16 +10,21 @@
 #  2. Fit mo hinh dieu hoa BOC NHIEU BAY PHUONG NHO GOC cho tung tram
 #     (xem `R/harmonics.R` de biet ly do chon phuong phap).
 #  3. Bao cao he so (bien do, pha) cua cac thanh phan M2, S2, K1, O1, N2...
-#  4. Kiem tra do chinh xac: tach tap huan luyen / kiem tra theo THOI GIAN
-#     (khong ngau nhien, vi du lieu co tuinh bien), tai tao dinh/chan tren tap
-#     kiem tra va tinh MAE do cao (m) + MAE gio (h).
+#  4. Kiem tra do chinh xac: fit tren TAP TRAIN, du tinh tren TAP VAL (bien lay
+#     tu `config/splits.json`; KHONG dung tap test), tinh MAE do cao (m) + MAE gio (h).
 #  5. Sinh TRIEU THIEN VAN DU TINH cho toan giai doan + 5 ngay tuong lai,
 #     ghi ra `data/processed/features/astro_tide.csv` (cot day,h1,h2,t1_h,t2_h)
 #     -- day la file job Spark G5 doc de dien `astro_*`.
+#     He so dieu hoa CHI fit tren cac tap `harmonic_fit_splits` cua
+#     `config/splits.json` (mac dinh: train) -- khong bao gio cham tap test
+#     (kiem tra tu dong `assert_no_test_days`). Ghi kem
+#     `data/processed/features/astro_tide_meta.json` (fit_from/fit_to) de G5 va
+#     phasegnn tu choi file fit tren tap test.
 #  6. Luu PHAN DU PHI THIEN VAN = thuc do - thien van, theo tram - ngay.
 #
 # DAU RA:
 #   data/processed/features/astro_tide.csv     (dinh dang cho Spark G5)
+#   data/processed/features/astro_tide_meta.json (giai doan fit, moc test)
 #   results/E1/harmonic_components.csv         (he so thanh phan)
 #   results/E1/harmonic_fit_summary.csv        (tong hop theo tram)
 #   results/E1/harmonic_validation.csv         (MAE do cao / MAE gio)
@@ -83,15 +88,24 @@ COMPONENTS_REPORT <- c("M2", "S2", "N2", "K1", "O1", "P1", "Q1", "M4", "MS4", "M
 # Q1 + song bien M4, MS4, M6, MK3.
 COMPONENTS_FORECAST <- COMPONENTS_REPORT
 
-# Tuyen so nam cho trieu du tinh (mo hinh dung chung cho ca ky du bao).
-FIT_YEARS <- 2017:2026
+# Giai doan fit he so dieu hoa: CHI cac tap `harmonic_fit_splits` trong
+# `config/splits.json` (mac dinh "train" = 2017-01-01 -> 2022-12-31). Chon
+# "train" (khong gop val) vi PhaseGNN/B1 dung val de dung som/chon mo hinh: neu
+# fit dieu hoa tren val thi dac trung `astro_*` cua tap val la "trong mau".
+# Mo'c test lay tu cung file -> khong viet cung o hai noi.
+SPLIT_CFG <- load_splits()
+FIT_WINDOW <- harmonic_fit_window(SPLIT_CFG)
+TEST_FROM <- SPLIT_CFG$test_from
 
 # So ngay du tinh them (5 ngay tuong lai nhu yeu cau).
 FORECAST_DAYS <- 5
 
-# Kiem tra do chinh xac: tach theo NAM (khong ngau nhien -- du lieu co xu huong
-# va thoi ti, tach ngau nhien se lam ro loi "co tap trung").
-VALID_YEARS <- 2024:2026
+# Kiem tra do chinh xac: fit tren train, du tinh tren val (tach theo THOI GIAN,
+# khong ngau nhien). Tap test KHONG dung o day.
+TRAIN_WINDOW <- SPLIT_CFG$splits$train
+VALID_WINDOW <- SPLIT_CFG$splits$val
+say2("Giai doan fit dieu hoa: ", FIT_WINDOW[1], " -> ", FIT_WINDOW[2],
+     " (tap: ", paste(SPLIT_CFG$harmonic_fit_splits, collapse = "+"), "); mo'c test: ", TEST_FROM)
 
 # ---------------------------------------------------------------------------
 # 2. Doc du lieu
@@ -120,15 +134,20 @@ say2("\n== Fit dieu hoa theo tram ==")
 fits <- list()
 comp_rows <- list()
 for (st in sort(unique(fit_data$station))) {
-  d <- fit_data[fit_data$station == st & fit_data$year %in% FIT_YEARS, ]
+  d_all <- fit_data[fit_data$station == st, ]
+  d <- d_all[in_fit_window(d_all$obs_day, FIT_WINDOW), ]
   if (nrow(d) < 500) {
     say2("  ", st, ": bo qua (chi ", nrow(d), " moc)")
     next
   }
+  assert_no_test_days(d$obs_day, TEST_FROM, paste("fit dieu hoa", st))
   t <- t_ref(d$ts)
   fit <- fit_harmonics(t, d$value, components = COMPONENTS_REPORT, trend = TRUE)
-  fits[[st]] <- list(fit = fit, t = t, y = d$value, station = st,
-                     obs_day = d$obs_day, ts = d$ts, kind = d$kind)
+  # `t/y/obs_day/ts/kind`: TOAN BO chuoi cua tram (dung cho kiem tra va phan du);
+  # chi `fit` la tu giai doan FIT_WINDOW.
+  fits[[st]] <- list(fit = fit, t = t_ref(d_all$ts), y = d_all$value, station = st,
+                     obs_day = d_all$obs_day, ts = d_all$ts, kind = d_all$kind,
+                     fit_from = min(d$obs_day), fit_to = max(d$obs_day))
   for (i in seq_along(COMPONENTS_REPORT)) {
     comp_rows[[length(comp_rows) + 1L]] <- data.frame(
       station = st, component = COMPONENTS_REPORT[i],
@@ -153,7 +172,8 @@ write_csv_df(comp_df, file.path(OUT_E1, "harmonic_components.csv"))
 
 fit_sum <- do.call(rbind, lapply(names(fits), function(st) {
   f <- fits[[st]]$fit
-  data.frame(station = st, n_obs = f$n, df = f$df,
+  data.frame(station = st, fit_from = fits[[st]]$fit_from, fit_to = fits[[st]]$fit_to,
+             n_obs = f$n, df = f$df,
              var_expl = f$var_expl, rms_resid_m = f$rms_resid,
              a0_m = unname(f$coef[["a0"]]),
              amp_M2_m = f$amplitude[["M2"]],
@@ -168,20 +188,20 @@ say2("\nTong hop fit: ", nrow(fit_sum), " tram")
 # 4. Kiem tra do chinh xac: tach theo NAM
 # ---------------------------------------------------------------------------
 # Cach kiem tra:
-#  - Fit tren cac NAM truoc (`train_years`), du tinh tren `VALID_YEARS`.
+#  - Fit tren TAP TRAIN, du tinh tren TAP VAL (`config/splits.json`).
 #  - Do chi sai nguoi quan sat (MAE do cao, m) va MAE gio dinh (h).
 #
 # Cach do MAE GIO: so sanh gio dinh thuc do voi gio dinh du tinh cua cung
 # ngay. Vi trieu co 2 dinh/ngay, dinh du tinh duoc chon theo "gan nhat voi gio
 # thuc do" de tranh ho doi dinh 1 <-> dinh 2 (nguon sai so lon nhat).
-say2("\n== Kiem tra do chinh xac (tach theo nam) ==")
+say2("\n== Kiem tra do chinh xac (fit train -> du tinh val) ==")
 val_rows <- list()
 for (st in names(fits)) {
   d <- fits[[st]]
   dd <- d$obs_day
-  yrs <- as.integer(substr(dd, 1, 4))
-  in_tr <- yrs < min(VALID_YEARS)
-  in_va <- yrs %in% VALID_YEARS
+  in_tr <- in_fit_window(dd, TRAIN_WINDOW)
+  in_va <- in_fit_window(dd, VALID_WINDOW)
+  assert_no_test_days(dd[in_tr | in_va], TEST_FROM, paste("kiem tra dieu hoa", st))
   tr <- d$t[in_tr]
   yv <- d$y[in_va]
   tv <- d$t[in_va]
@@ -233,8 +253,8 @@ for (st in names(fits)) {
   }
   val_rows[[length(val_rows) + 1L]] <- data.frame(
     station = st, n_val = length(yv),
-    train_years = paste0(min(VALID_YEARS) - 1, "-", min(VALID_YEARS) - 1),
-    val_years = paste(min(VALID_YEARS), max(VALID_YEARS)),
+    train_window = paste(TRAIN_WINDOW, collapse = "/"),
+    val_window = paste(VALID_WINDOW, collapse = "/"),
     mae_height_m = mae_h, rmse_height_m = rmse_h,
     mae_peak_hour_h = hours, stringsAsFactors = FALSE)
   say2(sprintf("  %-12s n_val=%6d  MAE cao=%.4f m  RMSE=%.4f m  MAE gio=%.3f h",
@@ -316,6 +336,22 @@ astro_path <- p_data("processed", "features", "astro_tide.csv")
 write_csv_df(astro, astro_path)
 say2("ghi ", astro_path, ": ", nrow(astro), " dong (tu ", min(astro$day), " den ",
      max(astro$day), ")")
+# Meta: giai doan fit -> G5 (`features/splits.py::astro_leak_reason`) va phasegnn
+# (`check_astro_provenance`) tu choi file neu fit_to >= mo'c test.
+fit_to_all <- max(vapply(fits, function(f) f$fit_to, ""))
+fit_from_all <- min(vapply(fits, function(f) f$fit_from, ""))
+assert_no_test_days(fit_to_all, TEST_FROM, "astro_tide_meta")
+astro_meta_path <- p_data("processed", "features", "astro_tide_meta.json")
+write_json_df(list(
+  fit_from = fit_from_all, fit_to = fit_to_all,
+  fit_splits = I(SPLIT_CFG$harmonic_fit_splits),
+  fit_window = FIT_WINDOW, test_from = TEST_FROM,
+  splits_file = "config/splits.json",
+  components = COMPONENTS_REPORT, trend = TRUE,
+  files = c("data/processed/features/astro_tide.csv", "results/E1/astro_tide_by_station.csv"),
+  generated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+  generator = "pipelines/r/harmonic.R"), astro_meta_path)
+say2("ghi ", astro_meta_path, ": fit ", fit_from_all, " -> ", fit_to_all, " (< test ", TEST_FROM, ")")
 
 # ---------------------------------------------------------------------------
 # 5b. TRIEU THIEN VAN THEO TUNG TRAM -> results/E1/astro_tide_by_station.csv
@@ -417,7 +453,8 @@ p_amp <- ggplot(comp_ev, aes(x = station, y = amplitude_m, fill = component)) +
   geom_col(position = position_dodge(width = 0.85), width = 0.8) +
   scale_fill_manual(values = palette_pgnn(5)) +
   labs(title = "Bien do thanh phan dieu hoa theo tram",
-       subtitle = "Bo nhieu bay phuong nho goc (LSQ), du lieu dinh/chan 2017-2026",
+       subtitle = paste0("Bo nhieu bay phuong nho goc (LSQ), dinh/chan ", FIT_WINDOW[1], " -> ",
+                         FIT_WINDOW[2], " (chi tap fit, khong gom test)"),
        x = NULL, y = "Bien do (m)", fill = "Thanh phan") +
   theme_pgnn()
 save_fig(print(p_amp), file.path(OUT_E1, "harmonic_amplitudes.png"), width = 1600, height = 880)
@@ -474,8 +511,8 @@ if (nrow(val_df)) {
     geom_col(fill = palette_pgnn(1), width = 0.7) +
     geom_text(aes(label = sprintf("%.3f", mae_height_m)), vjust = -0.4, size = 3.4) +
     scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
-    labs(title = "MAE do cao kiem tra (tap 2024-2026)",
-         subtitle = "Huan luyen tren cac nam truoc; MAE tren toan bo moc kiem tra",
+    labs(title = paste0("MAE do cao kiem tra (tap val ", VALID_WINDOW[1], " -> ", VALID_WINDOW[2], ")"),
+         subtitle = "Fit tren tap train; MAE tren toan bo moc cua tap val",
          x = NULL, y = "MAE (m)") +
     theme_pgnn()
   save_fig(print(p_val), file.path(OUT_E1, "harmonic_validation_mae.png"), width = 1440, height = 800)

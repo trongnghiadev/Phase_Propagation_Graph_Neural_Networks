@@ -38,7 +38,8 @@ Trong đó `g = 9,81 m/s²`, `h` = chiều sâu nước trung bình theo proxy l
 
 **Đầu ra.**
 - Cập nhật `graph_edges` (staging → kiểm tra → sao lưu `__prev` → thay nguyên tử) với
-  `celerity_ms`, `tau_phys_h` cho từng chiều; `edges.parquet` được ghi lại với `tau_down_h`, `tau_up_h`.
+  `celerity_ms`, `tau_phys_h` cho từng chiều; `edges.parquet` được ghi lại với `tau_down_h`, `tau_up_h`
+  (vào `edges.parquet.tmp_<run_id>`, đổi tên sau khi đã thay `graph_edges`; bản cũ giữ tới lúc đó).
 - Báo cáo `results/G3/tau_phys_summary.csv`: theo chiều (đếm, min/trung vị/max τ) và tổng τ
   từ Vũng Tàu tới từng trạm.
 
@@ -61,6 +62,7 @@ from pyspark.sql.types import (BooleanType, DoubleType, LongType, StringType, St
                                StructType)
 
 from common.jobrun import JobRun  # noqa: E402
+from features import outdir  # noqa: E402
 from common.session import (JobLockError, LockLostError, MongoAdmin, build_session, env_db, env_uri,  # noqa: E402
                             read_mongo, write_mongo)
 from features import atomic  # noqa: E402
@@ -206,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
     staging = f"{COLL}{atomic.STAGING}_{run_id}"
     print(f"run_id={run_id} db={args.db}", flush=True)
     status = "failed"
+    tmp_dirs: dict[str, str] = {}   # đích → thư mục tạm chưa công bố (xóa ở `finally`)
     try:
         try:
             run.acquire()
@@ -450,8 +453,13 @@ def main(argv: list[str] | None = None) -> int:
                       F.sum(F.when(F.col("dir") == "up", F.col("tau_phys_h"))).alias("tau_up_h")))
         edges_df = edges_df.join(pivot, ["lo", "hi"], "left").drop("lo", "hi")
         spark.conf.set("spark.sql.shuffle.partitions", "8")
-        edges_df.coalesce(4).write.mode("overwrite").parquet(os.path.join(args.out_dir, "edges.parquet"))
-        print(f"[PARQUET] {args.out_dir}/edges.parquet ({len(edges)} dòng)", flush=True)
+        # Ghi `<đích>.tmp_<run_id>`, công bố (đổi tên) sau khi đã thay `graph_edges`; bản cũ giữ tới lúc đó.
+        dst = os.path.join(args.out_dir, "edges.parquet")
+        for msg in outdir.recover(dst):
+            print(f"[DỌN] {msg}", flush=True)
+        tmp_dirs[dst] = outdir.tmp_path(dst, run_id)
+        edges_df.coalesce(4).write.mode("errorifexists").parquet(tmp_dirs[dst])
+        print(f"[PARQUET tạm] {tmp_dirs[dst]} ({len(edges)} dòng)", flush=True)
 
         # ---- Thay bản chính ------------------------------------------------
         run.hold()
@@ -467,6 +475,10 @@ def main(argv: list[str] | None = None) -> int:
         atomic.swap(adm, COLL, staging, len(edges), done)
         run.update({"replacing": None})
         adm.drop(f"{COLL}{atomic.PREV}")
+        run.hold()
+        for d in list(tmp_dirs):
+            outdir.publish(tmp_dirs.pop(d), d, run_id)
+            print(f"[PUBLISH] {d}", flush=True)
         status = "ok"
         print("Thống kê: " + json.dumps({"edges": len(edges), "by_dir": rows}, ensure_ascii=False), flush=True)
         return 0
@@ -483,6 +495,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Dừng: lỗi không lường trước (mã thoát 6).", flush=True)
         return 6
     finally:
+        for t in tmp_dirs.values():
+            outdir.discard(t)
         try:
             run.finish(None if status == "ack" else status)
         finally:

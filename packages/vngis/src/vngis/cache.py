@@ -12,6 +12,10 @@ Tính năng chính:
   rồi tự tính, không xếp hàng vô hạn.
 - **Nén zstd + msgpack** cho giá trị lớn (``compress_threshold_bytes``); giá trị nhỏ để JSON thô.
 - **Đếm hit/miss theo loại key** (Redis hash ``cache:stats``).
+- **Redis lỗi thì bỏ qua cache**: ``get``/``get_stale`` trả miss, ``set`` không ghi, ``version`` trả
+  ``VERSION_UNAVAILABLE`` (key có phiên bản thành ``nocache:…``, không bao giờ đọc/ghi Redis), và
+  ``get_or_compute`` gọi thẳng ``compute()``; mỗi lần đều ghi log cảnh báo. Không trả phiên bản 0 khi
+  Redis lỗi, vì như thế có thể đọc trúng key ``v0`` cũ khi Redis chập chờn.
 
 Giá trị được mã hoá theo thứ tự ưu tiên: ``zstd(msgpack)`` > ``json``. Tiền tố byte đánh dấu
 để đọc lại đúng kiểu, nên có thể đổi quy tắc mà vẫn đọc được giá trị cũ.
@@ -27,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 import time
 from dataclasses import dataclass, field
@@ -42,9 +47,16 @@ try:
 except ImportError:  # pragma: no cover - phụ thuộc tuỳ chọn
     zstandard = None
 
-__all__ = ["Cache", "CacheStats", "encode_value", "decode_value", "version_key", "STATS_KEY"]
+__all__ = ["Cache", "CacheStats", "encode_value", "decode_value", "version_key", "STATS_KEY",
+           "VERSION_UNAVAILABLE", "NOCACHE_PREFIX"]
+
+log = logging.getLogger("vngis.cache")
 
 STATS_KEY = "cache:stats"
+#: Phiên bản trả về khi không đọc được ``ver:{coll}`` (Redis lỗi).
+VERSION_UNAVAILABLE = -1
+#: Tiền tố key "không cache": ``versioned_key`` trả key này khi không biết phiên bản.
+NOCACHE_PREFIX = "nocache:"
 #: Tiền tố byte đánh dấu kiểu mã hoá.
 _CODEC_JSON = b"J"
 _CODEC_MSGPACK = b"M"
@@ -160,9 +172,23 @@ class Cache:
         self.rebuild_lock_ttl_ms = rebuild_lock_ttl_ms
 
     # ------------------------------------------------------------ phiên bản ----
+    def _warn(self, op: str, key: str, exc: BaseException) -> None:
+        log.warning("cache Redis lỗi khi %s %r: %s: %s — bỏ qua cache", op, key, type(exc).__name__, exc)
+
+    @staticmethod
+    def is_nocache(key: str) -> bool:
+        return key.startswith(NOCACHE_PREFIX)
+
     def version(self, coll: str) -> int:
-        """Phiên bản hiện tại của collection; 0 nếu chưa có (key thiếu → coi như 0)."""
-        raw = self.redis.get(version_key(coll))
+        """Phiên bản hiện tại của collection; 0 nếu chưa có (key thiếu → coi như 0).
+
+        Redis lỗi → ``VERSION_UNAVAILABLE`` (-1) kèm log cảnh báo (không ném lỗi).
+        """
+        try:
+            raw = self.redis.get(version_key(coll))
+        except Exception as e:  # noqa: BLE001 - Redis lỗi: bỏ qua cache
+            self._warn("đọc phiên bản", version_key(coll), e)
+            return VERSION_UNAVAILABLE
         if raw is None:
             return 0
         try:
@@ -177,13 +203,20 @@ class Cache:
     def versioned_key(self, prefix: str, coll: str, *rest: Any) -> str:
         """Key đầy đủ có kèm phiên bản: ``<prefix>:v{ver}:<rest>``."""
         tail = ":".join(str(r) for r in rest)
-        key = f"{prefix}:v{self.version(coll)}"
+        ver = self.version(coll)
+        key = f"{prefix}:v{ver}" if ver != VERSION_UNAVAILABLE else f"{NOCACHE_PREFIX}{prefix}"
         return f"{key}:{tail}" if tail else key
 
     # ------------------------------------------------------------ đọc/ghi -------
     def get(self, key: str) -> Any:
-        """Đọc giá trị; đếm hit/miss theo loại key. Trả ``None`` nếu không có."""
-        raw = self.redis.get(key)
+        """Đọc giá trị; đếm hit/miss theo loại key. Trả ``None`` nếu không có hoặc Redis lỗi."""
+        if self.is_nocache(key):
+            return None
+        try:
+            raw = self.redis.get(key)
+        except Exception as e:  # noqa: BLE001
+            self._warn("đọc", key, e)
+            return None
         value = decode_value(raw)
         kind = CacheStats.kind_of(key)
         if value is None:
@@ -194,19 +227,34 @@ class Cache:
 
     def get_stale(self, key: str) -> Any:
         """Đọc bản ``stale:`` (giá trị cũ, dùng khi không tính lại được)."""
-        raw = self.redis.get(f"stale:{key}")
+        if self.is_nocache(key):
+            return None
+        try:
+            raw = self.redis.get(f"stale:{key}")
+        except Exception as e:  # noqa: BLE001
+            self._warn("đọc", f"stale:{key}", e)
+            return None
         value = decode_value(raw)
         if value is not None:
             self._inc("stale_hits", CacheStats.kind_of(key))
         return value
 
     def set(self, key: str, value: Any, ttl_s: int | None = None) -> int:
-        """Ghi giá trị kèm TTL có jitter; đồng thời ghi bản ``stale:`` sống lâu hơn."""
+        """Ghi giá trị kèm TTL có jitter; đồng thời ghi bản ``stale:`` sống lâu hơn.
+
+        Trả TTL đã đặt; 0 nếu không ghi (key ``nocache:`` hoặc Redis lỗi — có log cảnh báo).
+        """
+        if self.is_nocache(key):
+            return 0
         ttl = int(ttl_s if ttl_s is not None else self.ttl_s.get(self._kind_ttl(key), 60))
         ttl = max(1, int(ttl * (1 + random.uniform(-self.jitter, self.jitter))))
         raw = encode_value(value, self.compress_threshold_bytes)
-        self.redis.set(key, raw, ex=ttl)
-        self.redis.set(f"stale:{key}", raw, ex=max(1, ttl * self.stale_factor))
+        try:
+            self.redis.set(key, raw, ex=ttl)
+            self.redis.set(f"stale:{key}", raw, ex=max(1, ttl * self.stale_factor))
+        except Exception as e:  # noqa: BLE001
+            self._warn("ghi", key, e)
+            return 0
         return ttl
 
     def delete(self, *keys: str) -> int:
@@ -265,11 +313,25 @@ class Cache:
         - Thử lấy ``lock:rebuild:{key}``: được thì tính, ghi cache, trả.
         - Không được khoá: đọc bản ``stale:``; có thì trả bản cũ; không có thì chờ (tối đa
           ``max_wait`` lần, mỗi lần 50 ms) rồi tự tính.
+        - Redis lỗi (hoặc key ``nocache:``) → gọi thẳng ``compute()``, không chờ, không ghi cache.
         """
-        value = self.get(key)
+        if self.is_nocache(key):
+            return compute()
+        try:
+            raw = self.redis.get(key)
+        except Exception as e:  # noqa: BLE001 - Redis chết: bỏ qua cache, tính trực tiếp
+            self._warn("đọc", key, e)
+            return compute()
+        value = decode_value(raw)
         if value is not None:
+            self._inc("hits", CacheStats.kind_of(key))
             return value
-        token = self.acquire_rebuild_lock(key)
+        self._inc("misses", CacheStats.kind_of(key))
+        try:
+            token = self.acquire_rebuild_lock(key)
+        except Exception as e:  # noqa: BLE001
+            self._warn("lấy khoá dựng lại", key, e)
+            return compute()
         if token is not None:
             try:
                 value = compute()
@@ -399,33 +461,9 @@ class AsyncCache:
 
     async def get_or_compute(self, key: str, kind: str, compute: Callable[[], Any], *,
                             ttl_s: int | None = None, max_wait: int | None = None) -> Any:
-        """Bản async của ``Cache.get_or_compute`` (hàm ``compute`` được gọi trong thread)."""
-        value = await self.get(key)
-        if value is not None:
-            return value
-        token = await self._run(lambda: self._c.acquire_rebuild_lock(key))
-        if token is not None:
-            try:
-                value = await self._run(compute)
-                await self.set(key, value, ttl_s if ttl_s is not None else self._c.ttl_s.get(kind))
-                return value
-            finally:
-                await self._run(lambda: self._c.release_rebuild_lock(key, token))
-        stale = await self.get_stale(key)
-        if stale is not None:
-            return stale
-        limit = self._c.max_wait if max_wait is None else max_wait
-        for _ in range(limit):
-            await asyncio.sleep(0.05)
-            value = await self.get(key)
-            if value is not None:
-                return value
-            stale = await self.get_stale(key)
-            if stale is not None:
-                return stale
-        value = await self._run(compute)
-        await self.set(key, value, ttl_s if ttl_s is not None else self._c.ttl_s.get(kind))
-        return value
+        """Bản async của ``Cache.get_or_compute`` (chạy trong thread, cùng cách xử lý khi Redis lỗi)."""
+        return await self._run(lambda: self._c.get_or_compute(key, kind, compute, ttl_s=ttl_s,
+                                                              max_wait=max_wait))
 
     async def stats(self) -> dict[str, dict[str, int]]:
         return await self._run(self._c.stats)

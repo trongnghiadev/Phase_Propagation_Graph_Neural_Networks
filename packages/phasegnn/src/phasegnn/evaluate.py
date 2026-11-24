@@ -175,8 +175,9 @@ def observed_daily(g5: pd.DataFrame) -> pd.DataFrame:
     h_obs = np.where(np.isfinite(h1) & np.isfinite(h2), np.maximum(h1, h2),
                      np.where(np.isfinite(h1), h1,
                               np.where(np.isfinite(h2), h2, np.nan)))
-    # giờ của đỉnh cao hơn
-    take1 = np.isfinite(h1) & (np.isfinite(h2) | (h1 >= h2))
+    # giờ của đỉnh cao hơn (h2 thiếu hoặc h1 >= h2 → đỉnh 1). Trước 24/11/2026 điều kiện là
+    # `isfinite(h2) | ...` nên khi có đủ 2 đỉnh luôn lấy giờ đỉnh 1, kể cả khi đỉnh 2 cao hơn.
+    take1 = np.isfinite(h1) & (~np.isfinite(h2) | (h1 >= h2))
     t_obs = np.where(take1, t1, t2)
     t_obs = np.where(np.isfinite(h_obs), t_obs, np.nan)
 
@@ -212,10 +213,14 @@ def match_predictions(records: Sequence[dict], obs: pd.DataFrame) -> pd.DataFram
     df["h_q90"] = pd.to_numeric(df.get("h_q90"), errors="coerce")
     df["h_pred"] = pd.to_numeric(df["h_q50"], errors="coerce")
 
-    # chọn đỉnh dự báo cao hơn trong mỗi (station, target_date, model, lead_day)
-    df = df.sort_values(["model", "station", "target_date", "lead_day", "h_pred"],
-                        ascending=[True, True, True, True, False])
-    best = df.groupby(["model", "station", "target_date", "lead_day"], as_index=False).first()
+    # Chọn NGUYÊN MỘT DÒNG (đỉnh dự báo cao hơn) trong mỗi (model, station, target_date,
+    # lead_day): sắp `h_pred` giảm dần (NaN cuối) rồi `drop_duplicates`. Không dùng
+    # `groupby().first()` — hàm đó lấy giá trị khác NaN đầu tiên của TỪNG cột, nên `t_pred`
+    # và `h_pred` có thể đến từ hai bản ghi khác nhau.
+    keys = ["model", "station", "target_date", "lead_day"]
+    df = df.sort_values(keys + ["h_pred"], ascending=[True] * len(keys) + [False],
+                        na_position="last", kind="mergesort")
+    best = df.drop_duplicates(subset=keys, keep="first").reset_index(drop=True)
 
     obs = obs.copy()
     obs["day"] = obs["day"].astype(str)

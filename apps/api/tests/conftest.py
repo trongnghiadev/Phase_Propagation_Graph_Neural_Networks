@@ -95,7 +95,7 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture()
-def fake_db() -> Iterator[Any]:
+def fake_db(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     """MongoDB cho test.
 
     Mặc định dùng **mongomock** (không phụ thuộc dịch vụ ngoài) đã được bổ sung toán tử
@@ -122,7 +122,10 @@ def fake_db() -> Iterator[Any]:
     import mongomock
     from mongomock_bit import patch_mongomock_bit
     patch_mongomock_bit()
-    client = mongomock.MongoClient()
+    # mongomock không có lệnh `hello` → `vngis.qc` chạy nhánh một node (audit pending → applied).
+    import vngis.qc
+    monkeypatch.setattr(vngis.qc, "_supports_txn", lambda db: False)
+    client = mongomock.MongoClient(tz_aware=True)
     db = client["vngis_test"]
     yield db
     client.close()

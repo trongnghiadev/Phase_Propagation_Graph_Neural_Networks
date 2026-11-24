@@ -46,8 +46,9 @@ ENV_VARS: dict[str, tuple[str, ...]] = {
     "REDIS_SENTINEL_MASTER": ("redis", "cache", "master"),
     "REDIS_LOCK_NODES": ("redis", "lock", "nodes"),
     "LOCK_BACKEND": ("redis", "lock", "backend"),
+    "TRUSTED_PROXIES": ("rate_limit", "trusted_proxies"),
 }
-_LIST_VARS = {"REDIS_SENTINELS", "REDIS_LOCK_NODES"}
+_LIST_VARS = {"REDIS_SENTINELS", "REDIS_LOCK_NODES", "TRUSTED_PROXIES"}
 _ENV_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -185,12 +186,6 @@ class RedisLockConfig(_Model):
     def _nodes(cls, v: list[str]) -> list[str]:
         return _check_nodes(v)
 
-    @model_validator(mode="after")
-    def _need_nodes(self) -> "RedisLockConfig":
-        if not self.nodes:
-            raise ValueError("redis.lock.nodes rỗng: đặt REDIS_LOCK_NODES hoặc khai báo trong config/env/*.yaml")
-        return self
-
 
 class RedisConfig(_Model):
     cache: RedisCacheConfig
@@ -298,6 +293,26 @@ class RateLimitConfig(_Model):
     # Nới riêng cho các endpoint công khai (đăng nhập, health).
     login_requests: PositiveInt = 10
     login_window_s: PositiveInt = 60
+    # Proxy tin cậy (IP hoặc CIDR, ví dụ Nginx trong mạng Docker). Chỉ khi kết nối đến từ một proxy trong
+    # danh sách này thì API mới đọc `X-Forwarded-For`; mặc định rỗng = KHÔNG tin header đó (client tự đặt
+    # được, dùng nó sẽ cho phép né giới hạn tần suất). Biến môi trường: TRUSTED_PROXIES=10.0.0.0/8,127.0.0.1
+    trusted_proxies: list[str] = []
+
+    @field_validator("trusted_proxies", mode="before")
+    @classmethod
+    def _split_proxies(cls, v: Any) -> Any:
+        return _split_nodes(v)
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _check_proxies(cls, v: list[str]) -> list[str]:
+        import ipaddress
+        for item in v:
+            try:
+                ipaddress.ip_network(item, strict=False)
+            except ValueError:
+                raise ValueError(f"trusted_proxies: '{item}' không phải IP/CIDR hợp lệ") from None
+        return v
 
 
 class SchedulerConfig(_Model):

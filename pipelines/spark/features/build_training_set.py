@@ -31,18 +31,25 @@ Cột `max_obs_day` = ngày quan trắc LỚN NHẤT thực sự dùng cho dòng
 `max_obs_day < day` cho MỌI dòng (hỏng → dừng, mã thoát 1).
 
 **Cột `astro_*`.** `pipelines/r/harmonic.R` ghi `data/processed/features/astro_tide.csv`
-(cột `day,h1,h2,t1_h,t2_h`). Nếu có file → ghép vào; nếu không → các cột `astro_*` = null và
+(cột `day,h1,h2,t1_h,t2_h`) kèm `astro_tide_meta.json` (giai đoạn fit điều hòa). Có file → kiểm tra
+meta: điều hòa phải fit trên ngày `< test.from` (thiếu meta hoặc fit chạm tập test → dừng, mã 1, vì
+`astro_*` là đầu vào mô hình); hợp lệ → ghép vào. Không có file → các cột `astro_*` = null và
 in cảnh báo `[CẢNH BÁO] thiếu data/processed/features/astro_tide.csv – cột astro_* để null`.
 
-**Chia tập** (đã chốt, không đổi): train 2017-01-01→2022-12-31, val 2023-01-01→2024-06-30,
-test 2024-07-01→2026-11-23.
+**Chia tập** đọc từ `config/splits.json` (nguồn duy nhất, dùng chung với `phasegnn` và R; xem
+`features/splits.py`).
 
 **Đầu ra.** `data/processed/features/g5/year=<YYYY>/part-*.parquet` và
 `data/processed/features/g5/_meta.json` (đếm theo collection, mốc thời gian lớn nhất, ngày chạy,
-phiên bản job, `data_snapshot` để ghi vào bản ghi mô hình, và biên chia tập).
+phiên bản job, `data_snapshot` để ghi vào bản ghi mô hình, và biên chia tập). Ghi vào
+`<out-dir>.tmp_<run_id>` rồi đổi tên (`features/outdir.py`): bản cũ giữ nguyên tới khi bản mới xong.
 
-Mã thoát: 0 ok, 1 kiểm tra hỏng (kể cả rò rỉ), 2 không tra được dữ liệu, 3 job đang chạy ở nơi khác,
-5 mất khóa, 6 lỗi không lường trước.
+**G0.** G5 đọc đầu ra của G0 (`tide_extremes`, `reservoir_daily`, `rainfall_daily`) nên kiểm tra khóa
+G0 như job QC (`features/g0guard.py`).
+
+Mã thoát: 0 ok, 1 kiểm tra hỏng (kể cả rò rỉ, kể cả triều thiên văn fit trên tập test), 2 không tra
+được dữ liệu, 3 job này hoặc G0 đang chạy, 4 G0 còn dở thay thế (`g0_unsettled`), 5 mất khóa,
+6 lỗi không lường trước.
 """
 from __future__ import annotations
 
@@ -64,6 +71,9 @@ from pyspark.sql.window import Window  # noqa: E402
 from common.jobrun import JobRun  # noqa: E402
 from common.session import (SINGLE_PARTITIONER, JobLockError, LockLostError, MongoAdmin, build_session,  # noqa: E402
                             env_db, env_uri, read_mongo)
+from features import outdir  # noqa: E402
+from features import splits as SP  # noqa: E402
+from features.g0guard import g0_block  # noqa: E402
 
 JOB = "g5_build_training_set"
 JOB_VERSION = "g5-v1"
@@ -83,12 +93,8 @@ TIDE_PIPELINE = [{"$project": {
     "qc": 1, "qc_flag": 1, "source_file": 1,
 }}]
 
-# Biên chia tập (đã chốt ở `schemas/features/v1.md`).
-SPLITS = {
-    "train": ("2017-01-01", "2022-12-31"),
-    "val": ("2023-01-01", "2024-06-30"),
-    "test": ("2024-07-01", "2026-11-23"),
-}
+# Biên chia tập: đọc `config/splits.json` (nguồn duy nhất; khớp `phasegnn.data.SPLITS` và R).
+SPLITS = SP.load_split_config()["splits"]
 
 
 # ---------------------------------------------------------------------------
@@ -134,10 +140,16 @@ def exceed_level(peak_m: float | None, levels: dict | None) -> tuple[str, bool]:
 
 def split_of(day: str) -> str | None:
     """Tập chia theo `day`: train / val / test, hoặc None nếu ngoài các khoảng."""
-    for name, (a, b) in SPLITS.items():
-        if a <= day <= b:
-            return name
-    return None
+    return SP.split_of(day, SPLITS)
+
+
+def read_astro_meta(astro_csv: str) -> dict | None:
+    """Nội dung `astro_tide_meta.json` cạnh `astro_csv`, hoặc None nếu thiếu."""
+    p = SP.astro_meta_path(astro_csv)
+    if not os.path.isfile(p):
+        return None
+    with open(p, encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     run = JobRun(adm, JOB, args.lock_ttl_s)
     print(f"run_id={run.run_id} db={args.db}", flush=True)
     status = "failed"
+    tmp_dir = None
     try:
         try:
             run.acquire()
@@ -166,6 +179,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Dừng: {e}", flush=True)
             return 3
         run.start(db=args.db, splits=SPLITS, job_version=JOB_VERSION)
+        blk = g0_block(run, adm)
+        if blk:
+            code, status, msg = blk
+            print(f"Dừng: {msg}", flush=True)
+            return code
+        status = "failed"
+        # triều thiên văn: kiểm tra nguồn gốc TRƯỚC khi đọc dữ liệu (dừng sớm)
+        astro_meta = read_astro_meta(args.astro_csv) if os.path.exists(args.astro_csv) else None
+        if os.path.exists(args.astro_csv):
+            why = SP.astro_leak_reason(astro_meta, SPLITS)
+            if why:
+                print(f"Dừng: {args.astro_csv}: {why}. Chạy lại pipelines/r/harmonic.R (fit theo "
+                      f"config/splits.json: harmonic_fit_splits) rồi chạy lại G5.", flush=True)
+                return 1
         if not adm.exists("tide_extremes"):
             print("Dừng: chưa có `tide_extremes`; chạy G0 trước.", flush=True)
             return 2
@@ -457,6 +484,8 @@ def main(argv: list[str] | None = None) -> int:
             "rows_per_year": {str(int(r["year"])): int(r["n"]) for r in per_year},
             "rows_per_station": {r["station"]: int(r["n"]) for r in per_station},
             "astro_merged": has_astro,
+            "astro_fit": ({k: astro_meta.get(k) for k in ("fit_from", "fit_to", "fit_splits", "generated_at")}
+                          if has_astro and astro_meta else None),
             "leak_check": {"rows_with_input_obs": n_with_obs, "violations": n_leak},
         }
         run.update({"stats": snap})
@@ -466,16 +495,14 @@ def main(argv: list[str] | None = None) -> int:
             status = "dry_run"
             return 0
 
-        # ---- Ghi Parquet -----------------------------------------------------
+        # ---- Ghi Parquet (thư mục tạm → đổi tên; bản cũ giữ tới khi bản mới xong) ---
         run.hold()
-        if os.path.exists(args.out_dir):
-            for name in os.listdir(args.out_dir):
-                if name.startswith("year="):
-                    import shutil
-                    shutil.rmtree(os.path.join(args.out_dir, name), ignore_errors=True)
-        os.makedirs(args.out_dir, exist_ok=True)
-        g.write.mode("overwrite").partitionBy("year").parquet(args.out_dir)
-        print(f"[PARQUET] {args.out_dir}/year=<YYYY>/ ({n_rows} dòng)", flush=True)
+        for msg in outdir.recover(args.out_dir):
+            print(f"[DỌN] {msg}", flush=True)
+        tmp_dir = outdir.tmp_path(args.out_dir, run.run_id)
+        os.makedirs(os.path.dirname(tmp_dir) or ".", exist_ok=True)
+        g.write.mode("errorifexists").partitionBy("year").parquet(tmp_dir)
+        print(f"[PARQUET] {tmp_dir}/year=<YYYY>/ ({n_rows} dòng)", flush=True)
 
         meta = {
             "job": JOB,
@@ -489,10 +516,13 @@ def main(argv: list[str] | None = None) -> int:
                 "day = ngày quan sát của bản tin; peakN_day_offset = 0 nếu đỉnh thuộc ngày quan sát, "
                 "1 nếu sang ngày kế tiếp (quy tắc dùng chung với pipelines/r/)"),
         }
-        with open(os.path.join(args.out_dir, "_meta.json"), "w", encoding="utf-8", newline="\n") as fh:
+        with open(os.path.join(tmp_dir, "_meta.json"), "w", encoding="utf-8", newline="\n") as fh:
             json.dump(meta, fh, ensure_ascii=False, indent=1, default=str)
             fh.write("\n")
-        print(f"[META] {args.out_dir}/_meta.json", flush=True)
+        run.hold()
+        outdir.publish(tmp_dir, args.out_dir, run.run_id)
+        tmp_dir = None
+        print(f"[PUBLISH] {args.out_dir} (year=<YYYY>/ + _meta.json)", flush=True)
         status = "ok"
         return 0
     except LockLostError as e:
@@ -504,6 +534,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Dừng: lỗi không lường trước (mã thoát 6).", flush=True)
         return 6
     finally:
+        if tmp_dir:
+            outdir.discard(tmp_dir)
         try:
             run.finish(status)
         finally:

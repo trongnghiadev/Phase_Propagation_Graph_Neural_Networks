@@ -242,12 +242,15 @@ def next_fence(db: Database, resource: str) -> int:
     Dùng `find_one_and_update` với `upsert=True` để việc tăng bộ đếm là nguyên tử ở tầng
     CSDL (hai worker cùng lấy khoá vẫn nhận hai fence khác nhau).
 
-    Lưu ý: `mongomock` (dùng cho unit test) trả về bản ghi **trước** khi cập nhật, và
-    trả `None` khi vừa upsert — nên ta đọc lại giá trị đã tăng từ CSDL.
+    Giá trị trả về PHẢI lấy từ kết quả của chính lệnh `find_one_and_update` (ReturnDocument.AFTER):
+    đọc lại bằng `find_one` sau đó KHÔNG an toàn — hai worker cùng tăng rồi cùng đọc sẽ nhận cùng
+    một fence. Chỉ khi driver không trả document (một số bản `mongomock` trả `None` lúc vừa upsert)
+    mới đọc lại; trường hợp đó chỉ có trong unit test.
     """
-    db.lock_fences.find_one_and_update(
+    doc = db.lock_fences.find_one_and_update(
         {"_id": resource}, {"$inc": {"fence": 1}}, upsert=True, return_document=ReturnDocument.AFTER)
-    doc = db.lock_fences.find_one({"_id": resource}) or {}
+    if not doc or "fence" not in doc:
+        doc = db.lock_fences.find_one({"_id": resource}) or {}
     if "fence" not in doc:
         raise RuntimeError(f"không tăng được fencing token cho {resource!r}")
     return int(doc["fence"])
@@ -265,7 +268,7 @@ class Watchdog:
         self.backend = backend
         self.lock = lock
         self.ttl_ms = ttl_ms or lock.ttl_ms or 30_000
-        self.interval_s = max(0.05, (self.ttl_ms / 3000) / 1000)   # TTL/3 tính bằng giây
+        self.interval_s = max(0.05, self.ttl_ms / 3000)   # TTL/3 tính bằng giây (ms / 1000 / 3)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.extends = 0
@@ -326,18 +329,41 @@ class LockGuard:
 
     # -------------------------------------------------------------- vòng đời -----
     def acquire(self) -> Lock:
-        """Lấy khoá; ném ``LockBusy`` nếu bận. Lấy fencing token từ MongoDB nếu có ``db``."""
+        """Lấy khoá; ném ``LockBusy`` nếu bận. Lấy fencing token từ MongoDB nếu có ``db``.
+
+        Lấy fence là một lệnh MongoDB có thể chậm (failover, mạng); nếu nó mất lâu hơn thời gian hiệu lực
+        của khoá thì khoá có thể ĐÃ hết hạn và tiến trình khác đã lấy được — trả fence lúc đó là sai.
+        Vì vậy sau ``next_fence`` phải xác nhận vẫn giữ khoá: thời gian đã trôi (tính từ trước lệnh lấy khoá)
+        còn nhỏ hơn ``validity_ms``, hoặc gia hạn (``extend``) thành công. Không xác nhận được → nhả khoá,
+        ném ``LockLost``.
+        """
+        t0 = time.monotonic()
         lock, votes = self.backend.acquire(self.key, self.ttl_ms)
         self.votes = votes
         if lock is None:
             raise LockBusy(f"khóa '{self.key}' đang được giữ (votes={votes})")
         lock.resource = self.resource
         if self.use_fence and self.db is not None:
-            lock.fence = next_fence(self.db, self.resource)
+            try:
+                lock.fence = next_fence(self.db, self.resource)
+            except Exception:
+                self.backend.release(lock)
+                raise
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            if elapsed_ms >= lock.validity_ms and not self._extend_once(lock):
+                self.backend.release(lock)
+                raise LockLost(f"khóa '{self.key}' có thể đã hết hạn trong lúc lấy fencing token "
+                               f"({elapsed_ms:.0f} ms ≥ validity {lock.validity_ms:.0f} ms) và gia hạn thất bại")
         self.lock = lock
         self.watchdog = Watchdog(self.backend, lock, self.ttl_ms)
         self.watchdog.start()
         return lock
+
+    def _extend_once(self, lock: Lock) -> bool:
+        try:
+            return bool(self.backend.extend(lock, self.ttl_ms))
+        except Exception:  # noqa: BLE001 - lỗi mạng = không xác nhận được
+            return False
 
     def release(self) -> None:
         """Nhả khoá và dừng watchdog."""
@@ -393,14 +419,17 @@ class LockGuard:
             {**key, **flt}, {"$set": payload}, upsert=False, return_document=ReturnDocument.AFTER)
         if res is None:
             # Chưa có bản ghi → thử chèn bản mới (chỉ thành công nếu `_id` chưa tồn tại).
+            # KHÔNG đọc lại bằng `find_one` sau khi chèn: giữa hai lệnh, tiến trình có fence lớn hơn có thể
+            # đã ghi đè, và ta sẽ trả về (hoặc so) document của người khác. Document vừa chèn chính là kết quả.
+            doc = {**key, **payload}
             try:
-                self.db[collection].insert_one({**key, **payload})
+                self.db[collection].insert_one(dict(doc))
             except DuplicateKeyError:
                 raise FenceRejected(
                     f"ghi bị từ chối do fencing (fence={self.fence}); bản ghi đã tồn tại với "
                     f"last_fence >= {self.fence}") from None
-            res = self.db[collection].find_one(key)
-        if res is None or res.get("last_fence", -1) != self.fence:
+            return doc
+        if res.get("last_fence", -1) != self.fence:
             raise FenceRejected(f"ghi bị từ chối do fencing (fence={self.fence}); "
                                 f"tiến trình khác đã ghi với fence lớn hơn")
         return res

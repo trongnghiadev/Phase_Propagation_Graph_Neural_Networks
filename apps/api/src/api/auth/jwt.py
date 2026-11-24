@@ -3,9 +3,12 @@
 Token chứa `user_id` và `perm_ver` (phiên bản quyền của người dùng). Khi đổi quyền,
 `perm_ver` tăng → token cũ không còn hợp lệ về mặt quyền.
 
-Ký bằng HS256 với khoá bí mật lấy từ biến môi trường `AUTH_SECRET`.
-Nếu thiếu biến này, khoá tạm sinh theo tiến trình (`secrets.token_urlsafe`) và ghi cảnh báo:
-chạy được nhưng token không sống sót qua lần khởi động lại (chỉ hợp cho dev/test).
+Ký bằng HS256 với khoá bí mật lấy từ biến môi trường `AUTH_SECRET` (tên lấy từ `auth.secret_env`).
+
+- `APP_ENV` là `dev`/`test`: thiếu biến → khoá tạm sinh theo tiến trình (`secrets.token_urlsafe`) kèm
+  cảnh báo (token không sống sót qua lần khởi động lại); khoá ngắn → cảnh báo.
+- Môi trường khác (ví dụ `cluster`): thiếu khoá hoặc khoá < 32 byte → `JwtConfigError`, API **dừng
+  khởi động** với thông báo rõ (không chạy production với khoá tạm/khoá yếu).
 
 Logout = đưa `jti` của token vào blacklist trong Redis (TTL bằng thời hạn còn lại của token),
 nên token bị chặn ngay cả khi chưa hết hạn.
@@ -22,7 +25,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-__all__ = ["JwtUnavailable", "TokenPair", "JwtManager", "decode_token", "blacklist_key"]
+__all__ = ["JwtUnavailable", "JwtConfigError", "TokenPair", "JwtManager", "decode_token", "blacklist_key",
+           "resolve_secret", "MIN_SECRET_BYTES", "LAX_ENVS"]
+
+#: Độ dài tối thiểu của khoá HS256 (RFC 7518 §3.2: khoá ≥ kích thước hash = 256 bit).
+MIN_SECRET_BYTES = 32
+#: Môi trường được phép chạy với khoá tạm / khoá ngắn.
+LAX_ENVS = ("dev", "test")
 
 log = logging.getLogger("api.auth.jwt")
 
@@ -36,6 +45,33 @@ except ImportError:  # pragma: no cover - phụ thuộc bắt buộc
 
 class JwtUnavailable(RuntimeError):
     """Thiếu `PyJWT` — không được phát hành token không ký."""
+
+
+class JwtConfigError(RuntimeError):
+    """Khoá ký JWT thiếu hoặc yếu ở môi trường không phải dev/test → không được khởi động."""
+
+
+def resolve_secret(secret_env: str = "AUTH_SECRET", app_env: str = "dev",
+                   environ: dict[str, str] | None = None) -> str:
+    """Đọc và kiểm tra khoá ký JWT từ biến môi trường `secret_env` (xem docstring module)."""
+    env = os.environ if environ is None else environ
+    value = (env.get(secret_env) or "").strip()
+    lax = app_env in LAX_ENVS
+    if not value:
+        if not lax:
+            raise JwtConfigError(
+                f"APP_ENV={app_env}: thiếu biến môi trường {secret_env} (khoá ký JWT). Đặt {secret_env} là "
+                f"chuỗi ngẫu nhiên ≥ {MIN_SECRET_BYTES} byte, ví dụ: "
+                f"python -c \"import secrets; print(secrets.token_urlsafe(48))\"")
+        log.warning("thiếu biến môi trường %s: dùng khoá tạm theo tiến trình; "
+                    "token sẽ mất hiệu lực khi khởi động lại tiến trình (chỉ chấp nhận ở dev/test)", secret_env)
+        return secrets.token_urlsafe(48)
+    n = len(value.encode("utf-8"))
+    if n < MIN_SECRET_BYTES:
+        if not lax:
+            raise JwtConfigError(f"APP_ENV={app_env}: {secret_env} chỉ có {n} byte, cần ≥ {MIN_SECRET_BYTES} byte")
+        log.warning("%s chỉ có %d byte (< %d): chấp nhận vì APP_ENV=%s", secret_env, n, MIN_SECRET_BYTES, app_env)
+    return value
 
 
 def blacklist_key(jti: str) -> str:
@@ -62,18 +98,10 @@ class JwtManager:
 
     def __init__(self, secret: str | None = None, *, issuer: str = "gis-dist",
                  access_ttl_min: int = 15, refresh_ttl_days: int = 7,
-                 secret_env: str = "AUTH_SECRET"):
+                 secret_env: str = "AUTH_SECRET", app_env: str = "dev"):
         if not _HAS_JWT:
             raise JwtUnavailable("cài 'PyJWT' để phát hành token (bắt buộc theo đề cương)")
-        env_secret = os.environ.get(secret_env, "").strip()
-        if secret:
-            self.secret = secret
-        elif env_secret:
-            self.secret = env_secret
-        else:
-            self.secret = secrets.token_urlsafe(48)
-            log.warning("thiếu biến môi trường %s: dùng khoá tạm theo tiến trình; "
-                        "token sẽ mất hiệu lực khi khởi động lại tiến trình", secret_env)
+        self.secret = secret or resolve_secret(secret_env, app_env)
         self.issuer = issuer
         self.access_ttl = timedelta(minutes=access_ttl_min)
         self.refresh_ttl = timedelta(days=refresh_ttl_days)

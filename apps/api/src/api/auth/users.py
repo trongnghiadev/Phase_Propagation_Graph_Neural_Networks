@@ -10,8 +10,11 @@ Quyền thực tế của một người dùng = `perm` của họ (theo collect
 thêm theo từng collection. Bảng `perm` được cache trong Redis ở `perm:{user_id}` với TTL 5 phút;
 đổi quyền → tăng `perm_ver`, xoá cache, tăng `ver:users` để vô hiệu cache khác.
 
-Cập nhật quyền nguyên tử bằng `$bit` (`$bit: {perm.<collection>: {or: mask}}` hoặc
-`{and: ~mask}`), nên hai request đổi quyền đồng thời không mất thay đổi của nhau.
+Cập nhật quyền: `grant`/`revoke` dùng `$bit` (nguyên tử). Ghi đè mask (`set_collection_perm`,
+`update_perms`) là MỘT lệnh `find_one_and_update` có điều kiện `perm_ver` (compare-and-set): hai request
+đổi quyền đồng thời thì một bên thắng, bên kia nhận `PermissionChanged` (API trả 409), không mất thay đổi.
+Tên collection trong `perm` được kiểm tra (`validate_perm_collection`): không chứa `.`/`$`, phải nằm
+trong `KNOWN_PERM_COLLECTIONS`.
 
     from vngis.db import get_db
     from api.auth.users import UserRepo
@@ -28,7 +31,7 @@ from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.database import Database
 
 from api.permissions import (P, PERM_ALL, ROLE_MASKS, ROLES, flag_names, has, mask_of,
-                             validate_mask)
+                             validate_mask, validate_perm_collection)
 
 __all__ = ["UserRepo", "PERM_CACHE_PREFIX", "USER_COLLECTION", "ROLE_COLLECTION", "perm_cache_key",
            "PermissionChanged", "UserNotFound", "InvalidRole"]
@@ -217,43 +220,44 @@ class UserRepo:
         return has(self.mask_for(user_id, collection), required)
 
     # ------------------------------------------------------------ đổi quyền ----
-    def set_collection_perm(self, user_id: str, collection: str, mask: int) -> dict:
-        """Đặt quyền của một collection (ghi đè), dùng `$bit` (nguyên tử).
+    def set_collection_perm(self, user_id: str, collection: str, mask: int, *,
+                            expected_perm_ver: int | None = None) -> dict:
+        """Đặt (ghi đè) mask quyền của một collection bằng MỘT lệnh update có điều kiện `perm_ver`.
 
-        Ghi đè = xoá sạch các bit cũ rồi đặt bit mới. Vì `$bit` chỉ có `and`/`or` (không có
-        "ghi đè"), ta dùng **pipeline update** (MongoDB 4.2+) để gán trực tiếp giá trị mới
-        trong **một** thao tác nguyên tử — an toàn với các request đổi quyền đồng thời.
+        `expected_perm_ver` bỏ trống → dùng `perm_ver` vừa đọc (vẫn là compare-and-set: nếu ai đó đổi quyền
+        giữa lúc đọc và ghi thì lệnh không khớp → `PermissionChanged`, không ghi đè thay đổi của họ).
 
-        Giá trị 0 → xoá field khỏi `perm` (không có quyền nào trên collection đó).
+        Giá trị 0 được **lưu là 0** (không `$unset`): xoá hẳn field thì `mask_of` quay về `perm["*"]` và
+        quyền bị thu hồi sẽ "tự quay lại".
         """
         validate_mask(mask)
-        if mask == 0:
-            # Phải **lưu 0** chứ không `$unset`: nếu xoá hẳn field thì `mask_of` sẽ quay
-            # về giá trị mặc định `perm["*"]` và quyền bị thu hồi sẽ "tự quay lại".
-            upd = {"$set": {f"perm.{collection}": 0, "updated_at": _now()},
-                   "$inc": {"perm_ver": 1}}
-            res = self.users.find_one_and_update({"_id": user_id}, upd,
-                                                 return_document=ReturnDocument.AFTER)
-            if res is None:
+        validate_perm_collection(collection)
+        return self.update_perms(user_id, {collection: int(mask)}, expected_perm_ver=expected_perm_ver)
+
+    def update_perms(self, user_id: str, masks: dict[str, int], *,
+                     expected_perm_ver: int | None = None) -> dict:
+        """Ghi đè nhiều mask (`{collection | "*": mask}`) trong MỘT lệnh có điều kiện `perm_ver`, tăng `perm_ver`.
+
+        Lỗi: `UserNotFound`, `PermissionChanged` (perm_ver hiện tại ≠ mong đợi), `ValueError` (mask/tên sai).
+        """
+        if not masks:
+            raise ValueError("không có quyền nào để ghi")
+        sets: dict[str, Any] = {}
+        for coll, m in masks.items():
+            validate_perm_collection(coll)
+            sets[f"perm.{coll}"] = validate_mask(m)
+        if expected_perm_ver is None:
+            expected_perm_ver = self.perm_ver(user_id)
+        sets["updated_at"] = _now()
+        res = self.users.find_one_and_update({"_id": user_id, "perm_ver": int(expected_perm_ver)},
+                                             {"$set": sets, "$inc": {"perm_ver": 1}},
+                                             return_document=ReturnDocument.AFTER)
+        if res is None:
+            cur = self.users.find_one({"_id": user_id}, {"perm_ver": 1})
+            if cur is None:
                 raise UserNotFound(f"không có người dùng {user_id!r}")
-            self._invalidate(user_id)
-            return res
-        # Ghi đè = xoá sạch bit cũ rồi đặt bit mới. `$bit` chỉ có `and`/`or` nên phải hai
-        # thao tác. Mặt nạ của `and` là **số dương** vì MongoDB dùng số nguyên 64 bit
-        # không dấu (mặt nạ âm sẽ bị bỏ qua): `and 0` xoá sạch, rồi `or mask` đặt bit mới.
-        res = self.users.find_one_and_update(
-            {"_id": user_id},
-            {"$bit": {f"perm.{collection}": {"and": 0}}},
-            return_document=ReturnDocument.AFTER)
-        if res is None:
-            raise UserNotFound(f"không có người dùng {user_id!r}")
-        res = self.users.find_one_and_update(
-            {"_id": user_id},
-            {"$bit": {f"perm.{collection}": {"or": int(mask)}},
-             "$inc": {"perm_ver": 1}, "$set": {"updated_at": _now()}},
-            return_document=ReturnDocument.AFTER)
-        if res is None:
-            raise UserNotFound(f"không có người dùng {user_id!r}")
+            raise PermissionChanged(f"perm_ver của {user_id!r} là {cur.get('perm_ver', 1)}, "
+                                    f"mong đợi {expected_perm_ver}")
         self._invalidate(user_id)
         return res
 
@@ -374,6 +378,15 @@ class UserRepo:
             raise UserNotFound(f"không có người dùng {user_id!r}")
         self._invalidate(user_id)
         return res
+
+    def revoke_all_sessions(self, user_id: str) -> int | None:
+        """Thu hồi MỌI phiên của người dùng: tăng `perm_ver` → mọi access/refresh token đã phát
+        (mang `perm_ver` cũ) bị từ chối ở lần dùng tiếp theo. Trả `perm_ver` mới (None nếu không có user)."""
+        res = self.users.find_one_and_update({"_id": user_id},
+                                             {"$inc": {"perm_ver": 1}, "$set": {"updated_at": _now()}},
+                                             return_document=ReturnDocument.AFTER, projection={"perm_ver": 1})
+        self._invalidate(user_id)
+        return None if res is None else int(res.get("perm_ver", 1))
 
     # ------------------------------------------------------------ khóa tài khoản
     def register_failure(self, user_id: str, *, max_failures: int = 10, lock_minutes: int = 15) -> dict:

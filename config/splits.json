@@ -1,0 +1,10 @@
+{
+  "description": "Biên chia tập theo ngày quan trắc (YYYY-MM-DD, giờ Việt Nam, hai đầu tính cả). Nguồn DUY NHẤT cho phasegnn.data.SPLITS, Spark G5 (features/build_training_set.py) và R (harmonic.R, evaluation.R). harmonic_fit_splits: các tập được dùng để fit hệ số điều hòa (triều thiên văn B_harm / astro_*); không bao giờ được chứa ngày >= test.from.",
+  "version": 1,
+  "splits": {
+    "train": {"from": "2017-01-01", "to": "2022-12-31"},
+    "val": {"from": "2023-01-01", "to": "2024-06-30"},
+    "test": {"from": "2024-07-01", "to": "2026-11-23"}
+  },
+  "harmonic_fit_splits": ["train"]
+}

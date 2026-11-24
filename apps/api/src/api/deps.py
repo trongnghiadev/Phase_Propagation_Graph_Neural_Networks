@@ -4,15 +4,17 @@
   Token bị chặn trong blacklist (đăng xuất) → 401.
 - `require(flag, collection)`: kiểm tra bitmask quyền theo collection → 403 nếu thiếu.
 - `optional_user`: không token → trả `None` (cho endpoint công khai).
-- `rate_limit(...)`: giới hạn tần suất theo IP + người dùng → 429.
+- `rate_limit(...)`: giới hạn tần suất theo IP + người dùng → 429. IP lấy qua `client_ip`: chỉ tin
+  `X-Forwarded-For` khi kết nối đến từ proxy trong `rate_limit.trusted_proxies` (mặc định: không tin).
+  Redis lỗi: scope `login` **fail-closed** (503), scope khác cho qua kèm cảnh báo.
 
 Mỗi endpoint trong `router/` dùng `dependencies=[Depends(require(P.READ, "<collection>"))]` hoặc
 `user: UserContext = Depends(require(P.UPDATE, "tide_extremes"))` để lấy cả người dùng.
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
-import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -44,12 +46,45 @@ class UserContext:
         return has(self.mask_for(collection), flag)
 
 
+def _parse_ip(text: str):
+    try:
+        return ipaddress.ip_address(text.strip())
+    except ValueError:
+        return None
+
+
+def _trusted_networks() -> list:
+    try:
+        items = state.config.rate_limit.trusted_proxies
+    except Exception:  # noqa: BLE001 - cấu hình lỗi → không tin proxy nào
+        return []
+    return [ipaddress.ip_network(i, strict=False) for i in items]
+
+
+def _is_trusted(ip, nets: list) -> bool:
+    return ip is not None and any(ip in n for n in nets)
+
+
 def client_ip(request: Request) -> str:
-    """IP người gọi (ưu tiên `X-Forwarded-For` do Nginx đặt)."""
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    """IP người gọi.
+
+    `X-Forwarded-For` do client tự đặt được, nên chỉ dùng khi kết nối TCP đến từ một proxy tin cậy
+    (`rate_limit.trusted_proxies`, mặc định rỗng). Khi đó duyệt XFF từ PHẢI sang TRÁI (phần tử cuối do
+    proxy gần nhất thêm), bỏ qua các proxy tin cậy, lấy IP đầu tiên không tin cậy. Ngược lại dùng IP peer.
+    """
+    peer = request.client.host if request.client else "unknown"
+    nets = _trusted_networks()
+    if not nets or not _is_trusted(_parse_ip(peer), nets):
+        return peer
+    xff = request.headers.get("x-forwarded-for") or ""
+    hops = [h.strip() for h in xff.split(",") if h.strip()]
+    for hop in reversed(hops):
+        ip = _parse_ip(hop)
+        if ip is None:
+            return peer              # XFF hỏng → không tin, dùng IP peer (proxy)
+        if not _is_trusted(ip, nets):
+            return str(ip)
+    return str(_parse_ip(hops[0])) if hops else peer
 
 
 def _bearer_token(request: Request) -> str | None:
@@ -88,7 +123,10 @@ async def optional_user(request: Request) -> UserContext | None:
         payload = state.jwt.decode_access(token)
     except Exception:  # noqa: BLE001 - token hỏng/hết hạn → coi như khách
         return None
-    if state.blacklist.is_revoked(str(payload.get("jti", ""))):
+    try:
+        if state.blacklist.is_revoked(str(payload.get("jti", ""))):
+            return None
+    except HTTPException:  # Redis lỗi → không xác nhận được phiên → coi như khách (ít quyền hơn)
         return None
     try:
         return _load_user(payload)
@@ -150,10 +188,15 @@ def require_any(*flags: int, collection: str) -> Callable[..., Any]:
 def rate_limit(requests: int | None = None, window_s: int | None = None, *, scope: str = "api"):
     """Dependency giới hạn tần suất → 429 khi vượt.
 
-    Đếm theo cặp (scope, IP, user_id) trong Redis; cửa sổ trượt đơn giản theo TTL.
+    Đếm theo cặp (scope, IP, user_id) trong Redis; cửa sổ cố định theo TTL: `INCR`, và chỉ đặt
+    `EXPIRE` khi `INCR` trả 1 (request đầu của cửa sổ) — đặt lại TTL ở mọi request sẽ kéo dài cửa sổ vô
+    hạn khi bị gọi liên tục. Key mất TTL (EXPIRE lỗi giữa chừng) được đặt lại TTL khi phát hiện.
 
     Với `scope="login"` dùng ngưỡng riêng `rate_limit.login_requests` /
     `rate_limit.login_window_s` (nới riêng cho endpoint đăng nhập công khai).
+
+    Redis lỗi: `scope="login"` → 503 (fail-closed: không cho dò mật khẩu không giới hạn khi Redis
+    chết); scope khác → cho qua kèm log cảnh báo.
     """
     async def dependency(request: Request) -> None:
         cfg = state.config.rate_limit
@@ -168,16 +211,27 @@ def rate_limit(requests: int | None = None, window_s: int | None = None, *, scop
         uid = getattr(request.state, "user_id", None)
         ident = f"{scope}:{client_ip(request)}:{uid or '-'}"
         key = f"rl:{ident}"
+        r = state.redis
         try:
-            pipe = state.redis.pipeline()
-            pipe.incr(key)
-            pipe.expire(key, window)
-            count, _ = pipe.execute()
-        except Exception as e:  # noqa: BLE001 - Redis lỗi thì không chặn request
+            count = int(r.incr(key))
+            if count == 1:
+                r.expire(key, window)
+            retry = window
+            if count > limit:
+                ttl = int(r.ttl(key) or -1)
+                if ttl < 0:              # key không có TTL → đặt lại để không bị chặn vĩnh viễn
+                    r.expire(key, window)
+                    ttl = window
+                retry = ttl
+        except Exception as e:  # noqa: BLE001
+            if scope == "login":
+                log.warning("giới hạn tần suất (login): Redis lỗi → từ chối (fail-closed): %s", e)
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                                    detail="tạm thời không đăng nhập được (không kiểm tra được giới hạn tần suất)",
+                                    headers={"Retry-After": "5"}) from None
             log.warning("giới hạn tần suất: không kiểm tra được (%s)", e)
             return
-        if int(count) > limit:
-            retry = int(state.redis.ttl(key) or window)
+        if count > limit:
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
                                 detail={"error": "vượt giới hạn tần suất", "limit": limit,
                                         "window_s": window, "retry_after_s": retry},

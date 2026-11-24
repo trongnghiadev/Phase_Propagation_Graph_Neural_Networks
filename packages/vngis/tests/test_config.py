@@ -235,3 +235,12 @@ def test_load_stations_catalog_thieu_file(tmp_path):
     from vngis.config import load_stations_catalog
     with pytest.raises(ConfigError, match="thiếu file"):
         load_stations_catalog(tmp_path)
+
+
+def test_trusted_proxies_mac_dinh_rong_va_doc_tu_bien_moi_truong(tmp_path):
+    d = write_config(tmp_path)
+    assert load_config(config_dir=d, environ={}).rate_limit.trusted_proxies == []
+    cfg = load_config(config_dir=d, environ={"TRUSTED_PROXIES": "10.0.0.0/8, 127.0.0.1"})
+    assert cfg.rate_limit.trusted_proxies == ["10.0.0.0/8", "127.0.0.1"]
+    with pytest.raises(ConfigError):
+        load_config(config_dir=d, environ={"TRUSTED_PROXIES": "khong-phai-ip"})

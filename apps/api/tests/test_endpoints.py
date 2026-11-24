@@ -345,33 +345,64 @@ def test_xac_nhan_canh_bao(client, fake_db):
     assert fake_db["alerts"].find_one({"_id": "A2"})["status"] == "acknowledged"
 
 
+def _seed_flag(db: Any, fid: str = "Q1", version: int = 1) -> None:
+    """Cờ QC theo mô hình `vngis.qc_rules` (field `status`)."""
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    db["qc_flags"].insert_one({"_id": fid, "collection": "tide_extremes", "station": "BIEN_HO_1",
+                               "kind": "high", "ts": ts, "value": 1.85, "origin": "auto",
+                               "rules": [{"rule": "R1"}], "status": "suspect", "corrected_value": None,
+                               "reason": "nghi ngờ sai", "version": version, "created_at": ts})
+
+
 def test_hang_doi_kiem_duyet(client, fake_db):
-    """GET /review trả hàng đợi QC; duyệt một bản ghi → trạng thái chuyển sang approved."""
+    """GET /review trả cờ `suspect`; duyệt → `vngis.qc.decide` đổi `status`, tăng `version`, ghi audit."""
     _mk_user(fake_db, "u_rev")
     data = _login(client, "u_rev")
-    fake_db["qc_flags"].insert_one({"_id": "Q1", "collection": "tide_extremes", "station": "BIEN_HO_1",
-                                    "reason": "nghi ngờ sai", "state": "pending", "version": 1,
-                                    "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc)})
+    _seed_flag(fake_db)
     headers = _auth(data["access_token"])
     r = client.get("/api/v1/review", headers=headers)
     assert r.status_code == 200, r.text
     assert r.json()["count"] == 1
 
-    r = client.post("/api/v1/review/Q1/approve", json={"decision": "approve", "version": 1},
-                    headers=headers)
+    r = client.post("/api/v1/review/Q1/approve",
+                    json={"status": "rejected", "reason": "PDF in sai", "version": 1}, headers=headers)
     assert r.status_code == 200, r.text
-    assert fake_db["qc_flags"].find_one({"_id": "Q1"})["state"] == "approved"
+    flag = fake_db["qc_flags"].find_one({"_id": "Q1"})
+    assert (flag["status"], flag["version"], flag["decided_by"]) == ("rejected", 2, "u_rev")
+    assert flag["value"] == 1.85, "không được ghi đè `value` của cờ"
+    a = fake_db["audit_logs"].find_one({"action": "qc_decision", "doc_id": "Q1"})
+    assert a is not None and a["state"] == "applied" and a["source"] == "api"
+    assert client.get("/api/v1/review", headers=headers).json()["count"] == 0
 
 
 def test_duyet_qc_xung_dot_version_bi_409(client, fake_db):
-    """Duyệt QC với `version` cũ → 409."""
+    """Duyệt QC với `version` cũ → 409, không ghi gì."""
     _mk_user(fake_db, "u_rev2")
     data = _login(client, "u_rev2")
-    fake_db["qc_flags"].insert_one({"_id": "Q2", "collection": "tide_extremes", "state": "pending",
-                                    "version": 5})
-    r = client.post("/api/v1/review/Q2/approve", json={"decision": "approve", "version": 1},
+    _seed_flag(fake_db, "Q2", version=5)
+    r = client.post("/api/v1/review/Q2/approve", json={"status": "confirmed_ok", "reason": "ok", "version": 1},
                     headers=_auth(data["access_token"]))
     assert r.status_code == 409, f"phải là 409, thực tế {r.status_code}: {r.text}"
+    assert fake_db["qc_flags"].find_one({"_id": "Q2"})["status"] == "suspect"
+    assert fake_db["audit_logs"].count_documents({}) == 0
+
+
+def test_duyet_qc_khong_nhan_collection_tu_client(client, fake_db):
+    """Tham số `collection` cũ bị bỏ: body có field lạ vẫn chỉ ghi `qc_flags`; `corrected` thiếu giá trị → 422."""
+    _mk_user(fake_db, "u_rev3")
+    data = _login(client, "u_rev3")
+    _seed_flag(fake_db, "Q3")
+    _seed_station(fake_db)
+    headers = _auth(data["access_token"])
+    r = client.post("/api/v1/review/Q3/approve",
+                    json={"status": "corrected", "reason": "x", "version": 1}, headers=headers)
+    assert r.status_code == 422, r.text
+    r = client.post("/api/v1/review/Q3/approve",
+                    json={"status": "corrected", "corrected_value": 1.5, "reason": "x", "version": 1,
+                          "collection": "stations"}, headers=headers)
+    assert r.status_code == 200, r.text
+    assert fake_db["qc_flags"].find_one({"_id": "Q3"})["corrected_value"] == 1.5
+    assert fake_db["stations"].find_one({"code": "BIEN_HO_1"})["version"] == 1
 
 
 # --------------------------------------------------------------------- jobs ----
@@ -419,8 +450,8 @@ def test_nhat_ky_ghi_lai_thay_doi(client, fake_db):
     assert items[0]["collection"] == "stations"
 
 
-def test_hoan_tac_thay_doi(client, fake_db):
-    """`POST /audit/{id}/revert` khôi phục giá trị `before` và đánh dấu `reverted`."""
+def test_hoan_tac_thay_doi_khong_an_toan_bi_422(client, fake_db):
+    """Audit `api_update` (sửa trạm) không thuộc danh sách trắng → 422, trạm giữ nguyên."""
     _mk_user(fake_db, "u_aud2")
     data = _login(client, "u_aud2")
     headers = _auth(data["access_token"])
@@ -432,9 +463,8 @@ def test_hoan_tac_thay_doi(client, fake_db):
     audit_id = r.json()["items"][0]["id"]
 
     r = client.post(f"/api/v1/audit/{audit_id}/revert", json={"reason": "sửa nhầm"}, headers=headers)
-    assert r.status_code in (200, 409), f"thực tế {r.status_code}: {r.text}"
-    if r.status_code == 200:
-        assert fake_db["audit_logs"].find_one({"_id": audit_id})["state"] == "reverted"
+    assert r.status_code == 422, f"thực tế {r.status_code}: {r.text}"
+    assert fake_db["stations"].find_one({"code": "BIEN_HO_1"})["name"] == "Tên đã sửa"
 
 
 # -------------------------------------------------------------------- users ----
@@ -482,7 +512,7 @@ def test_cap_nhat_quyen_dung_atomic_bit(client, requires_bit):
 
     before = UserRepo(fake_db).perm_ver(target)
     r = client.put(f"/api/v1/users/{target}/perm",
-                   json={"grant": ["UPDATE", "EXPORT"], "revoke": []}, headers=headers)
+                   json={"grant": ["UPDATE", "EXPORT"], "revoke": [], "reason": "cấp quyền sửa"}, headers=headers)
     assert r.status_code == 200, f"thực tế {r.status_code}: {r.text}"
     after = UserRepo(fake_db).perm_ver(target)
     assert after > before, "perm_ver phải tăng"
@@ -500,7 +530,7 @@ def test_cap_nhat_quyen_ten_quyen_sai_bi_422(client, requires_bit):
     headers = _auth(data["access_token"])
     target = _mk_user(fake_db, "u_target2", role="viewer")
     r = client.put(f"/api/v1/users/{target}/perm",
-                   json={"grant": ["KHONG_CO_QUYEN"], "revoke": []}, headers=headers)
+                   json={"grant": ["KHONG_CO_QUYEN"], "revoke": [], "reason": "thử"}, headers=headers)
     assert r.status_code == 422, f"phải là 422, thực tế {r.status_code}: {r.text}"
 
 
@@ -513,7 +543,7 @@ def test_cap_nhat_quyen_thu_hoi_quyen_duoc(client, requires_bit):
     target = _mk_user(fake_db, "u_target3", role="admin")
 
     r = client.put(f"/api/v1/users/{target}/perm",
-                   json={"grant": [], "revoke": ["MANAGE_USERS"]}, headers=headers)
+                   json={"grant": [], "revoke": ["MANAGE_USERS"], "reason": "thu hồi"}, headers=headers)
     assert r.status_code == 200, f"thực tế {r.status_code}: {r.text}"
     perm = UserRepo(fake_db).effective_perm(target)
     assert not perm["*"] & 256, "quyền MANAGE_USERS phải bị thu hồi"

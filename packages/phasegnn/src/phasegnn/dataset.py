@@ -30,6 +30,8 @@ from .data import (
     SPLITS,
     FeatureScaler,
     GraphData,
+    check_astro_provenance,
+    default_paths,
     load_g5,
     load_g5_meta,
 )
@@ -50,17 +52,21 @@ Q_COLS: tuple[str, ...] = ("res_spill_m3s",)
 # ---------------------------------------------------------------------------
 # Nối astro
 # ---------------------------------------------------------------------------
-def attach_astro(df: pd.DataFrame, astro_path: Path | None = None) -> pd.DataFrame:
+def attach_astro(df: pd.DataFrame, astro_path: Path | None = None,
+                 meta_path: Path | None = None, check_leak: bool = True) -> pd.DataFrame:
     """Nối triều thiên văn **theo từng trạm** vào bảng G5.
 
     Nguồn: `results/E1/astro_tide_by_station.csv` (cột `station`, `day`, `h1`, `h2`, `t1_h`,
-    `t2_h`). Nếu thiếu file thì giữ nguyên giá trị null trong G5.
+    `t2_h`). Nếu thiếu file thì giữ nguyên giá trị null trong G5. File có mà điều hòa fit
+    trên ngày ≥ mốc test (hoặc thiếu `astro_tide_meta.json`) → `AstroLeakError`.
     """
     if astro_path is None:
-        root = Path(__file__).resolve().parents[3]
-        astro_path = root / "results" / "E1" / "astro_tide_by_station.csv"
+        astro_path = default_paths()["astro_by_station"]
     if not Path(astro_path).exists():
         return df
+    if check_leak:
+        # bảng theo trạm do cùng lần chạy harmonic.R sinh với `astro_tide.csv` → cùng meta.
+        check_astro_provenance(meta_path)
     astro = pd.read_csv(astro_path, dtype={"station": str, "day": str})
     astro.columns = [c.strip() for c in astro.columns]
     astro = astro.rename(columns={"h1": "astro_h1", "h2": "astro_h2",

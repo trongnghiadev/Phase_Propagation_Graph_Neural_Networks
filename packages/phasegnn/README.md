@@ -4,7 +4,7 @@
 
 | Module | Nội dung |
 |---|---|
-| `src/phasegnn/data.py` | đọc Parquet G5 (`data/processed/features/g5/year=*/part-*.parquet`) và cạnh đồ thị; dựng đồ thị hai chiều; tách tập train/val/test **theo năm**; `check_leakage` |
+| `src/phasegnn/data.py` | đọc Parquet G5 (`data/processed/features/g5/year=*/part-*.parquet`) và cạnh đồ thị; dựng đồ thị hai chiều; tách tập train/val/test theo **`config/splits.json`** (nguồn duy nhất, dùng chung với Spark G5 và R; `PGNN_SPLITS_FILE` để ghi đè); cửa sổ mẫu trên **lưới ngày lịch liên tục** (ngày thiếu = NaN); `check_leakage`; `check_astro_provenance` (từ chối triều thiên văn fit trên ngày ≥ mốc test hoặc thiếu `astro_tide_meta.json`) |
 | `src/phasegnn/layers.py` | `PhaseShift` (dịch pha khả vi), `PhaseMessage` (down/up theo τ vật lý), `TopoGRU` hai lượt, `topo_order`, `split_directions` |
 | `src/phasegnn/model.py` | `PhaseGNN`; biến thể B3 (GraphSAGE+GRU), B4 (τ cố định), B5a/B5b (một chiều) |
 | `src/phasegnn/losses.py` | pinball (q10/q50/q90), `L_peak` (soft-max độ cao đỉnh), `L_timing` (khoảng cách vòng 24 h), `L_τ`, `L_mono`; chỉ số MAE/NSE/độ phủ phân vị |

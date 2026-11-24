@@ -9,9 +9,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from phasegnn.data import (DEFAULT_T_IN, DEFAULT_T_OUT, DYNAMIC_FEATURES, SPLITS,
-                           FeatureScaler, build_dataset, build_datasets, build_samples,
-                           check_leakage, split_of)
+from phasegnn.data import (DEFAULT_T_IN, DEFAULT_T_OUT, DYNAMIC_FEATURES, SPLITS, TEST_START,
+                           AstroLeakError, FeatureScaler, build_dataset, build_datasets,
+                           build_samples, calendar_days, check_astro_provenance, check_leakage,
+                           load_astro_tide, load_split_config, split_of)
 
 
 def _fake_g5(n_days: int = 120, stations: tuple[str, ...] = ("PHU_AN", "NHA_BE")) -> pd.DataFrame:
@@ -161,3 +162,99 @@ def test_real_g5_loads_and_splits_are_consistent():
     assert len(ds["val"].samples) > 0
     assert len(ds["test"].samples) > 0
     assert check_leakage(ds["train"].samples) == []
+
+
+# ---------------------------------------------------------------------------
+# Lưới ngày lịch liên tục (sửa 24/11/2026)
+# ---------------------------------------------------------------------------
+_SPLITS_2020 = {"train": ("2020-01-01", "2020-12-31"), "val": ("2021-01-01", "2021-06-30"),
+                "test": ("2021-07-01", "2021-12-31")}
+
+
+def test_build_dataset_uses_calendar_grid_with_missing_day():
+    """Một ngày bị thiếu: cửa sổ vẫn đếm theo ngày lịch, ngày thiếu là NaN (không bị 'nhảy')."""
+    df = _fake_g5(n_days=60, stations=("PHU_AN",))
+    missing = "2020-01-25"
+    df = df[df["day"] != missing].reset_index(drop=True)
+    ds = build_dataset(df, "train", splits=_SPLITS_2020, fit_scaler=True)
+    by_issue = {s.issue_date: s for s in ds.samples}
+    # mẫu phát đúng ngày thiếu vẫn có (các ngày sau có nhãn); nhãn lead 1 = NaN
+    s = by_issue[missing]
+    assert np.isnan(s.targets[0]).all()
+    assert np.isfinite(s.targets[1:]).all()
+    # mẫu phát 23/01: lead 3 (chỉ số 2) rơi đúng ngày thiếu → NaN; lead 4 = ngày 26/01
+    s2 = by_issue["2020-01-23"]
+    assert np.isnan(s2.targets[2]).all()
+    row26 = df[df["day"] == "2020-01-26"].iloc[0]
+    assert float(s2.targets[3, 0]) == pytest.approx(float(row26["h_peak1"]))
+    # cửa sổ đầu vào = 14 ngày lịch liên tục kết thúc ngay trước ngày phát
+    s3 = by_issue["2020-02-01"]
+    assert s3.days == [str(d.date()) for d in pd.date_range("2020-01-18", "2020-01-31")]
+    # ngày thiếu trong đầu vào → 0 sau chuẩn hoá (NaN → 0), không lấy giá trị ngày khác
+    k = s3.days.index(missing)
+    assert np.all(s3.features[k] == 0.0)
+    assert check_leakage(ds.samples) == []
+
+
+def test_build_samples_rejects_non_calendar_days():
+    df = _fake_g5(n_days=40, stations=("PHU_AN",))
+    days = sorted(df["day"].tolist())
+    del days[10]
+    with pytest.raises(ValueError):
+        build_samples(df, "PHU_AN", days, t_in=14, t_out=5)
+
+
+def test_build_samples_skips_windows_without_any_label():
+    df = _fake_g5(n_days=60, stations=("PHU_AN",))
+    gap = pd.date_range("2020-01-20", "2020-01-29").strftime("%Y-%m-%d").tolist()
+    df.loc[df["day"].isin(gap), ["h_peak1", "h_peak2"]] = np.nan
+    days = calendar_days(df["day"].min(), df["day"].max())
+    samples = build_samples(df, "PHU_AN", days, t_in=14, t_out=5)
+    issues = {s.issue_date for s in samples}
+    # cửa sổ 20/01–24/01 … 25/01–29/01 hoàn toàn không có nhãn → bỏ
+    assert "2020-01-20" not in issues and "2020-01-25" not in issues
+    assert "2020-01-26" in issues  # còn ngày 30/01 có nhãn
+    for s in samples:
+        assert np.isfinite(s.targets).any()
+
+
+# ---------------------------------------------------------------------------
+# Cấu hình chia tập dùng chung + kiểm tra rò rỉ triều thiên văn
+# ---------------------------------------------------------------------------
+def test_splits_come_from_shared_config():
+    cfg = load_split_config()
+    assert cfg["splits"] == SPLITS
+    assert TEST_START == SPLITS["test"][0]
+    assert "test" not in cfg["harmonic_fit_splits"]
+
+
+def test_split_config_rejects_harmonic_fit_on_test(tmp_path):
+    import json
+    raw = {"splits": {k: {"from": a, "to": b} for k, (a, b) in SPLITS.items()},
+           "harmonic_fit_splits": ["train", "test"]}
+    f = tmp_path / "splits.json"
+    f.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_split_config(f)
+
+
+def test_astro_provenance_rejects_fit_on_test(tmp_path):
+    import json
+    meta = tmp_path / "astro_tide_meta.json"
+    with pytest.raises(AstroLeakError):
+        check_astro_provenance(meta)  # thiếu meta = bản cũ, không rõ khoảng fit
+    for bad in ("2026-11-15", SPLITS["test"][0]):
+        meta.write_text(json.dumps({"fit_from": "2017-01-01", "fit_to": bad}), encoding="utf-8")
+        with pytest.raises(AstroLeakError):
+            check_astro_provenance(meta)
+    meta.write_text(json.dumps({"fit_from": "2017-01-01", "fit_to": SPLITS["train"][1]}),
+                    encoding="utf-8")
+    assert check_astro_provenance(meta)["fit_to"] == SPLITS["train"][1]
+
+
+def test_load_astro_tide_checks_provenance(tmp_path):
+    csv = tmp_path / "astro_tide.csv"
+    csv.write_text("day,h1,h2,t1_h,t2_h\n2020-01-01,1,1,6,18\n", encoding="utf-8")
+    with pytest.raises(AstroLeakError):
+        load_astro_tide(path=csv)
+    assert len(load_astro_tide(path=csv, check_leak=False)) == 1

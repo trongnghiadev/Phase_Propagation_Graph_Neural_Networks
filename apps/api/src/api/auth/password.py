@@ -15,7 +15,8 @@ from __future__ import annotations
 import os
 import secrets
 
-__all__ = ["Argon2Unavailable", "hash_password", "verify_password", "needs_rehash", "generate_password"]
+__all__ = ["Argon2Unavailable", "hash_password", "verify_password", "needs_rehash", "generate_password",
+           "dummy_hash"]
 
 try:
     from argon2 import PasswordHasher
@@ -74,6 +75,21 @@ def verify_password(stored_hash: str, password: str) -> bool:
         return bool(_get_hasher().verify(stored_hash, password))
     except (VerifyMismatchError, InvalidHashError, ValueError):
         return False
+
+
+_dummy: str | None = None
+
+
+def dummy_hash() -> str:
+    """Hash argon2 của một mật khẩu ngẫu nhiên (cùng tham số với hash thật), sinh một lần mỗi tiến trình.
+
+    Đăng nhập với tài khoản không tồn tại vẫn chạy `verify_password` trên hash này, để thời gian phản hồi
+    không tiết lộ tài khoản nào có thật.
+    """
+    global _dummy
+    if _dummy is None:
+        _dummy = hash_password(secrets.token_urlsafe(32))
+    return _dummy
 
 
 def needs_rehash(stored_hash: str) -> bool:

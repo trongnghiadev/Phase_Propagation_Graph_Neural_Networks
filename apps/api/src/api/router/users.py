@@ -4,11 +4,14 @@
 - `GET /users/{id}` — MANAGE_USERS
 - `POST /users` — MANAGE_USERS (tạo tài khoản, mật khẩu băm argon2)
 - `PATCH /users/{id}/active` — MANAGE_USERS (khoá/mở khoá tài khoản)
-- `PUT /users/{id}/perm` — MANAGE_USERS (cập nhật quyền **nguyên tử** bằng `$bit`)
+- `PUT /users/{id}/perm` — MANAGE_USERS (cập nhật quyền **nguyên tử**)
 
-Cập nhật quyền được bảo vệ bởi khoá `lock:user:{user_id}` (423 nếu đang bị khoá) và
-điều kiện `version` (409 nếu xung đột). Sau khi đổi quyền: xoá cache `perm:{user_id}`
-và tăng `perm_ver` (để token cũ mất hiệu lực).
+Cập nhật quyền: toàn bộ thay đổi (`grant`/`revoke` trên `"*"` và `collections`) được tính từ bản ghi
+vừa đọc rồi ghi bằng MỘT lệnh `find_one_and_update` có điều kiện `perm_ver` (compare-and-set): 409 nếu
+`perm_ver` đã đổi. Khoá `lock:user:{user_id}` chỉ để báo 423 sớm; tính đúng đắn dựa trên điều kiện
+`perm_ver`. Tên collection được kiểm tra (không `.`/`$`, phải nằm trong danh sách đã biết → 422).
+Mỗi lần đổi quyền ghi `audit_logs` (action `user_perm`, before/after, `reason` bắt buộc). Sau khi đổi:
+xoá cache `perm:{user_id}` và tăng `perm_ver` (token cũ mất hiệu lực).
 """
 from __future__ import annotations
 
@@ -24,7 +27,7 @@ from api.auth.password import hash_password
 from api.auth.users import UserRepo
 from api.deps import UserContext, require, rate_limit
 from api.permissions import P, flag_names, mask_from_names, validate_mask
-from api.router.common import clean, to_vn_datetime
+from api.router.common import acquire_guard, clean, guard_check, to_vn_datetime
 from api.state import state
 
 log = logging.getLogger("api.users")
@@ -48,12 +51,13 @@ class CreateUserRequest(BaseModel):
 
 class PermRequest(BaseModel):
     """Cập nhật quyền của người dùng."""
-    grant: list[str] = Field(default_factory=list, description="Danh sách quyền cần BẬT")
-    revoke: list[str] = Field(default_factory=list, description="Danh sách quyền cần TẮT")
+    grant: list[str] = Field(default_factory=list, description="Danh sách quyền cần BẬT (trên mask `*`)")
+    revoke: list[str] = Field(default_factory=list, description="Danh sách quyền cần TẮT (trên mask `*`)")
     collections: dict[str, list[str]] | None = Field(
-        default=None, description="Quyền riêng theo collection: {coll: [flags]}")
-    version: int | None = Field(default=None, description="Phiên bản mong đợi (409 nếu lệch)")
-    reason: str = Field(default="", max_length=512)
+        default=None, description="Quyền riêng theo collection (ghi đè): {coll: [flags]}")
+    perm_ver: int | None = Field(default=None, description="`perm_ver` mong đợi (409 nếu lệch)")
+    version: int | None = Field(default=None, description="Bí danh cũ của `perm_ver` (không dùng nữa)")
+    reason: str = Field(min_length=1, max_length=512, description="Lý do đổi quyền (ghi vào audit_logs)")
 
 
 class ActiveRequest(BaseModel):
@@ -167,15 +171,19 @@ async def set_active(user_id: str, body: ActiveRequest,
                                                     Depends(rate_limit(scope="write"))])
 async def update_perm(user_id: str, body: PermRequest,
                       user: UserContext = Depends(require(P.MANAGE_USERS, USERS))):
-    """Cập nhật quyền của người dùng (nguyên tử bằng `$bit`).
+    """Cập nhật quyền của người dùng (một lệnh ghi có điều kiện `perm_ver`).
 
     - 404 nếu không có người dùng;
+    - 422 nếu tên quyền/collection sai hoặc một quyền vừa bật vừa tắt;
     - 423 nếu đang có tiến trình khác sửa quyền của tài khoản này;
-    - 409 nếu `version` mong đợi không khớp.
+    - 409 nếu `perm_ver` mong đợi không khớp.
     """
-    from vngis.locks import LockBusy, LockGuard
+    from vngis.locks import LockGuard
 
-    repo = UserRepo(state.db)
+    from api.auth.users import PermissionChanged, UserNotFound
+    from api.permissions import PERM_ALL, validate_perm_collection
+
+    repo = state.repo
     doc = repo.get_user(user_id)
     if doc is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"không có người dùng {user_id!r}")
@@ -184,33 +192,62 @@ async def update_perm(user_id: str, body: PermRequest,
     if grant & revoke:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="một quyền không thể vừa bật vừa tắt")
-    expected = body.version if body.version is not None else int(doc.get("version", 1))
-    guard = LockGuard(state.lock, db=db_holder(state), resource=f"user:{user_id}", ttl_ms=300_000)
-    try:
-        guard.acquire()
-    except LockBusy as e:
-        raise HTTPException(status.HTTP_423_LOCKED,
-                            detail=f"đang có tiến trình khác cập nhật quyền cho {user_id!r}: {e}") from None
-    try:
-        now = datetime.now(timezone.utc)
-        if grant or revoke:
-            # `$bit` — cập nhật nguyên tử, không đọc–ghi–ghi (tránh race).
-            upd = repo.apply_bits(user_id, grant=grant, revoke=revoke, expected_version=expected)
-            if upd is None:
-                actual = repo.get_user(user_id)
-                raise HTTPException(status.HTTP_409_CONFLICT,
-                                    detail={"error": "xung đột phiên bản", "expected": expected,
-                                            "current": (actual or {}).get("version")})
-        else:
-            upd = repo.get_user(user_id)
-        if body.collections:
-            for coll, flags in body.collections.items():
-                repo.set_collection_perm(user_id, coll, _mask_from_names(flags))
-        # Vô hiệu cache quyền + tăng perm_ver (token cũ không còn hiệu lực)
+    coll_masks: dict[str, int] = {}
+    for coll, flags in (body.collections or {}).items():
         try:
-            state.cache.delete(f"perm:{user_id}")
-        except Exception as e:  # noqa: BLE001
-            log.warning("không xoá được cache quyền: %s", e)
+            validate_perm_collection(coll)
+        except ValueError as e:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from None
+        coll_masks[coll] = _mask_from_names(flags)
+    if "*" in coll_masks and (grant or revoke):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="không dùng đồng thời collections['*'] với grant/revoke")
+    expected = body.perm_ver if body.perm_ver is not None else body.version
+    if expected is None:
+        expected = int(doc.get("perm_ver", 1))
+    if int(doc.get("perm_ver", 1)) != int(expected):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            detail={"error": "xung đột perm_ver", "expected": expected,
+                                    "current": int(doc.get("perm_ver", 1))})
+    masks = dict(coll_masks)
+    if grant or revoke:
+        # Mask `*` hiện tại (chưa khai báo thì suy từ vai trò, như `effective_perm`) → áp grant/revoke.
+        star = int(repo.effective_perm(user_id).get("*", 0))
+        masks["*"] = ((star | grant) & (PERM_ALL ^ revoke)) & PERM_ALL
+    before = {"perm": {k: int(v) for k, v in (doc.get("perm") or {}).items()},
+              "perm_ver": int(doc.get("perm_ver", 1))}
+
+    guard = LockGuard(state.lock, db=state.db, resource=f"user:{user_id}", ttl_ms=300_000)
+    acquire_guard(guard, busy_detail=f"đang có tiến trình khác cập nhật quyền cho {user_id!r}")
+    try:
+        if not masks:
+            upd = doc
+        else:
+            guard_check(guard)
+            now = datetime.now(timezone.utc)
+            logs = state.db["audit_logs"]
+            audit = {"at": now, "actor": user.username, "action": "user_perm", "source": "api",
+                     "collection": USERS, "doc_id": user_id, "target": {"user_id": user_id},
+                     "before": before, "after": None, "reason": body.reason.strip(), "state": "pending"}
+            aid = logs.insert_one(audit).inserted_id
+            try:
+                upd = repo.update_perms(user_id, masks, expected_perm_ver=int(expected))
+            except PermissionChanged as e:
+                logs.delete_one({"_id": aid, "state": "pending"})
+                cur = repo.get_user(user_id) or {}
+                raise HTTPException(status.HTTP_409_CONFLICT,
+                                    detail={"error": "xung đột perm_ver", "expected": expected,
+                                            "current": cur.get("perm_ver"), "message": str(e)}) from None
+            except UserNotFound:
+                logs.delete_one({"_id": aid, "state": "pending"})
+                raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                    detail=f"không có người dùng {user_id!r}") from None
+            except ValueError as e:
+                logs.delete_one({"_id": aid, "state": "pending"})
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from None
+            after = {"perm": {k: int(v) for k, v in (upd.get("perm") or {}).items()},
+                     "perm_ver": int(upd.get("perm_ver", 1))}
+            logs.update_one({"_id": aid, "state": "pending"}, {"$set": {"state": "applied", "after": after}})
         out = clean(upd or {})
         out.pop("password_hash", None)
         perm = out.get("perm") or {}
@@ -220,11 +257,6 @@ async def update_perm(user_id: str, body: PermRequest,
         return out
     finally:
         guard.release()
-
-
-def db_holder(state_obj):
-    """Lấy handle MongoDB từ state (tiện cho LockGuard)."""
-    return state_obj.db
 
 
 def _mask_from_names(names: list[str] | None) -> int:

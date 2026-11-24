@@ -179,12 +179,13 @@ observed_peak_table <- function(url = NULL, db = NULL) {
 #   - `obs`: bang thuc do (chu `station, day, obs_h1, obs_h2, obs_t1_h, obs_t2_h`)
 #
 # Tra ve bang ghep voi cac cot:
-#   station, target_date, model, lead_day, peak_idx, h_q50, t_peak_vn,
+#   station, target_date, issued_date, model, lead_day, peak_idx, h_q50, t_peak_vn,
 #   obs_h, obs_t_h, d_h (do cao - thuc do), d_t_h (gio du bao - gio thuc do),
 #   matched_by ("peak_idx" hoac "time")
 match_forecast_observed <- function(pred, obs, window_h = 6) {
   if (!nrow(pred) || !nrow(obs)) {
     return(data.frame(station = character(0), target_date = character(0),
+                      issued_date = character(0),
                       model = character(0), lead_day = integer(0),
                       peak_idx = integer(0), h_q50 = numeric(0),
                       t_peak_vn = as.POSIXct(character(0)),
@@ -192,6 +193,9 @@ match_forecast_observed <- function(pred, obs, window_h = 6) {
                       d_h = numeric(0), d_t_h = numeric(0),
                       matched_by = character(0)))
   }
+  # `issued_date` di kem moi cap ghep (khoa kiem dinh can CUNG ngay phat + chan troi)
+  if (is.null(pred$issued_date)) pred$issued_date <- NA_character_
+  pred$issued_date <- substr(as.character(pred$issued_date), 1, 10)
   # tach bang thuc do thanh 2 dong moi dinh (peak_idx 0/1)
   ol <- list()
   for (k in 0:1) {
@@ -238,6 +242,7 @@ match_forecast_observed <- function(pred, obs, window_h = 6) {
       sub <- sub[ok, , drop = FALSE]; j <- j[ok]
       res_extra <- data.frame(
         station = sub$station, target_date = sub$target_date,
+        issued_date = sub$issued_date,
         model = sub$model, lead_day = sub$lead_day,
         peak_idx = sub$peak_idx, h_q50 = sub$h_q50,
         t_peak_vn = sub$t_peak_vn,
@@ -295,6 +300,7 @@ match_forecast_observed <- function(pred, obs, window_h = 6) {
   }
   if (!length(keep_idx)) {
     empty <- data.frame(station = character(0), target_date = character(0),
+                      issued_date = character(0),
                       model = character(0), lead_day = integer(0),
                       peak_idx = integer(0), h_q50 = numeric(0),
                       t_peak_vn = as.POSIXct(character(0)),
@@ -316,6 +322,7 @@ match_forecast_observed <- function(pred, obs, window_h = 6) {
   dt_signed[dt_signed > 12] <- dt_signed[dt_signed > 12] - 24
   res <- data.frame(
     station = pred$station[keep_idx], target_date = pred$target_date[keep_idx],
+    issued_date = pred$issued_date[keep_idx],
     model = pred$model[keep_idx], lead_day = pred$lead_day[keep_idx],
     peak_idx = pred$peak_idx[keep_idx], h_q50 = pred$h_q50[keep_idx],
     t_peak_vn = pred$t_peak_vn[keep_idx],
@@ -458,42 +465,104 @@ contingency_scores <- function(matched, exceed_by_day, thresholds = NULL,
 # ---------------------------------------------------------------------------
 # 6. KIEM DINH THONG KE
 # ---------------------------------------------------------------------------
-# Wilcoxon (theo cap) giua hai mo hinh tren cac cap da ghep CHUNG.
-wilcoxon_paired <- function(m1, m2) {
-  a <- m1$d_h; b <- m2$d_h
-  k <- paste(m1$station, m1$target_date, m1$peak_idx, sep = "|")
-  k2 <- paste(m2$station, m2$target_date, m2$peak_idx, sep = "|")
-  cm <- intersect(k, k2)
-  if (length(cm) < 5) return(NULL)
-  a <- a[match(cm, k)]; b <- b[match(cm, k2)]
+# GHEP CAP GIUA HAI MO HINH (sua loi 24/11/2026)
+#
+# Khoa cap = (station, target_date, peak_idx, issued_date, lead_day): hai mo hinh
+# chi duoc so tren CUNG ngay phat va CUNG chan troi. Truoc day khoa thieu
+# issued_date/lead_day -> voi B_KTTV (5 ban ghi lead 1..5 cho moi ngay dich)
+# `match()` lay ban ghi dau tien bat ky -> so lead 3 cua mo hinh nay voi lead 1
+# cua mo hinh kia.
+#
+# Mo hinh "khong phu thuoc chan troi" (`free = TRUE`: B0 climatology, B_harm trieu
+# thien van -- du bao cho ngay d khong doi theo ngay phat) chi co mot ban ghi moi
+# (station, target_date, peak_idx); khi ghep voi mo hinh co chan troi, ban ghi do
+# duoc ghep voi MOI (issued_date, lead_day) cua mo hinh kia (cung du bao o moi
+# chan troi), nen cap van cung chan troi cua mo hinh co chan troi.
+pair_key <- function(m, free = FALSE) {
+  base <- paste(m$station, m$target_date, m$peak_idx, sep = "|")
+  if (isTRUE(free)) return(base)
+  iss <- if (is.null(m$issued_date)) NA_character_ else as.character(m$issued_date)
+  ld <- if (is.null(m$lead_day)) NA_integer_ else m$lead_day
+  paste(base, iss, ld, sep = "|")
+}
+
+# Tra ve data.frame(key, target_date, issued_date, e_a, e_b) -- sai so `d_h` cua
+# hai mo hinh tren cac cap CHUNG, sap theo thoi gian (cho HAC cua DM).
+paired_errors <- function(m1, m2, free1 = FALSE, free2 = FALSE) {
+  empty <- data.frame(key = character(0), target_date = character(0),
+                      issued_date = character(0), e_a = numeric(0), e_b = numeric(0))
+  if (!nrow(m1) || !nrow(m2)) return(empty)
+  if (isTRUE(free1) && !isTRUE(free2)) {
+    r <- paired_errors(m2, m1, free1 = FALSE, free2 = TRUE)
+    names(r)[match(c("e_a", "e_b"), names(r))] <- c("e_b", "e_a")
+    return(r[, c("key", "target_date", "issued_date", "e_a", "e_b")])
+  }
+  # m1 co chan troi (hoac ca hai deu khong): khoa cua m1 la khoa cap
+  k1 <- pair_key(m1, free1 && free2)
+  k2_full <- pair_key(m2, free1 && free2)
+  keep1 <- !duplicated(k1)
+  m1 <- m1[keep1, , drop = FALSE]; k1 <- k1[keep1]
+  if (isTRUE(free2) && !isTRUE(free1)) {
+    k2 <- pair_key(m2, TRUE)
+    j <- match(pair_key(m1, TRUE), k2)
+  } else {
+    j <- match(k1, k2_full)
+  }
+  ok <- !is.na(j) & !is.na(m1$d_h) & !is.na(m2$d_h[j])
+  if (!any(ok)) return(empty)
+  iss <- if (is.null(m1$issued_date)) rep(NA_character_, nrow(m1)) else as.character(m1$issued_date)
+  r <- data.frame(key = k1[ok], target_date = as.character(m1$target_date[ok]),
+                  issued_date = iss[ok], e_a = m1$d_h[ok], e_b = m2$d_h[j[ok]],
+                  stringsAsFactors = FALSE)
+  r <- r[order(r$target_date, r$issued_date, r$key), , drop = FALSE]
+  rownames(r) <- NULL
+  r
+}
+
+# Wilcoxon theo cap tren SAI SO TUYET DOI |e_a| vs |e_b| (so do chinh xac).
+# (Truoc day kiem dinh tren sai so CO DAU d_h -> do khac biet giua hai du bao,
+#  khong phai khac biet do chinh xac: hai mo hinh lech +0.15 / -0.15 m bi coi la
+#  "khac nhau co y nghia" du |sai so| bang nhau.)
+wilcoxon_paired <- function(m1, m2, free1 = FALSE, free2 = FALSE) {
+  pe <- paired_errors(m1, m2, free1, free2)
+  if (nrow(pe) < 5) return(NULL)
+  a <- abs(pe$e_a); b <- abs(pe$e_b)
   # R's wilcox.test gives NA p-value when ALL differences are 0 (W = 0).
   # Theo quy uoc, truong hop do = "khong co bang chung khac biet" -> p = 1.
   d <- a - b
   if (all(abs(d) < .Machine$double.eps)) {
-    return(data.frame(n_pairs = length(cm), stat_w = 0, p_value = 1,
+    return(data.frame(n_pairs = nrow(pe), stat_w = 0, p_value = 1,
                       median_a = stats::median(a), median_b = stats::median(b),
                       stringsAsFactors = FALSE))
   }
   w <- stats::wilcox.test(a, b, paired = TRUE, exact = FALSE)
   p <- w$p.value
   if (is.na(p)) p <- 1
-  data.frame(n_pairs = length(cm),
+  data.frame(n_pairs = nrow(pe),
              stat_w = unname(w$statistic), p_value = p,
              median_a = stats::median(a), median_b = stats::median(b),
              stringsAsFactors = FALSE)
 }
 
-# Diebold-Mariano: kiem dinh mean(d) = 0 cho hieu sai so `d`.
-# Ban loss: MAE (hoac RMSE) voi dau vao MAE. Uoc luong lon bang HAC (Newey-West,
-# lag = floor(4*(n/100)^(2/9))).
-dm_test <- function(d, loss = c("abs", "sq"), lag = NULL) {
+# Diebold-Mariano: H0 E[d] = 0 voi chuoi CHENH LECH LOSS d_t = L(e_a,t) - L(e_b,t).
+#   dm_test(e_a, e_b, loss)  -> d = |e_a| - |e_b| (loss = "abs") hoac e_a^2 - e_b^2 ("sq")
+#   dm_test(d)               -> `d` da la chuoi chenh lech loss (khong bien doi them)
+# (Truoc day ham nhan `d = e_a - e_b` roi lay |d| -> kiem dinh mean|e_a - e_b| = 0,
+#  luon "co y nghia" khi hai du bao khac nhau, bat ke mo hinh nao chinh xac hon.)
+# Phuong sai HAC (Newey-West, lag = floor(4*(n/100)^(2/9))); `d` phai sap theo thoi gian.
+dm_test <- function(e_a, e_b = NULL, loss = c("abs", "sq"), lag = NULL) {
   loss <- match.arg(loss)
+  if (is.null(e_b)) {
+    d <- e_a
+  } else {
+    lf <- if (loss == "abs") abs else function(x) x^2
+    d <- lf(e_a) - lf(e_b)
+  }
   d <- d[!is.na(d)]
   n <- length(d)
   if (n < 10) return(NULL)
-  l <- if (loss == "abs") abs(d) else d^2
-  m <- mean(l)
-  u <- l - m
+  m <- mean(d)
+  u <- d - m
   if (is.null(lag)) lag <- floor(4 * (n / 100)^(2 / 9))
   lag <- as.integer(min(lag, n - 1))
   # HAC (Newey-West) variance cua trung binh
@@ -504,8 +573,9 @@ dm_test <- function(d, loss = c("abs", "sq"), lag = NULL) {
     s <- s + 2 * (1 - k / (lag + 1)) * gk
   }
   v <- (g0 + s) / n
-  # Trường hợp sai số hằng số (u = 0): phương sai = 0 -> không có bằng chứng
-  # khác biệt -> p = 1 (thay vì NULL).
+  # Chenh lech loss hang so (u = 0): phuong sai = 0. Neu trung binh cung = 0 -> p = 1;
+  # neu khac 0 (mot mo hinh luon tot hon dung mot luong) -> khong uoc luong duoc t,
+  # quy uoc p = 1 (khong du thong tin) nhu truoc.
   if (!is.finite(v)) return(NULL)
   if (v <= 0) {
     return(data.frame(n = n, loss = loss, mean_loss = m, dm_t = NA_real_,
@@ -548,8 +618,10 @@ holm_adjust <- function(p) {
 #   $by_station: theo tram
 #   $contingency: POD/FAR/CSI
 #   $tests     : Wilcoxon + DM + Holm
+# `horizon_free`: ten cac mo hinh khong phu thuoc chan troi (xem `paired_errors`).
 evaluate_predictions <- function(pred, obs, exceed_thresholds = NULL,
-                                 obs_exceed = NULL, model_a = NULL) {
+                                 obs_exceed = NULL, model_a = NULL,
+                                 horizon_free = character(0)) {
   matched <- match_forecast_observed(pred, obs, window_h = 6)
   if (!nrow(matched)) {
     return(list(matched = matched, overall = NULL, by_lead = NULL,
@@ -595,21 +667,17 @@ evaluate_predictions <- function(pred, obs, exceed_thresholds = NULL,
     wr <- list(); dmr <- list()
     for (i in seq_along(tn)) for (j in seq_along(tn)) {
       if (i >= j) next
-      w <- wilcoxon_paired(per_model[[tn[i]]], per_model[[tn[j]]])
+      fa <- tn[i] %in% horizon_free; fb <- tn[j] %in% horizon_free
+      w <- wilcoxon_paired(per_model[[tn[i]]], per_model[[tn[j]]], fa, fb)
       if (!is.null(w)) {
         w$model_a <- tn[i]; w$model_b <- tn[j]
         wr[[length(wr) + 1L]] <- w
       }
-      # Diebold-Mariano tren hieu sai do (a - b) theo cap CHUNG
-      ka <- paste(per_model[[tn[i]]]$station, per_model[[tn[i]]]$target_date,
-                  per_model[[tn[i]]]$peak_idx, sep = "|")
-      kb <- paste(per_model[[tn[j]]]$station, per_model[[tn[j]]]$target_date,
-                  per_model[[tn[j]]]$peak_idx, sep = "|")
-      cm <- intersect(ka, kb)
-      if (length(cm) >= 20) {
-        da <- per_model[[tn[i]]]$d_h[match(cm, ka)]
-        db <- per_model[[tn[j]]]$d_h[match(cm, kb)]
-        dm <- dm_test(da - db, loss = "abs")
+      # Diebold-Mariano tren chenh lech loss |e_a| - |e_b| theo cap CHUNG
+      # (cung tram, ngay dich, dinh, ngay phat, chan troi), sap theo thoi gian.
+      pe <- paired_errors(per_model[[tn[i]]], per_model[[tn[j]]], fa, fb)
+      if (nrow(pe) >= 20) {
+        dm <- dm_test(pe$e_a, pe$e_b, loss = "abs")
         if (!is.null(dm)) {
           dm$model_a <- tn[i]; dm$model_b <- tn[j]
           dmr[[length(dmr) + 1L]] <- dm

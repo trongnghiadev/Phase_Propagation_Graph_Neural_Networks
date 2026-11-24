@@ -1,20 +1,27 @@
 """Đăng nhập / làm mới token / đăng xuất (`POST /api/v1/auth/login|refresh|logout`).
 
 - `login`: kiểm tra mật khẩu (argon2), phát hành access (15 phút) + refresh (7 ngày).
-- `refresh`: đổi refresh token lấy cặp token mới; refresh cũ bị chặn (blacklist) sau khi dùng.
+- `refresh`: đổi refresh token lấy cặp token mới. Refresh token dùng MỘT lần, tiêu thụ bằng SET NX EX
+  (nguyên tử). Dùng lại một refresh token đã tiêu thụ (dấu hiệu token bị đánh cắp) thì thu hồi toàn bộ
+  phiên của người dùng (tăng `perm_ver`) và trả 401.
 - `logout`: chặn `jti` của access token trong Redis (blacklist) → token không dùng được nữa.
 
 Mật khẩu sai nhiều lần → khoá tài khoản tạm (`auth.max_failed_logins`, `auth.lockout_minutes`).
+
+Đăng nhập không tiết lộ tài khoản nào tồn tại: luôn chạy `verify_password` (hash giả khi không có
+tài khoản); tài khoản không tồn tại, mật khẩu sai, kể cả tài khoản đang bị khoá/vô hiệu mà mật khẩu sai
+đều trả CÙNG 401. Trạng thái khoá (423) / vô hiệu (403) chỉ báo khi mật khẩu đúng.
 """
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from api.auth.password import needs_rehash, verify_password
+from api.auth.password import dummy_hash, needs_rehash, verify_password
 from api.auth.users import UserRepo
 from api.deps import UserContext, current_user, rate_limit
 from api.state import state
@@ -69,17 +76,19 @@ def login(body: LoginRequest):
     repo = _repo()
     cfg = state.config.auth
     user = repo.get_user_by_username(body.username)
-    if user is None:
-        # Không tiết lộ có/không tồn tại tài khoản; cũng không ghi nhận số lần sai.
+    stored = (user or {}).get("password_hash") or ""
+    # Luôn chạy argon2 (hash giả khi không có tài khoản hoặc không có hash) → thời gian như nhau.
+    ok = verify_password(stored or dummy_hash(), body.password) and bool(stored)
+    if user is None or not ok:
+        if user is not None:
+            repo.register_failure(user["_id"], max_failures=cfg.max_failed_logins,
+                                  lock_minutes=cfg.lockout_minutes)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="tên đăng nhập hoặc mật khẩu không đúng")
+    # Từ đây mật khẩu ĐÚNG: mới được báo trạng thái tài khoản.
     if not user.get("active", True):
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="tài khoản đã bị vô hiệu")
     if repo.is_locked(user):
         raise HTTPException(status.HTTP_423_LOCKED, detail="tài khoản đang bị khoá tạm do đăng nhập sai nhiều lần")
-    if not verify_password(user.get("password_hash", ""), body.password):
-        repo.register_failure(user["_id"], max_failures=cfg.max_failed_logins,
-                              lock_minutes=cfg.lockout_minutes)
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="tên đăng nhập hoặc mật khẩu không đúng")
     repo.reset_failures(user["_id"])
     if needs_rehash(user.get("password_hash", "")):
         log.info("băm mật khẩu của %s không còn khớp tham số hiện tại", user["_id"])
@@ -89,7 +98,12 @@ def login(body: LoginRequest):
 @router.post("/refresh", response_model=TokenResponse,
              dependencies=[Depends(rate_limit(scope="refresh"))])
 def refresh(body: RefreshRequest):
-    """Làm mới token bằng refresh token (7 ngày). Refresh cũ bị chặn sau khi dùng."""
+    """Làm mới token bằng refresh token (7 ngày). Mỗi refresh token chỉ dùng được một lần.
+
+    - 401: token sai/hết hạn, đã đăng xuất, quyền đã đổi, hoặc token bị DÙNG LẠI (khi đó mọi phiên của
+      người dùng bị thu hồi);
+    - 503: Redis không sẵn sàng (không tiêu thụ được token một cách nguyên tử).
+    """
     repo = _repo()
     try:
         payload = state.jwt.decode_refresh(body.refresh_token)
@@ -97,16 +111,22 @@ def refresh(body: RefreshRequest):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=f"refresh token không hợp lệ: {e}") from None
     jti = str(payload.get("jti", ""))
     if state.blacklist.is_revoked(jti):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="refresh token đã dùng hoặc đã đăng xuất")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="refresh token đã đăng xuất")
     user_id = str(payload.get("user_id") or payload.get("sub") or "")
     user = repo.get_user(user_id)
     if user is None or not user.get("active", True):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="tài khoản không tồn tại hoặc đã bị vô hiệu")
     if int(user.get("perm_ver", 1)) != int(payload.get("perm_ver", 1)):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="quyền đã thay đổi, hãy đăng nhập lại")
-    # chặn refresh cũ (dùng một lần)
-    ttl = int(state.config.auth.refresh_ttl_days * 86400)
-    state.blacklist.revoke(jti, ttl)
+    # Tiêu thụ nguyên tử (SET NX EX): chỉ một request với cùng jti được cấp token mới.
+    ttl = max(1, int(payload.get("exp", 0)) - int(time.time())) + 60
+    if not state.blacklist.consume_refresh(jti, ttl):
+        new_ver = repo.revoke_all_sessions(user_id)
+        log.warning("refresh token của %s bị dùng lại (jti=%s): thu hồi toàn bộ phiên (perm_ver=%s)",
+                    user_id, jti, new_ver)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED,
+                            detail="refresh token đã được dùng; mọi phiên của tài khoản đã bị thu hồi, "
+                                   "hãy đăng nhập lại")
     return _pair_response(user, repo)
 
 

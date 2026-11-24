@@ -17,7 +17,31 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["AppState", "state", "configure_logging", "get_logger"]
+__all__ = ["AppState", "state", "configure_logging", "get_logger", "SensitiveDriverLogFilter",
+           "DRIVER_LOGGERS"]
+
+#: Logger của driver MongoDB. Từ pymongo 4.8, `pymongo.command` ở mức DEBUG in NGUYÊN lệnh và reply
+#: (kể cả document `users` có `password_hash`) → luôn giữ các logger này ở mức tối thiểu INFO.
+DRIVER_LOGGERS = ("pymongo", "pymongo.command", "pymongo.connection", "pymongo.serverSelection",
+                  "pymongo.topology", "pymongo.monitoring")
+_SENSITIVE_MARKERS = ("password_hash", '"users"', "'users'", "users.", "$argon2")
+
+
+class SensitiveDriverLogFilter(logging.Filter):
+    """Chặn mọi dòng log của driver MongoDB nhắc tới collection `users` hoặc hash mật khẩu.
+
+    Lớp phòng thủ thứ hai (lớp thứ nhất là giữ `pymongo.*` ≥ INFO): kể cả khi ai đó hạ mức log của
+    driver xuống DEBUG, reply của `users` vẫn không bao giờ ra log.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not record.name.startswith("pymongo"):
+            return True
+        try:
+            text = record.getMessage()
+        except Exception:  # noqa: BLE001 - không định dạng được thì không in
+            return False
+        return not any(m in text for m in _SENSITIVE_MARKERS)
 
 
 def configure_logging(level: str = "INFO", *, instance: str = "api") -> logging.Logger:
@@ -25,6 +49,9 @@ def configure_logging(level: str = "INFO", *, instance: str = "api") -> logging.
 
     Định dạng: ``<giờ> <mức> [<instance>] [request_id=<id>] <nội dung>``.
     `request_id` do middleware gắn vào `logging.LogRecord` qua `LoggerAdapter`/filter.
+
+    `log_level: DEBUG` chỉ áp cho code của dự án; logger `pymongo.*` luôn ≥ INFO (tắt command
+    monitoring ở mức DEBUG) và mọi handler gắn `SensitiveDriverLogFilter`.
     """
     root = logging.getLogger()
     root.setLevel(level)
@@ -36,6 +63,15 @@ def configure_logging(level: str = "INFO", *, instance: str = "api") -> logging.
         for h in root.handlers:
             if isinstance(h, logging.StreamHandler):
                 h.setFormatter(_Formatter(instance))
+    for h in root.handlers:
+        if not any(isinstance(f, SensitiveDriverLogFilter) for f in h.filters):
+            h.addFilter(SensitiveDriverLogFilter())
+    floor = max(logging.INFO, logging.getLevelName(level) if isinstance(level, str) else int(level))
+    for name in DRIVER_LOGGERS:
+        lg = logging.getLogger(name)
+        lg.setLevel(floor)
+        if not any(isinstance(f, SensitiveDriverLogFilter) for f in lg.filters):
+            lg.addFilter(SensitiveDriverLogFilter())
     return logging.getLogger("api")
 
 
@@ -121,7 +157,8 @@ class AppState:
             from api.auth.jwt import JwtManager
             a = self.config.auth
             self._jwt = JwtManager(issuer=a.issuer, access_ttl_min=a.access_ttl_min,
-                                   refresh_ttl_days=a.refresh_ttl_days, secret_env=a.secret_env)
+                                   refresh_ttl_days=a.refresh_ttl_days, secret_env=a.secret_env,
+                                   app_env=self.config.env)
         return self._jwt
 
     @property

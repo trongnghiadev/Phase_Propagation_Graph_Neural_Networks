@@ -36,6 +36,10 @@ trên đường đi giữa một trạm/hồ và cửa sản. Mọi nút trạm 
 3. Không trùng khóa `(src, dst, dir)`.
 4. Mọi nút trạm/hồ còn lại sau tỉa và vẫn nối được với cửa sản.
 
+Parquet (`edges.parquet`, `nodes.parquet`) ghi vào `<đích>.tmp_<run_id>` và chỉ đổi tên thành đích sau
+khi kiểm tra đạt và đã thay `graph_edges` (`features/outdir.py`); kiểm tra hỏng / `--dry-run` → bản cũ
+giữ nguyên.
+
 Mã thoát: 0 ok, 1 kiểm tra hỏng, 2 tên/mã không tra được, 3 job đang chạy ở nơi khác,
 4 còn `__prev` của lần chạy hỏng giữa chừng (lùi lại rồi `--ack-rollback`), 5 mất khóa,
 6 lỗi không lường trước.
@@ -56,6 +60,7 @@ from pyspark.sql.types import (ArrayType, BooleanType, DoubleType, LongType, Str
                                StructField, StructType)
 
 from common.jobrun import JobRun  # noqa: E402
+from features import outdir  # noqa: E402
 from common.session import (JobLockError, LockLostError, MongoAdmin, bson_date, build_session, env_db,  # noqa: E402
                             env_uri, read_mongo, write_mongo)
 from features import atomic  # noqa: E402
@@ -285,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"run_id={run_id} db={args.db} root={args.root_comid} min_uparea={args.min_uparea_km2} km²", flush=True)
     rep = Report()
     status = "failed"
+    tmp_dirs: dict[str, str] = {}   # đích → thư mục tạm chưa công bố (xóa ở `finally`)
     try:
         try:
             run.acquire()
@@ -408,8 +414,10 @@ def main(argv: list[str] | None = None) -> int:
         rep.add("nút ảo biển nối vào cửa sản bằng cạnh up ảo", sea_ok,
                 f"SEA_VUNGTAU -> {args.root_comid}" if sea_ok else "thiếu cạnh ảo biển")
 
-        # ---- Ghi Parquet ---------------------------------------------------
+        # ---- Ghi Parquet vào thư mục tạm ----------------------------------
         # Ghi trong container driver (`local[*]`): executor của cụm không có mount repo.
+        # Ghi `<đích>.tmp_<run_id>`; chỉ đổi tên thành đích sau khi kiểm tra đạt và đã thay
+        # `graph_edges` (bản Parquet cũ giữ nguyên nếu job dừng giữa chừng / --dry-run).
         os.makedirs(args.out_dir, exist_ok=True)
         edges_df = spark.createDataFrame(edges, "src string, dst string, dir string, virtual boolean, "
                                                 "length_km double, slope_raw double, slope_used double, "
@@ -421,10 +429,14 @@ def main(argv: list[str] | None = None) -> int:
                                                 "slope_raw double, next_down_id string")
         run.hold()
         spark.conf.set("spark.sql.shuffle.partitions", "8")
-        edges_df.coalesce(4).write.mode("overwrite").parquet(os.path.join(args.out_dir, "edges.parquet"))
-        nodes_df.coalesce(1).write.mode("overwrite").parquet(os.path.join(args.out_dir, "nodes.parquet"))
-        print(f"[PARQUET] {args.out_dir}/edges.parquet ({len(edges)} dòng), nodes.parquet ({len(nodes)} dòng)",
-              flush=True)
+        for name, df_, nparts in (("edges.parquet", edges_df, 4), ("nodes.parquet", nodes_df, 1)):
+            dst = os.path.join(args.out_dir, name)
+            for msg in outdir.recover(dst):
+                print(f"[DỌN] {msg}", flush=True)
+            tmp_dirs[dst] = outdir.tmp_path(dst, run_id)
+            df_.coalesce(nparts).write.mode("errorifexists").parquet(tmp_dirs[dst])
+        print(f"[PARQUET tạm] {args.out_dir}/edges.parquet ({len(edges)} dòng), nodes.parquet ({len(nodes)} dòng)"
+              f" → *.tmp_{run_id}", flush=True)
 
         # ---- Ghi staging MongoDB ------------------------------------------
         # `src`/`dst`/`source_comid`: COMID dạng SỐ, TRỪ nút ảo biển là chuỗi `SEA_VUNGTAU`.
@@ -501,6 +513,10 @@ def main(argv: list[str] | None = None) -> int:
                                               [f"{COLL}{atomic.PREV}"]), flush=True)
             raise
         adm.drop(f"{COLL}{atomic.PREV}")
+        run.hold()
+        for dst in list(tmp_dirs):
+            outdir.publish(tmp_dirs.pop(dst), dst, run_id)
+            print(f"[PUBLISH] {dst}", flush=True)
         status = "ok"
         return 0
     except atomic.PrevPendingError as e:
@@ -516,6 +532,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Dừng: lỗi không lường trước (mã thoát 6).", flush=True)
         return 6
     finally:
+        for t in tmp_dirs.values():
+            outdir.discard(t)
         try:
             run.finish(None if status == "ack" else status)
         finally:

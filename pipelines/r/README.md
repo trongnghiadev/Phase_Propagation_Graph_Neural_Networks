@@ -24,10 +24,13 @@ MongoDB: `mongodb://localhost:27017`, db `vietnam_gis`.
 | `R/evaluation.R` | hàm đánh giá **chung cho mọi mô hình** (theo `schemas/prediction/v1.schema.json`) |
 | `R/data.R` | bản nháp ban đầu của tải dữ liệu — **không source cùng `R/rules.R`** (trùng tên hàm) |
 | `descriptive.R` | 4.2 thống kê mô tả + 4.6 ngoại lệ → `results/E8/` |
-| `harmonic.R` | 4.3 điều hòa thủy triều → `results/E1/` + `data/processed/features/astro_tide.csv` |
+| `harmonic.R` | 4.3 điều hòa thủy triều → `results/E1/` + `data/processed/features/astro_tide.csv` + `astro_tide_meta.json`; **chỉ fit trên `harmonic_fit_splits` của `config/splits.json` (mặc định: train)** |
 | `phase_lag.R` | 4.4 độ trễ pha, H5–H7 → `results/E1/` |
 | `evaluation.R` | 4.5 chạy đánh giá (B0 / B_harm / B_KTTV) → `results/E5/` |
-| `tests/test_evaluation.R` | unit test đánh giá (58 test, chạy bằng `Rscript`, dùng `stopifnot`) |
+| `tests/test_evaluation.R` | unit test đánh giá (chạy bằng `Rscript`, dùng `stopifnot`; mục 13–14 thêm 24/11/2026: khóa ghép cặp kiểm định, chống rò rỉ khi fit điều hòa) |
+
+**Biên chia tập** đọc từ `config/splits.json` (`R/io.R::load_splits`) — cùng file với
+`phasegnn.data.SPLITS` và Spark G5 (`pipelines/spark/features/splits.py`); không viết cứng năm/ngày trong script.
 
 ## 2. Cách chạy
 
@@ -95,6 +98,14 @@ Bảng: `e8_peak_summary_by_station.csv`, `e8_peak_by_{year,month,mday,hour}.csv
 Theo bậc: bậc 1 = 538 đoan (4 505 km), bậc 2 = 252 (2 234 km), bậc 3 = 103 (1 040 km),
 bậc 4 = 149 (1 306 km), bậc 5 = 29 (220 km), bậc 6 = 1 (5 km).
 
+> **CẢNH BÁO (24/11/2026) — số liệu mục 4.2 và 4.4 dưới đây là của bản cũ, fit trên cả tập test, cần chạy lại.**
+> Bản cũ của `harmonic.R` fit hệ số điều hòa trên `FIT_YEARS <- 2017:2026` (gồm tập test từ 2024-07-01), nên
+> `astro_tide*.csv`, B_harm, B1 và mọi chỉ số dùng chúng bị rò rỉ dữ liệu test. B0 (climatology) trong
+> `evaluation.R` cũng lấy trung bình trên mọi năm, kể cả năm test. Kiểm định Wilcoxon/DM cũ ghép cặp thiếu
+> `issued_date`/`lead_day` và kiểm định sai đại lượng (xem 5.4). Thứ tự chạy lại: `harmonic.R` → `phase_lag.R` →
+> (Spark G5) → `scripts/run_baselines.py` → `evaluation.R --pred results/baselines/predictions_all_test.csv`.
+> Ước lượng bằng bản port Python khớp R tới 1e-5 m: B_harm test MAE 0.198 → **0.245 m**, B1 0.187 → **0.216 m**.
+
 ### 4.2 Điều hòa thủy triều — `results/E1/`
 
 | Kết quả | Số liệu thật |
@@ -105,7 +116,7 @@ bậc 4 = 149 (1 306 km), bậc 5 = 29 (220 km), bậc 6 = 1 (5 km).
 | Biến độ M2 (m) | Vũng Tàu 0.828; Biên Hòa 1.073; Nhà Bè 1.022; Phú An 0.990; Thủ Dầu Một 0.787; Bến Lức 0.728; Tân An 0.639; Dầu Tiếng 0.563; Gò Dầu Hạ 0.253 |
 | Biến độ K1 (m) | 0.132 – 0.638; O1 0.071 – 0.419 |
 | Phần phương sai giải thích | 0.443 (Gò Dầu Hạ) – 0.960 (Nhà Bè); Vũng Tàu 0.949 |
-| **Kiểm định (train ≤ 2023, val 2024–2026)** | MAE độ cao **0.213 – 0.416 m**; MAE giờ đỉnh **0.71 – 1.51 h** (chi tiết `harmonic_validation.csv`) |
+| **Kiểm định (bản cũ: train ≤ 2023, val 2024–2026 — chạm tập test; bản mới: fit train, kiểm tra trên val)** | MAE độ cao **0.213 – 0.416 m**; MAE giờ đỉnh **0.71 – 1.51 h** (chi tiết `harmonic_validation.csv`) |
 | `data/processed/features/astro_tide.csv` | **3 607 dòng dữ liệu** (+1 dòng header), cột `day,h1,h2,t1_h,t2_h`, từ **2016-12-31** đến **2026-11-15** (toàn giai đoạn + 5 ngày tương lai) |
 | `results/E1/astro_tide_by_station.csv` | **32 463 dòng** — triêu thiên van DU TINH THEO TUNG TRAM (moi tram co moc datum rieng) |
 | Phần dư phi thiên văn | `results/E1/astro_residual.csv` — 60 573 dòng (trạm–ngày) |
@@ -293,6 +304,12 @@ T0 = 2020-01-01 00:00 UTC; \(t\) tính bằng **giờ**, điểm gốc là **ng�
   là +10.36 h nhưng đỉnh 2 là −7.02 h (đảo chiều pha), nên CI bootstrap rất rộng ([−11.85, 11.87]).
 
 ### 5.4 Chỉ số & kiểm định
+
+> **Sửa 24/11/2026.** (1) Cặp kiểm định ghép theo `(station, target_date, peak_idx, issued_date, lead_day)` —
+> cùng ngày phát, cùng chân trời; mô hình không phụ thuộc chân trời (`B0`, `B_harm`, tham số `horizon_free`)
+> được ghép với mọi `(issued_date, lead_day)` của mô hình kia. (2) Wilcoxon so `|e_a|` với `|e_b|` (trước: sai số
+> có dấu). (3) Diebold–Mariano trên chênh lệch loss `|e_a| − |e_b|` (trước: `|e_a − e_b|`, luôn "có ý nghĩa").
+> (4) `evaluation.R` mặc định chỉ đánh giá tập test (`--split test`; `--split all` = cách cũ).
 
 - Độ cao: MAE, RMSE, bias (ΔH). Thời gian: MAE `d_t_h`, bias `d_t_h` (Δt).
 - NSE, KGE (gói `hydroGOF`).

@@ -45,8 +45,11 @@ giá trị đã trọng số hoá).
 (`rainfall_daily` → bảng lưới theo ngày) và bỏ bước gán trạm; phần tính tích lũy và phân
 vùng Parquet giữ nguyên. Ma trận trọng số `rain_weights.csv` cũng không còn cần.
 
+Parquet ghi vào `<out-dir>.tmp_<run_id>` rồi đổi tên (`features/outdir.py`): bản cũ giữ nguyên tới khi
+bản mới ghi xong. Đọc `rainfall_daily` (đầu ra G0) nên kiểm tra khóa G0 như job QC (`features/g0guard.py`).
+
 Mã thoát: 0 ok, 1 kiểm tra hỏng (tổng trọng số ≠ 1), 2 thiếu `graph_edges`/`rainfall_daily`,
-3 job đang chạy ở nơi khác, 5 mất khóa, 6 lỗi không lường trước.
+3 job này hoặc G0 đang chạy, 4 G0 còn dở thay thế (`g0_unsettled`), 5 mất khóa, 6 lỗi không lường trước.
 """
 from __future__ import annotations
 
@@ -65,6 +68,8 @@ from pyspark.sql.types import (DoubleType, LongType, StringType, StructField, St
 from pyspark.sql import Row  # noqa: E402
 
 from common.jobrun import JobRun  # noqa: E402
+from features import outdir  # noqa: E402
+from features.g0guard import g0_block  # noqa: E402
 from common.session import (JobLockError, LockLostError, MongoAdmin, build_session, env_db, env_uri,  # noqa: E402
                             read_mongo)
 from features.rain_rules import (EARTH_RADIUS_M, RADIUS_KM_DEFAULT, assign_station_to_nodes,  # noqa: E402
@@ -102,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     run = JobRun(adm, JOB, args.lock_ttl_s)
     print(f"run_id={run.run_id} db={args.db} radius={args.radius_km} km", flush=True)
     status = "failed"
+    tmp_dir = None
     try:
         try:
             run.acquire()
@@ -109,6 +115,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Dừng: {e}", flush=True)
             return 3
         run.start(db=args.db, radius_km=args.radius_km, job_version=JOB_VERSION)
+        blk = g0_block(run, adm)     # đọc `rainfall_daily` (đầu ra G0)
+        if blk:
+            code, status, msg = blk
+            print(f"Dừng: {msg}", flush=True)
+            return code
+        status = "failed"
         if not adm.exists("rainfall_daily"):
             print("Dừng: chưa có `rainfall_daily`.", flush=True)
             return 2
@@ -365,10 +377,17 @@ def main(argv: list[str] | None = None) -> int:
             status = "dry_run"
             return 0
 
+        # Ghi `<out-dir>.tmp_<run_id>` rồi đổi tên: bản cũ giữ nguyên tới khi bản mới ghi xong.
         run.hold()
-        os.makedirs(args.out_dir, exist_ok=True)
+        for msg in outdir.recover(args.out_dir):
+            print(f"[DỌN] {msg}", flush=True)
+        tmp_dir = outdir.tmp_path(args.out_dir, run.run_id)
+        os.makedirs(os.path.dirname(tmp_dir) or ".", exist_ok=True)
         spark.conf.set("spark.sql.shuffle.partitions", "8")
-        node_day.write.mode("overwrite").partitionBy("year").parquet(args.out_dir)
+        node_day.write.mode("errorifexists").partitionBy("year").parquet(tmp_dir)
+        run.hold()
+        outdir.publish(tmp_dir, args.out_dir, run.run_id)
+        tmp_dir = None
         print(f"[PARQUET] {args.out_dir} ({n_rows} dòng)", flush=True)
 
         stats = {
@@ -390,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Dừng: lỗi không lường trước (mã thoát 6).", flush=True)
         return 6
     finally:
+        if tmp_dir:
+            outdir.discard(tmp_dir)
         try:
             run.finish(status)
         finally:

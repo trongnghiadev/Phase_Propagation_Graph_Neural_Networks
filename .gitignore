@@ -55,3 +55,19 @@ Thumbs.db
 
 # Cấu hình Claude Code cục bộ (agent cài từ docs/agents, không công khai)
 .claude/
+
+# File tạm, bản sao lưu, log chạy, mẫu chạy thử (không commit)
+tmp_*
+results/_backup_*/
+results/**/_smoke*/
+results/**/logs/
+*.err
+*.log
+results/**/_*_log.txt
+*.pt
+*.rds
+# Dự báo/mẫu theo TỪNG bản ghi (lớn, sinh lại được, dẫn xuất từ số liệu KTTV): chỉ commit bảng tổng hợp và hình
+results/**/predictions*.csv
+results/**/matched_sample*.csv
+results/**/evaluation_matched_sample.csv
+results/E1/astro_residual.csv

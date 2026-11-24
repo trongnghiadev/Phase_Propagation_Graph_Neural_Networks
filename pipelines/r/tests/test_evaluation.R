@@ -286,8 +286,8 @@ big <- data.frame(
   target_date = rep(sprintf("2024-04-%02d", seq_len(n_extra)), 2),
   lead_day = 1L, peak_idx = 0L,
   h_q10 = NA_real_, h_q90 = NA_real_,
-  # A luon du bao cao hon 0.15 m, B luon thap hon 0.15 m -> hieu loss luon duong
-  h_q50 = c(rep(1.55, n_extra), rep(1.25, n_extra)),
+  # A luon lech +0.15 m, B luon lech -0.05 m -> |e_A| - |e_B| = +0.10 > 0 (A kem hon)
+  h_q50 = c(rep(1.55, n_extra), rep(1.35, n_extra)),
   t_peak = rep("2024-04-01T12:30:00Z", 2 * n_extra),
   stringsAsFactors = FALSE)
 big$t_peak_vn <- parse_t_peak_utc(big$t_peak)
@@ -534,6 +534,113 @@ ok("Quy tac MOI: dinh 'roi' 23:30 va dinh phu 12:25 cung the he",
    g_roll$tide_gen == g_sec$tide_gen)
 ok("Quy tac MOI: dinh bien do lon 23:30 la dinh thu 1 cua the he",
    nrow(g_roll) == 1 && g_roll$gen_rn == 1 && g_roll$value == 3.0)
+
+# ---------------------------------------------------------------------------
+# 13. KHOA GHEP CAP KIEM DINH: cung issued_date + lead_day (sua loi 24/11/2026)
+# ---------------------------------------------------------------------------
+cat("\n-- 13. Khoa ghep cap kiem dinh --\n")
+# 2 mo hinh, 1 ngay dich, 2 chan troi. A: lead 1 sai 0.00, lead 3 sai 0.30.
+# B: lead 1 sai 0.10, lead 3 sai 0.20. Thu tu dong cua B dao nguoc.
+mk_m <- function(model, leads, errs) {
+  data.frame(model = model, station = "S", target_date = "2024-08-10",
+             issued_date = c("2024-08-10", "2024-08-08")[match(leads, c(1L, 3L))],
+             lead_day = leads, peak_idx = 0L, d_h = errs, stringsAsFactors = FALSE)
+}
+ma <- mk_m("A", c(1L, 3L), c(0.00, 0.30))
+mb <- mk_m("B", c(3L, 1L), c(0.20, 0.10))
+pe <- paired_errors(ma, mb)
+ok("paired_errors: 2 cap (moi chan troi 1 cap)", nrow(pe) == 2)
+ok("paired_errors: lead 1 cua A ghep voi lead 1 cua B (0.00 vs 0.10)",
+   near(pe$e_a[grepl("\\|1$", pe$key)], 0.00) && near(pe$e_b[grepl("\\|1$", pe$key)], 0.10))
+ok("paired_errors: lead 3 cua A ghep voi lead 3 cua B (0.30 vs 0.20)",
+   near(pe$e_a[grepl("\\|3$", pe$key)], 0.30) && near(pe$e_b[grepl("\\|3$", pe$key)], 0.20))
+# Khoa cu (station|target|peak) ghep lead 1 cua A voi dong dau cua B (lead 3):
+k_old_a <- paste(ma$station, ma$target_date, ma$peak_idx, sep = "|")
+k_old_b <- paste(mb$station, mb$target_date, mb$peak_idx, sep = "|")
+ok("(doi chung) khoa cu ghep SAI chan troi: lead 1 cua A voi lead 3 cua B",
+   mb$lead_day[match(k_old_a[1], k_old_b)] == 3L)
+# Cung ngay dich, cung lead nhung KHAC ngay phat -> khong ghep
+mc <- mb; mc$issued_date <- "2024-08-01"
+ok("paired_errors: khac issued_date -> khong ghep", nrow(paired_errors(ma, mc)) == 0)
+# Mo hinh khong phu thuoc chan troi (B_harm): ghep voi MOI chan troi cua mo hinh kia
+mh <- data.frame(model = "H", station = "S", target_date = "2024-08-10",
+                 issued_date = "2024-08-10", lead_day = 1L, peak_idx = 0L, d_h = -0.05)
+ph <- paired_errors(ma, mh, free1 = FALSE, free2 = TRUE)
+ok("horizon_free: B_harm ghep voi ca lead 1 va lead 3 cua A",
+   nrow(ph) == 2 && all(near(ph$e_b, -0.05)))
+ph2 <- paired_errors(mh, ma, free1 = TRUE, free2 = FALSE)
+ok("horizon_free: doi thu tu -> e_a la B_harm, e_b la A",
+   nrow(ph2) == 2 && near(ph2$e_a, c(-0.05, -0.05)) && near(sort(ph2$e_b), c(0, 0.30)))
+ok("horizon_free: khong khai bao -> B_harm (lead 1) chi ghep lead 1 cua A",
+   nrow(paired_errors(ma, mh)) == 1)
+
+# Wilcoxon/DM so do CHINH XAC (|e|), khong phai hieu sai so co dau
+n30 <- 30
+mk_e <- function(e) data.frame(station = "S", target_date = sprintf("2024-08-%02d", 1:n30),
+                               peak_idx = 0L, issued_date = sprintf("2024-08-%02d", 1:n30),
+                               lead_day = 1L, d_h = e)
+w_sym <- wilcoxon_paired(mk_e(rep(0.15, n30)), mk_e(rep(-0.15, n30)))
+ok("Wilcoxon: lech +0.15 vs -0.15 (|e| bang nhau) -> p = 1", w_sym$p_value == 1)
+set.seed(3)
+ea <- rnorm(200, 0, 0.2); eb <- -ea
+ok("DM: e_b = -e_a (cung do chinh xac) -> mean_loss = 0, p = 1",
+   {r <- dm_test(ea, eb, loss = "abs"); near(r$mean_loss, 0) && r$p_value == 1})
+ok("DM: |e_a| > |e_b| co he thong -> mean_loss > 0, p < 0.05",
+   {r <- dm_test(2 * eb + sign(eb) * 0.01, eb, loss = "abs"); r$mean_loss > 0 && r$p_value < 0.05})
+ok("DM: chuoi chenh lech loss truyen thang (e_b = NULL) khong bi lay tri tuyet doi",
+   near(dm_test(rep(c(-0.1, 0.1), 10))$mean_loss, 0))
+
+# evaluate_predictions: kiem dinh tach theo chan troi; B_harm horizon_free
+obs_h <- data.frame(station = "PHU_AN", day = sprintf("2024-08-%02d", 1:n30),
+                    obs_h1 = 1.40, obs_h2 = 0.30, obs_t1_h = 19.5, obs_t2_h = 6.5)
+pk <- do.call(rbind, lapply(1:2, function(ld) data.frame(
+  model = "K", station = "PHU_AN",
+  issued_date = format(as.Date(sprintf("2024-08-%02d", 1:n30)) - (ld - 1), "%Y-%m-%d"),
+  target_date = sprintf("2024-08-%02d", 1:n30), lead_day = ld, peak_idx = 0L,
+  h_q10 = NA_real_, h_q50 = 1.40 + ifelse(ld == 1, 0.02, 0.30), h_q90 = NA_real_,
+  t_peak = sprintf("2024-08-%02dT12:30:00Z", 1:n30))))
+ph_ <- data.frame(model = "B_harm", station = "PHU_AN",
+                  issued_date = sprintf("2024-08-%02d", 1:n30),
+                  target_date = sprintf("2024-08-%02d", 1:n30), lead_day = 1L, peak_idx = 0L,
+                  h_q10 = NA_real_, h_q50 = 1.50, h_q90 = NA_real_,
+                  t_peak = sprintf("2024-08-%02dT12:30:00Z", 1:n30))
+pp <- rbind(pk, ph_); pp$t_peak_vn <- parse_t_peak_utc(pp$t_peak)
+ev_h <- evaluate_predictions(pp, obs_h, horizon_free = "B_harm")
+ok("evaluate: bang ghep co cot issued_date", "issued_date" %in% names(ev_h$matched))
+ok("evaluate: horizon_free -> Wilcoxon B_harm vs K tren 2 x 30 cap (moi lead)",
+   !is.null(ev_h$tests$wilcoxon) && ev_h$tests$wilcoxon$n_pairs[1] == 2 * n30)
+ev_h0 <- evaluate_predictions(pp, obs_h)
+ok("evaluate: khong horizon_free -> chi ghep lead 1 (30 cap)",
+   !is.null(ev_h0$tests$wilcoxon) && ev_h0$tests$wilcoxon$n_pairs[1] == n30)
+
+# ---------------------------------------------------------------------------
+# 14. CHONG RO RI: giai doan fit dieu hoa khong cham tap test (sua loi 24/11/2026)
+# ---------------------------------------------------------------------------
+cat("\n-- 14. Giai doan fit dieu hoa --\n")
+cfg <- load_splits()
+ok("load_splits: doc config/splits.json (train/val/test)",
+   all(c("train", "val", "test") %in% names(cfg$splits)) && nzchar(cfg$test_from))
+ok("load_splits: harmonic_fit_splits khong chua test", !("test" %in% cfg$harmonic_fit_splits))
+fw <- harmonic_fit_window(cfg)
+ok("harmonic_fit_window: ket thuc truoc mo'c test", fw[2] < cfg$test_from)
+cfg_bad <- cfg; cfg_bad$harmonic_fit_splits <- c("train", "test")
+ok("harmonic_fit_window: fit chua tap test -> loi",
+   inherits(tryCatch(harmonic_fit_window(cfg_bad), error = function(e) e), "error"))
+days_all <- format(seq(as.Date("2017-01-01"), as.Date("2026-11-15"), by = "day"), "%Y-%m-%d")
+sel <- days_all[in_fit_window(days_all, fw)]
+ok("in_fit_window: chi giu ngay trong giai doan fit", max(sel) == fw[2] && min(sel) == fw[1])
+ok("assert_no_test_days: du lieu fit hop le -> khong loi",
+   isTRUE(assert_no_test_days(sel, cfg$test_from)))
+ok("assert_no_test_days: co ngay >= mo'c test -> dung (stop)",
+   inherits(tryCatch(assert_no_test_days(c(sel, cfg$test_from), cfg$test_from),
+                     error = function(e) e), "error"))
+# harmonic.R khong con viet cung nam fit va goi kiem tra truoc khi fit
+src_h <- readLines(file.path(repo, "pipelines", "r", "harmonic.R"), warn = FALSE)
+ok("harmonic.R: khong con FIT_YEARS viet cung", !any(grepl("FIT_YEARS\\s*<-", src_h)))
+ok("harmonic.R: goi assert_no_test_days truoc fit_harmonics",
+   {i_a <- grep("assert_no_test_days(d$obs_day", src_h, fixed = TRUE)
+    i_f <- grep("fit <- fit_harmonics(t, d$value", src_h, fixed = TRUE)
+    length(i_a) == 1 && length(i_f) == 1 && i_a < i_f})
 
 # ---------------------------------------------------------------------------
 cat("\n=== KET QUA ===\n")

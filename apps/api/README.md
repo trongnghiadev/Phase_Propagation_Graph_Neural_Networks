@@ -21,17 +21,42 @@ Mọi đường dẫn nghiệp vụ có tiền tố `/api/v1`. Thay đổi phá 
 
 ## Xác thực và phân quyền
 
-- `POST /api/v1/login` trả `access_token` (15 phút) + `refresh_token` (7 ngày), JWT chứa `user_id` và `perm_ver`.
-- `POST /api/v1/logout` chặn `jti` trong Redis; `POST /api/v1/refresh` cấp lại access token.
+- `POST /api/v1/auth/login` trả `access_token` (15 phút) + `refresh_token` (7 ngày), JWT chứa `user_id` và `perm_ver`.
+  Không tiết lộ tài khoản nào tồn tại: luôn chạy argon2 (hash giả nếu không có tài khoản); sai tên/sai mật khẩu, kể cả tài khoản đang khoá hoặc vô hiệu mà mật khẩu sai, đều trả cùng 401. Chỉ khi mật khẩu đúng mới trả 423 (đang khoá) hoặc 403 (vô hiệu).
+- `POST /api/v1/auth/logout` chặn `jti` trong Redis; `POST /api/v1/auth/refresh` cấp cặp token mới. Refresh token dùng **một lần**, tiêu thụ nguyên tử bằng `SET refresh_used:{jti} NX EX`; dùng lại một refresh token đã tiêu thụ thì mọi phiên của tài khoản bị thu hồi (tăng `perm_ver`) và trả 401.
 - Đổi quyền làm tăng `perm_ver` -> token cũ hết hiệu lực ngay (trả 401).
 - Mọi endpoint đều gắn `require(flag, collection)`; `viewer` (mask 1) chỉ đọc, `admin` (mask 4095) đủ quyền.
-- Quyền lưu trong `users.perm` dạng bitmask theo collection; cập nhật nguyên tử bằng toán tử `$bit` của MongoDB.
+- Quyền lưu trong `users.perm` dạng bitmask theo collection. `PUT /api/v1/users/{id}/perm` (body `grant`, `revoke`, `collections`, `perm_ver`, `reason` bắt buộc) ghi mọi thay đổi bằng **một** lệnh `find_one_and_update` có điều kiện `perm_ver` (409 nếu lệch), kiểm tra tên collection (không `.`/`$`, phải nằm trong danh sách đã biết, sai → 422) và ghi `audit_logs` (`action: user_perm`).
+
+### Biến môi trường bảo mật
+
+| Biến | Ý nghĩa |
+|---|---|
+| `AUTH_SECRET` | Khoá ký JWT (HS256). Tên biến lấy từ `auth.secret_env` (mặc định `AUTH_SECRET`; không dùng `JWT_SECRET`). `APP_ENV` là `dev`/`test`: thiếu thì dùng khoá tạm theo tiến trình (cảnh báo). Môi trường khác (ví dụ `cluster`): thiếu khoá hoặc khoá < 32 byte thì API **dừng khởi động** với thông báo rõ. Sinh khoá: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
+| `TRUSTED_PROXIES` | IP/CIDR của proxy tin cậy (ví dụ Nginx), cách nhau bằng dấu phẩy (`rate_limit.trusted_proxies`). Chỉ khi kết nối đến từ các địa chỉ này API mới đọc `X-Forwarded-For` (lấy IP không tin cậy ngoài cùng bên phải). Mặc định rỗng: không tin `X-Forwarded-For`, dùng IP kết nối. |
+
+### Giới hạn tần suất
+
+- Khoá `rl:{scope}:{ip}:{user}`; `INCR`, chỉ đặt `EXPIRE` khi `INCR` trả 1 (cửa sổ cố định, không bị kéo dài khi gọi liên tục); key mất TTL được đặt lại khi phát hiện.
+- **Redis lỗi:** scope `login` chọn **fail-closed**: trả 503 kèm `Retry-After` (không cho dò mật khẩu không giới hạn khi Redis chết; không dùng bộ đếm cục bộ vì mỗi instance đếm riêng sẽ nhân ngưỡng lên theo số instance). Các scope khác cho qua kèm log cảnh báo.
+- Blacklist token: Redis lỗi khi kiểm tra `jti` thì trả 503 (không 500, và không cho qua token có thể đã đăng xuất).
+
+### QC, hoàn tác và khoá ghi
+
+- `POST /api/v1/review/{flag_id}/approve` (APPROVE trên `qc_flags`; body `status` ∈ `confirmed_ok|rejected|corrected|suspect`, `corrected_value`, `reason`, `version`) gọi `vngis.qc.decide` có `expected_version`. Không nhận tên collection từ client.
+- `PATCH /api/v1/tides/{station}/{ts}` (UPDATE trên `tide_extremes`; body `status` ∈ `rejected|corrected|confirmed_ok`, `corrected_value`, `kind`, `reason`, `version`) tạo cờ thủ công nếu chưa có (`vngis.qc.create_manual_flag`) rồi `decide`. API **không** ghi `tide_extremes` và không ghi đè `value` của cờ: G0 áp quyết định ở lần chạy sau. Cờ đã có mà thiếu `version` → 428.
+- `POST /api/v1/audit/{id}/revert` (VIEW_AUDIT trên `audit_logs` **và** quyền ghi trên collection đích): chỉ hoàn tác `qc_decision` (qua `qc.decide`, cần APPROVE trên `qc_flags`) và `bulletin_metadata` (qua `qc.update_bulletin_fields` với giá trị cũ, cần UPDATE trên `hydromet_bulletins`); loại khác → 422. Lần hoàn tác tạo audit mới (`source: api_revert`); audit gốc chỉ được gắn `reverted_at`/`revert_audit_id`; hoàn tác lặp → 409.
+- Endpoint giữ `LockGuard` gọi `guard.check()` ngay trước khi ghi; mất khoá → 503.
+
+### Log
+
+`app.log_level: DEBUG` chỉ áp cho code dự án: logger `pymongo.*` luôn ≥ INFO (tắt log command monitoring của driver, vốn in nguyên reply, kể cả `users.password_hash`), và mọi handler có bộ lọc chặn dòng log của driver nhắc tới `users`/`password_hash`.
 
 ## Cache và khoá
 
-- Cache Redis (cache-aside) do `vngis.cache` quản lý: khoá có phiên bản `ver:{coll}`, TTL kèm jitter, khoá `stale:` dự phòng, chống stampede bằng `lock:rebuild:{key}`.
-- Khoá phân tán do `vngis.locks` quản lý: `LOCK_BACKEND=single|redlock`, watchdog gia hạn, fencing token từ MongoDB.
-- PDF bản tin trả kèm `ETag` (SHA-256) + `Cache-Control`; PDF không nhét vào Redis.
+- Cache Redis (cache-aside) do `vngis.cache` quản lý: khoá có phiên bản `ver:{coll}`, TTL kèm jitter, khoá `stale:` dự phòng, chống stampede bằng `lock:rebuild:{key}`. Redis chết: đọc/ghi cache bị bỏ qua (log cảnh báo), endpoint tính thẳng từ MongoDB.
+- Khoá phân tán do `vngis.locks` quản lý: `LOCK_BACKEND=single|redlock`, watchdog gia hạn, fencing token từ MongoDB (sau khi lấy fence, `LockGuard` xác nhận vẫn còn giữ khoá).
+- PDF bản tin (`GET /api/v1/bulletins/{source_file}/pdf`, EXPORT) trả kèm `ETag` (SHA-256) + `Cache-Control: private, max-age=604800, immutable` (cần quyền nên proxy dùng chung không được lưu); PDF không nhét vào Redis. Route `/pdf` và `/files` được khai báo trước route `{source_file:path}`.
 
 ## Chạy
 
