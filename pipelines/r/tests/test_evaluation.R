@@ -319,6 +319,223 @@ ok("read_predictions: t_peak_vn doi sang gio Viet Nam",
    format(rp$t_peak_vn[1], "%Y-%m-%d %H:%M:%S", tz = "Asia/Ho_Chi_Minh") == "2024-03-10 19:30:00")
 
 # ---------------------------------------------------------------------------
+# 10. PHA HARMONIC: WRAP / UNWRAP (sua loi GĐ4 - Bug 1)
+# ---------------------------------------------------------------------------
+# BANG CHUNG GOC: DAU_TIENG vs VUNG_TAU
+#   phase_VUNG_TAU = -76.7521267189486 deg
+#   phase_DAU_TIENG = +135.329623164239 deg
+#   raw diff = +212.082 deg  ->  wrap = -147.918 deg
+#   lag_h_harmonic (wrap)     = -5.1034 h   <-- SAI DAU
+#   lag_h_harmonic (no wrap)  = +7.3172 h   <-- DUNG
+cat("\n-- 10. PHA HARMONIC: wrap / unwrap --\n")
+ph_vt <- -76.7521267189486
+ph_dt <- 135.329623164239
+per_m2 <- 12.4206012
+
+ok("phase_diff_deg: wrap 212.082 deg -> -147.918 deg (gia tri goc cua loi)",
+   near(phase_diff_deg(ph_dt, ph_vt),
+        ((ph_dt - ph_vt + 180) %% 360) - 180, 1e-9) &&
+   near(phase_diff_deg(ph_dt, ph_vt), -147.918250116812, 1e-6))
+ok("phase_diff_unwrapped: 212.082 deg giu nguyen (KHONG wrap)",
+   near(phase_diff_unwrapped(ph_dt, ph_vt), ph_dt - ph_vt, 1e-9) &&
+   near(phase_diff_unwrapped(ph_dt, ph_vt), 212.081749883188, 1e-6))
+ok("phase_diff_deg: giu nguyen khi |diff| < 180 deg",
+   near(phase_diff_deg(105.0, -36.9252141469426), 141.9252141469426, 1e-9))
+ok("phase_diff_unwrapped: giu nguyen khi |diff| < 180 deg",
+   near(phase_diff_unwrapped(105.0, -36.9252141469426), 141.9252141469426, 1e-9))
+# Ham goc KHONG bi sua (chi dung de so sanh pha don le)
+ok("phase_diff_deg: wrap ve khoang (-180, 180]",
+   phase_diff_deg(179, -179) == -2 && phase_diff_deg(-179, 179) == 2)
+
+ok("phase_lag_hours (wrap = FALSE): DAU_TIENG = +7.3172 h",
+   near(phase_lag_hours(ph_dt, ph_vt, per_m2, wrap = FALSE), 7.31715, 1e-4))
+ok("phase_lag_hours (wrap = TRUE): DAU_TIENG = -5.1034 h (gia tri SAI cua loi)",
+   near(phase_lag_hours(ph_dt, ph_vt, per_m2, wrap = TRUE), -5.10343, 1e-4))
+ok("phase_lag_hours: mac dinh KHONG wrap",
+   near(phase_lag_hours(ph_dt, ph_vt, per_m2), 7.31715, 1e-4))
+
+# ---------------------------------------------------------------------------
+# 11. QUY UOC DAU DO TRE (sua loi GĐ4 - Bug 4)
+# ---------------------------------------------------------------------------
+# KY HIEU CHUAN: lag > 0 => dinh tai TRAM xuat hien CHAM HON dinh tai BIEN.
+cat("\n-- 11. Quy uoc dau do tre --\n")
+# VUNG_TAU dinh luc 6:00; tram thuong nguon dinh luc 10:00 -> cham 4 gio
+ok("phase_lag_hours: tram cham hon => lag DUONG",
+   phase_lag_hours(10, 6, per_m2, wrap = FALSE) > 0)
+ok("phase_lag_hours: tram som hon => lag AM",
+   phase_lag_hours(6, 10, per_m2, wrap = FALSE) < 0)
+ok("phase_lag_hours: dong pha => lag = 0",
+   near(phase_lag_hours(30, 30, per_m2, wrap = FALSE), 0, 1e-9))
+# Do tre 4 gio = 4/(360/12.4206) = 0.13800 rad = 120 deg
+ok("phase_lag_hours: tre 4 gio -> pha 120 deg",
+   near(phase_lag_hours(120, 0, per_m2, wrap = FALSE),
+        120 / (360 / per_m2), 1e-9))
+ok("phase_lag_hours: doi dau -> doi dau do tre",
+   near(phase_lag_hours(0, 120, per_m2, wrap = FALSE),
+        -phase_lag_hours(120, 0, per_m2, wrap = FALSE), 1e-9))
+# Quy uoc hieu gio ngay (d = b - a voi b = TRAM, a = BIEN): duong = cham hon
+ok("Quy uoc hieu gio ngay: (TRAM - BIEN) duong => tram cham hon",
+   ((10 - 6 + 12) %% 24) - 12 > 0)
+ok("Quy uoc hieu gio ngay: (BIEN - TRAM) se la dau nguoc",
+   ((6 - 10 + 12) %% 24) - 12 < 0)
+
+# ---------------------------------------------------------------------------
+# 12. GAN NHOM DINH THEO CHU KY TRIEU (sua loi GĐ4 - Bug 2)
+# ---------------------------------------------------------------------------
+cat("\n-- 12. Gan nhom dinh theo chu ky trieu --\n")
+# Dung du lieu gia lap: 2 dinh/ngay lech ~12.42 h (mot chu ky M2).
+# M2 = 12.4206 h. Cho 4 ngay lien tiep, moi ngay 2 dinh:
+#   dinh chinh (gia tri cao) va dinh phu (gia tri thap) cach nhau 12.42 h.
+mk_fake_tide <- function(station, n_days = 4L, start = "2024-01-01",
+                         period_h = 12.4206012) {
+  base <- as.POSIXct(paste0(start, " 00:00:00"), tz = "Asia/Ho_Chi_Minh")
+  rows <- list()
+  for (i in seq_len(n_days)) {
+    for (k in 0:1) {
+      ts <- base + (i - 1) * 86400 + k * period_h * 3600
+      rows[[length(rows) + 1L]] <- data.frame(
+        station = station, kind = "high", ts = ts,
+        ts_hour = as.numeric(format(ts, "%H", tz = "Asia/Ho_Chi_Minh")) +
+          as.numeric(format(ts, "%M", tz = "Asia/Ho_Chi_Minh")) / 60,
+        value = if (k == 0L) 2.0 else 1.0,
+        obs_day = format(base + (i - 1) * 86400, "%Y-%m-%d"),
+        day_offset = 0L,
+        stringsAsFactors = FALSE)
+    }
+  }
+  do.call(rbind, rows)
+}
+fake_tide <- rbind(mk_fake_tide("VUNG_TAU"), mk_fake_tide("STATION_A"))
+# `pivot_extremes()` can cot `rn` (sinh tu `build_peak_table()`).
+fake_tide <- fake_tide[order(fake_tide$station, fake_tide$obs_day, fake_tide$ts), ]
+fake_tide$rn <- ave(seq_len(nrow(fake_tide)),
+                    list(fake_tide$station, fake_tide$kind, fake_tide$obs_day),
+                    FUN = seq_along)
+
+# Quy tac CU (pivot_extremes): dinh 1 = gio nho nhat trong ngay quan sat
+fake_pk <- pivot_extremes(fake_tide, "peak")
+ok("pivot_extremes: giu nguyen quy tac thu tu gio trong ngay (R-Spark parity)",
+   fake_pk$t1_h[1] <= fake_pk$t2_h[1])
+ok("pivot_extremes: 2 dinh -> 1 dong cho moi (tram, ngay)",
+   nrow(fake_pk) == 8 && all(!is.na(fake_pk$h1)) && all(!is.na(fake_pk$h2)))
+
+# Quy tac MOI (the he chu ky trieu) - gan cho TUNG TRAM
+anchor_ts <- select_cycle_anchors(fake_tide[fake_tide$station == "VUNG_TAU", ])
+gen <- assign_peak_generation(fake_tide[fake_tide$station == "STATION_A", ],
+                               phase_ref = 180, period_h = per_m2,
+                               n_per_gen = 2L, gen_anchor = anchor_ts)
+ok("assign_peak_generation: moi the he chu ky co <= 2 dinh",
+   all(table(gen$tide_gen) <= 2))
+ok("assign_peak_generation: dinh thu 1 la dinh co gia tri CAO NHAT",
+   all(gen$value[gen$gen_rn == 1] == 2.0))
+ok("assign_peak_generation: dinh thu 2 la dinh gia tri THAP",
+   all(gen$value[gen$gen_rn == 2] == 1.0))
+ok("assign_peak_generation: so the he = 4 (4 ngay x 1 the he/ngay)",
+   length(unique(gen$tide_gen)) == 4)
+
+# Kiem tra dinh 1/2 CUNG THE HE (nghia la 2 dinh cach nhau ~1 chu ky M2)
+g1 <- gen[gen$gen_rn == 1, ]
+g2 <- gen[gen$gen_rn == 2, ]
+ok("assign_peak_generation: dinh 1 va dinh 2 thuoc CUNG the he chu ky",
+   nrow(g1) == 4 && nrow(g2) == 4 && all(g1$tide_gen == g2$tide_gen))
+# Do lech thoi gian tuong doi (dung `ts`, khong dung `ts_hour` de tranh wrap
+# qua 24h) -> phai bang 1 chu ky M2.
+m_g <- merge(g1[, c("station", "ts", "tide_gen")],
+             g2[, c("station", "ts", "tide_gen")],
+             by = c("station", "tide_gen"))
+dt_h <- abs(as.numeric(difftime(m_g$ts.x, m_g$ts.y, units = "hours")))
+ok("assign_peak_generation: 2 dinh cach nhau ~1 chu ky M2 (12.42 h)",
+   nrow(m_g) == 4 && all(abs(dt_h - per_m2) < 0.01))
+
+# Kiem tra tinh hop ly: ghep 2 tram theo the he -> do tre = 0 khi cung pha
+gen_ser <- peak_series_by_generation(fake_tide, "STATION_A",
+                                      fake_tide[fake_tide$station == "VUNG_TAU", ],
+                                      phase_ref = 180, period_h = per_m2,
+                                      n_per_gen = 2L)
+ok("peak_series_by_generation: tra ve 2 chuoi (peak1, peak2)",
+   length(gen_ser) == 2 && !is.null(gen_ser[[1]]) && !is.null(gen_ser[[2]]))
+ok("peak_series_by_generation: moi cap co 1 dong the he chu ky",
+   nrow(gen_ser[[1]]) == 4 && nrow(gen_ser[[2]]) == 4)
+ok("peak_series_by_generation: do tre ~ 0 khi 2 tram cung pha",
+   abs(stats::median(((gen_ser[[1]]$t_h - gen_ser[[1]]$t_ref_h + 12) %% 24) - 12)) < 1e-9)
+
+# CAU HOI THEN CUOT: bien do lon lam dinh CHINH "roi" sang khung 23-24h.
+#
+# Mo phong: tren tram STATION_A, dinh chinh (gia tri 2.0) thuong xay ra luc
+# ~00:00. Do bien do bien doi, dinh chinh cua chu ky 2024-01-02 xay ra luc
+# 23:30 cua ngay 2024-01-01 (dinh bien do lon 3.0). Cac dinh con lai giu
+# nguyen.
+#
+# VOI QUY TAC CU (theo gio trong ngay quan sat): ngay 2024-01-01 se chua 2
+# dinh {00:00 (2.0), 23:30 (3.0)} -> "dinh 1" = 00:00, "dinh 2" = 23:30 ->
+# cap dinh cach nhau 23.5 h (SAI CHU KY, phai la ~12.42 h) -> do tre bi am.
+# Ngoai ra con: ngay 2024-01-02 chi con 1 dinh (12:25) -> mat cap dinh.
+# MO PHONG DAI TIENG: ca chu ky 2024-01-02 bi "roi" 0.5 h -> dinh CHINH
+# (2.0) chuyen tu 00:00 cua 01-02 sang 23:30 cua 01-01, va dinh PHU (1.0)
+# chuyen tu 12:25 cua 01-02 sang 12:25 cua 01-01. Voi bien do lon, dinh
+# chinh co the "roi" nhu vay (bien do khong bat bien).
+rolled_ts <- as.POSIXct("2024-01-01 23:30:00", tz = "Asia/Ho_Chi_Minh")
+rolled <- fake_tide
+# Xoa CAP dinh cua ngay 2024-01-02 (00:00 va 12:25) cua STATION_A
+rolled <- rolled[!(rolled$station == "STATION_A" &
+                     rolled$obs_day == "2024-01-02"), , drop = FALSE]
+# Them 2 dinh "roi" vao ngay 2024-01-01
+rolled <- rbind(rolled, data.frame(
+  station = "STATION_A", kind = "high", ts = rolled_ts,
+  ts_hour = 23.5, value = 3.0, obs_day = "2024-01-01",
+  day_offset = 0L, rn = NA_integer_, stringsAsFactors = FALSE))
+rolled <- rbind(rolled, data.frame(
+  station = "STATION_A", kind = "high",
+  ts = as.POSIXct("2024-01-01 12:25:14", tz = "Asia/Ho_Chi_Minh"),
+  ts_hour = 12.41667, value = 1.0, obs_day = "2024-01-01",
+  day_offset = 0L, rn = NA_integer_, stringsAsFactors = FALSE))
+rolled <- rolled[order(rolled$station, rolled$obs_day, rolled$ts), ]
+rolled$rn <- ave(seq_len(nrow(rolled)),
+                 list(rolled$station, rolled$kind, rolled$obs_day),
+                 FUN = seq_along)
+pk_shift <- pivot_extremes(rolled[rolled$station == "STATION_A", ], "peak")
+# Quy tac CU: ngay 2024-01-01 bay gio co 3 dinh (00:00, 12:25, 23:30).
+# "dinh 1" = 00:00, "dinh 2" = 12:25 -> cap dinh van dung, NHUNG dinh bien do
+# lon 23:30 bi BO (rn=3) -> mat dinh chinh thuc te cua chu ky.
+# Ngay 2024-01-02 mat het dinh -> khong co cap dinh nao.
+d01 <- pk_shift[pk_shift$day == "2024-01-01", ]
+ok("Quy tac CU: dinh bien do lon 23:30 bi BO (rn=3) trong ngay 01-01",
+   nrow(d01) == 1 && abs(d01$t1_h - 0) < 1e-9 && abs(d01$t2_h - 12.41667) < 1e-3)
+ok("Quy tac CU: ngay 01-02 mat het cap dinh (khong con dinh nao)",
+   nrow(pk_shift[pk_shift$day == "2024-01-02", ]) == 0)
+
+# Quy tac MOI (the he chu ky): moi dinh van thuoc DUNG the he chu ky cua
+# tram tham chieu. Dinh "roi" 23:30 thuoc the he CUA CHINH NO (khong bi "gop"
+# sai vao the he khac) -> cap dinh van cach nhau ~12.42 h.
+anchor_rolled <- select_cycle_anchors(fake_tide[fake_tide$station == "VUNG_TAU", ])
+gen_shift <- assign_peak_generation(rolled[rolled$station == "STATION_A", ],
+                                     phase_ref = 180, period_h = per_m2,
+                                     n_per_gen = 2L,
+                                     gen_anchor = anchor_rolled)
+ok("Quy tac MOI: moi dinh thuoc mot the he cua tram tham chieu",
+   all(gen_shift$tide_gen >= 1) && length(unique(gen_shift$tide_gen)) == 4)
+ok("Quy tac MOI: moi the he chu ky van co <= 2 dinh",
+   all(table(gen_shift$tide_gen) <= 2))
+# Do tre giua 2 dinh cua cung the he van la ~1 chu ky M2 (12.42 h)
+g1s <- gen_shift[gen_shift$gen_rn == 1, ]
+g2s <- gen_shift[gen_shift$gen_rn == 2, ]
+m_s <- merge(g1s[, c("station", "ts", "tide_gen")],
+             g2s[, c("station", "ts", "tide_gen")],
+             by = c("station", "tide_gen"))
+dt_s <- abs(as.numeric(difftime(m_s$ts.x, m_s$ts.y, units = "hours")))
+ok("Quy tac MOI: 2 dinh cung the he cach nhau ~1 chu ky M2 (12.42 h)",
+   nrow(m_s) == 4 && all(abs(dt_s - per_m2) < 0.01))
+# DINH "ROI" (23:30) va dinh PHU (12:25) cua cung chu ky phai cung the he,
+# va dinh CHINH cua chu ky do (gia tri 3.0) la dinh thu 1.
+g_roll <- gen_shift[abs(gen_shift$ts_hour - 23.5) < 1e-9, ]
+g_sec <- gen_shift[abs(gen_shift$ts_hour - 12.41667) < 1e-3, ]
+ok("Quy tac MOI: dinh 'roi' 23:30 va dinh phu 12:25 cung the he",
+   nrow(g_roll) == 1 && nrow(g_sec) == 1 &&
+   g_roll$tide_gen == g_sec$tide_gen)
+ok("Quy tac MOI: dinh bien do lon 23:30 la dinh thu 1 cua the he",
+   nrow(g_roll) == 1 && g_roll$gen_rn == 1 && g_roll$value == 3.0)
+
+# ---------------------------------------------------------------------------
 cat("\n=== KET QUA ===\n")
 cat("PASS: ", n_pass, "   FAIL: ", n_fail, "\n")
 if (n_fail > 0) {

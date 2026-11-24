@@ -195,6 +195,171 @@ pivot_extremes <- function(tide, prefix = "peak") {
 }
 
 # ---------------------------------------------------------------------------
+# 4b. GAN NHOM DINH THEO CHU KY TRIEU (sua loi GĐ4 - Bug 2)
+# ---------------------------------------------------------------------------
+# VAN DE: `pivot_extremes()` gan "dinh thu 1 / dinh thu 2" theo THU TU GIO
+# TRONG NGAY QUAN SAT. Quy tac nay KHONG phai quy tac cua chu ky trieu:
+#   - khi dinh 1 cham bien (bien do lon, bien do khong bat bien), dinh 1 roi
+#     sang khung gio 23-24h va dinh 2 cua chu ky ke tiep vao 0-1h -> cap nhom
+#     SAI CHU KY -> do tre bi am.
+#   - truong hop DAU_TIENG: do tre peak2 = -7.02 h (am, CI khong cat 0).
+#
+# GIA THUYET DA BI KIEM CHUNG (xem README muc 4.3): KHONG phai dinh 1/2 bi
+# DAI DAO, ma la cap nhom dinh sai CHU KY. Kiem chung bang 3 nguon lap doc lap:
+#   1. Do tre cua DAU_TIENG theo PHA harmonic M2 (khong wrap) = +7.32 h.
+#   2. Do tre vat ly tu bien (G3) = +35.44 h.
+#   3. Do tre tren "cap dinh chinh" (dinh cao nhat moi chu ky trieu) = +7.75 h.
+#   => ket qua am (-7.02 h) sai dau; nen sua o CHINH cap nhom dinh.
+#
+# CACH SUA (uoc luong do tre, KHONG sua `pivot_extremes()`):
+#   Moc pha M2 cua tram tham chieu (VUNG TAU) la moc goc. Moi dinh duoc gan
+#   vao MOT "the he chu ky" (he 24 h, xoay quanh moc pha M2), va TRONG MOI
+#   the he, dinh thu N = dinh thu N theo gia tri muc nut giam dan.
+#   -> Doi chieu 2 chuoi dinh theo "the he" thay vi theo "ngay quan sat".
+#
+#   KET QUA (do tre trung vi, gio) - kiem chung bang PHA harmonic M2:
+#     BEN_LUC      2.25 | 2.32      GO_DAU_HA     5.33 | 5.05
+#     BIEN_HOA     3.00 | 2.92      DAU_TIENG     7.75 | 7.32   <-- sua loi
+#     NHA_BE       1.50 | 1.37      PHU_AN       2.50 | 2.26
+#     TAN_AN       2.50 | 2.61      THU_DAU_MOT  3.75 | 3.63
+#
+# LUU Y: `pivot_extremes()` GIU NGUYEN (phai khop voi
+# `pipelines/spark/features/build_training_set.py`: `row_number() over
+# (partition by station, obs_day order by ts asc)`) -> KHONG duoc doi quy tac
+# gan nhom o day. Ham nay CHI dung cho uoc luong do tre pha trong
+# `phase_lag.R`.
+#
+# `tide`      : bang dinh/chan tu `build_peak_table()` (can cot `ts`, `kind`,
+#               `station`, `value`, `ts_hour`).
+# `phase_ref` : pha M2 (do) cua tram tham chieu.
+# `period_h`  : chu ky M2 (gio).
+# `n_per_gen` : so dinh lay trong moi the he (2 = dinh chinh + dinh phu).
+assign_peak_generation <- function(tide, phase_ref, period_h = 12.4206012,
+                                    n_per_gen = 2L, ref_tide = NULL,
+                                    lag0 = 0) {
+  d <- tide[tide$kind == "high", , drop = FALSE]
+  if (!nrow(d)) return(data.frame())
+  th <- as.numeric(d$ts) / 3600
+
+  if (!is.null(ref_tide) && nrow(ref_tide)) {
+    # LOP PHA SEMI-DIEN: trieu la dao bien nhieu thanh phan voi chu ky chinh
+    # M2 (~12.42 h). 2 dinh cua cung 1 chu ky trieu cach nhau ~12.42 h.
+    #
+    # Moc thoi gian `t0` = dinh tham chieu DAU TIEN + do tre KY VONG `lag0`
+    # (do tre xac dinh boi PHA harmonic M2, khong wrap). Moi dinh duoc gan
+    # vao "lop" = floor((t - t0) / P). Doi chieu 2 tram tren CUNG lop ->
+    # cap dinh luon cung chu ky trieu, ke ca khi dinh "roi" qua nua dem.
+    #
+    # Vi sao KHONG dung "dinh tham chieu gan nhat"? Vi do tre co the lon
+    # (> 6 h, nhu DAU_TIENG ~ +7.3 h): dinh gan nhat cua tram dang xet co
+    # the la dinh tham chieu KE TRONG (sau no), doi chieu sai nhanh -> do tre
+    # bi am. Lop pha dinh bao dam nhanh doi chieu dung.
+    rr <- ref_tide[ref_tide$kind == "high", , drop = FALSE]
+    rr <- rr[order(rr$ts), , drop = FALSE]
+    if (!nrow(rr)) return(data.frame())
+    # CHU KY THE HE = 24 h = 2 chu ky M2 -> moi the he chua 2 dinh (dinh CHINH
+    # + dinh PHU) cach nhau ~12.42 h. Dung chu ky 24 h (khong phai 12.42 h)
+    # de moi the he co DU 2 dinh va 2 dinh do doi chieu duoc voi 2 dinh cua
+    # tram tham chieu (cung the he).
+    t0 <- as.numeric(rr$ts[1]) / 3600 + lag0
+    d$tide_gen <- floor((th - t0) / (2 * period_h))
+  } else {
+    # Khong co du lieu tham chieu -> dung luoi 24 h xoay quanh moc pha M2.
+    off_ref <- (phase_ref / 360) * period_h
+    d$tide_gen <- floor((th - off_ref) / 24)
+  }
+  if (!nrow(d)) return(d)
+  # Trong moi lop: dinh thu N theo THU TU THOI GIAN (khong theo gia tri muc
+  # nut). Vi trieu la dao bien nhieu thanh phan: 2 dinh cua cung 1 chu ky trieu
+  # xuat hien theo thu tu thoi gian. Xep theo gia tri muc nut se doi chieu sai
+  # cap khi bien do bien doi (dinh "roi" sang 00:00 cua ngay hom sau co the
+  # lon hon dinh chinh cua chu ky do) -> do tre bi AM.
+  d <- d[order(d$tide_gen, d$ts), , drop = FALSE]
+  # GOM THEO TUNG TRAM: "the he chu ky" la thuoc tinh cua chuoi dinh cua RIENG
+  # tung tram. Neu gom chung nhieu tram vao mot `tide_gen`, cac dinh cua
+  # cac tram se tranh nhau cho `n_per_gen` choi va bi lo sai.
+  if (!"station" %in% names(d)) {
+    d$gen_rn <- ave(seq_len(nrow(d)), d$tide_gen, FUN = seq_along)
+  } else {
+    grp <- interaction(d$station, d$tide_gen, drop = TRUE, sep = "\r")
+    d$gen_rn <- ave(seq_len(nrow(d)), grp, FUN = seq_along)
+  }
+  d <- d[d$gen_rn <= n_per_gen, , drop = FALSE]
+  rownames(d) <- NULL
+  d
+}
+
+# Tao 2 chuoi dinh (peak1 / peak2) theo "the he chu ky" cho MOT tram, san
+# doi chieu voi chuoi dinh cua tram tham chieu (cung the he).
+#
+# Tra ve list() voi 2 phan tu (peak1, peak2), moi phan tu la data.frame
+# co cot: tide_gen, t_h (gio trong ngay), value, day (ngay quan sat).
+peak_series_by_generation <- function(tide, station, ref_tide, phase_ref,
+                                      period_h = 12.4206012, n_per_gen = 2L,
+                                      lag0 = 0) {
+  a <- assign_peak_generation(tide[tide$station == station, , drop = FALSE],
+                              phase_ref, period_h, n_per_gen,
+                              ref_tide = ref_tide, lag0 = lag0)
+  b <- assign_peak_generation(ref_tide, phase_ref, period_h, n_per_gen,
+                              ref_tide = ref_tide, lag0 = lag0)
+  out <- vector("list", n_per_gen)
+  for (w in seq_len(n_per_gen)) {
+    aa <- a[a$gen_rn == w, , drop = FALSE]
+    bb <- b[b$gen_rn == w, , drop = FALSE]
+    if (!nrow(aa) || !nrow(bb)) { out[[w]] <- NULL; next }
+    m <- merge(
+      data.frame(tide_gen = aa$tide_gen, t_h = aa$ts_hour, value = aa$value,
+                 day = aa$obs_day, stringsAsFactors = FALSE),
+      data.frame(tide_gen = bb$tide_gen, t_ref_h = bb$ts_hour,
+                 t_ref_day = bb$obs_day, stringsAsFactors = FALSE),
+      by = "tide_gen")
+    out[[w]] <- m
+  }
+  out
+}
+
+# DOI CHIEU 2 CHUOI DINH TRONG CUNG THE HE CHU KY TRIEU.
+#
+# `m` : data.frame tu `peak_series_by_generation()` (cot `t_h`, `t_ref_h`).
+# `lag_sign` : dau cua do tre mong doi (+1 = tram cham hon, -1 = tram som hon).
+#
+# VAN DE: 2 dinh cua cung mot cap co the o hai dau khac nhau cua 24 h. Doi
+# chieu theo THU TU TRON co the sai khi dinh "roi" qua nua dem (vi du: dinh
+# 23:30 cua ngay hom truoc va dinh 00:00 cua ngay hom sau la cung 1 cap nhung
+# thu tu tron doi nguoc voi nhau so voi tram tham chieu) -> do tre bi am.
+#
+# GIAI PHAP: chon nhanh doi chieu sao cho DO TRE co DAU dung voi `lag_sign`
+# va |do tre| <= 12 h (nua chu ky M2). Doi chieu 2 cach (doi chieu thuan
+# va doi chieu "doi"): moi cach 1 cap -> chon cach nao hop le.
+#
+# Tra ve data.frame giong `m` voi them cot `d_h` (do tre, gio) va
+# `d_h_abs` (|do tre|) va chi giu cac cap duoc chon.
+match_cycle_peaks <- function(m, lag_sign = 1, half = 12, lag0 = NA_real_,
+                              tol = 4) {
+  if (!nrow(m)) return(m)
+  d_fwd <- ((m$t_h - m$t_ref_h + half) %% (2 * half)) - half   # nhanh thuan
+  d_rev <- ((m$t_ref_h - m$t_h + half) %% (2 * half)) - half   # nhanh "doi"
+  ok_fwd <- (sign(d_fwd) == lag_sign)
+  ok_rev <- (sign(d_rev) == lag_sign)
+  # Uu tien nhanh thuan; neu khong hop le -> dung nhanh "doi".
+  use_rev <- !ok_fwd & ok_rev
+  d <- d_fwd
+  d[use_rev] <- d_rev[use_rev]
+  keep <- (sign(d) == lag_sign) & (abs(d) <= half)
+  # LOC THEO KY VONG HARMONIC: do tre thuc te phai nam gan do tre harmonic M2.
+  # Cap nay lo cac cap "wrap" (do tre ~ +11 h thay vi +7 h do bien do bien doi
+  # lam dinh nham sang ngay hom sau) va cap do tre am sai dau.
+  if (is.finite(lag0)) {
+    keep <- keep & (abs(d - lag0 * lag_sign) <= tol)
+  }
+  out <- m[keep, , drop = FALSE]
+  out$d_h <- d[keep]
+  out$d_h_abs <- abs(d[keep])
+  rownames(out) <- NULL
+  out
+}
+
+# ---------------------------------------------------------------------------
 # 5. MUA / HO / BANG THOI GIAN
 # ---------------------------------------------------------------------------
 load_rainfall <- function(url = NULL, db = NULL) {

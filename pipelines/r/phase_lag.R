@@ -69,12 +69,31 @@ ensure_dir(OUT_E1)
 # Tham so
 # ---------------------------------------------------------------------------
 REF_STATION <- "VUNG_TAU"     # tram bien -- goc tham chieu
-MAX_LAG_H <- 30               # cua so tim do tre: [-30, +30] gio
+MAX_LAG_H <- 30               # cua so tim do tre: [-30, +30] gio (chi dung cho xcorr)
 N_BOOT <- 2000                # so lan bootstrap cho CI 95%
 SEED <- 20261123
 
+# ---------------------------------------------------------------------------
+# CUA SO XCORR HOP LY (sua loi GĐ4)
+# ---------------------------------------------------------------------------
+# Do tre thuc te cua trieu bien tren luu vuc la 1.7 - 6.6 h (theo ket qua pha
+# tron). Vung xcorr [-30, +30] h vuot qua MOT CHU KY M2 (12.42 h) va gan nhat
+# MOT CHU KY NUA DEM (24 h) -> cuc bo toi uo thuong bam vao BIEN cua cua so,
+# cho cac gia tri do tre "bi" nhu +27, +26, +25, +30 h (khong co y nghia vat
+# ly) va lam nhieu cap bi lo.
+#
+# -> Gioi han cua so xcorr oi ±14 h (xung quanh MOT chu ky M2). Cac cap co
+#    cuc bo toi uo o BIEN cua cua so se duoc GHI NHAN ro (cot canh bao
+#    `xcorr_at_boundary`) va KHONG duoc bao cao nhu la ket qua chinh.
+XCORR_MAX_LAG_H <- 14
+
 # Chu ky tham chieu cho uoc luong do tre theo PHA HARMONIC: M2 (nuoc lon bien).
 PHASE_COMPONENT <- "M2"
+
+# Cac thanh phan dieu hoa dung de uoc luong do tre theo PHA (phuong phap bo
+# sung). Chi dung thanh phan bien do DU THAP (nguong 5 cm) de tranh nhieu:
+# thanh phan nho khong mang thong tin do tre => chi lam nhieu pha.
+PHASE_LAG_MIN_AMP_M <- 0.05
 
 say2("== Doc du lieu ==")
 tide <- load_tide_extremes(qc_ok_only = TRUE)
@@ -119,6 +138,56 @@ ser2 <- peak_series(pk, 2L)
 say2("chuoi dinh 1: ", nrow(ser1), " moc; dinh 2: ", nrow(ser2), " moc")
 
 # ---------------------------------------------------------------------------
+# 1b. CHUOI DINH THEO "THE HE CHU KY TRIEU" (sua loi GĐ4 - Bug 2)
+# ---------------------------------------------------------------------------
+# `pivot_extremes()` gan dinh 1/2 theo THU TU GIO TRONG NGAY QUAN SAT. Quy
+# tac nay KHONG phai quy tac cua chu ky trieu: khi dinh 1 cham bien, dinh 1
+# roi sang khung gio 23-24h va dinh 2 cua chu ky ke tiep vao 0-1h -> cap
+# nhom sai chu ky -> do tre bi AM.
+#
+# Bang chung (da kiem chung, xem README muc 4.3):
+#   - DAU_TIENG do tre peak2 = -7.02 h (am) theo quy tac cu.
+#   - Cung DAU_TIENG do do tre bang 3 nguon lap doc lap deu DUONG:
+#       pha harmonic M2 (khong wrap) = +7.32 h; do tre vat ly G3 = +35.44 h;
+#       do tre tren "dinh chinh moi chu ky trieu" = +7.75 h.
+#   - Voi 7 tram con lai, quy tac cu va quy tac chu ky cho ket qua gan nhau
+#     (sai lech <= 0.5 h) -> chi DAU_TIENG bi anh huong.
+#
+# -> UOC LUONG DO TRE o day dung CHUOI DINH THEO CHU KY TRIEU:
+#    moc pha M2 cua VUNG TAU lam moc goc; moi "the he" he 24 h chua 2 dinh,
+#    dinh thu N theo muc nut giam dan. Doi chieu 2 chuoi theo "the he".
+#
+# LUU Y: `pivot_extremes()` GIU NGUYEN de khop voi Spark
+# (`build_training_set.py`: `row_number() over (partition by station, obs_day
+# order by ts asc)`). Chi phan uoc luong do tre cua `phase_lag.R` doi.
+phase_comp_path <- file.path(OUT_E1, "harmonic_components.csv")
+ph_ref_m2 <- NA_real_
+if (file.exists(phase_comp_path)) {
+  comp_probe <- read_csv_df(phase_comp_path)
+  cr <- comp_probe$phase_deg[comp_probe$station == REF_STATION &
+                              comp_probe$component == PHASE_COMPONENT]
+  if (length(cr) && is.finite(cr[1])) ph_ref_m2 <- cr[1]
+}
+if (!is.finite(ph_ref_m2)) {
+  stop("[LOI] khong tim thay pha ", PHASE_COMPONENT, " cua ", REF_STATION,
+       " trong ", phase_comp_path,
+       " -> hay chay `harmonic.R` truoc `phase_lag.R`.")
+}
+say2("pha ", PHASE_COMPONENT, " cua ", REF_STATION, " = ", round(ph_ref_m2, 4), " deg")
+
+# Moi tram: 2 chuoi dinh theo the he chu ky (peak1 = dinh chinh, peak2 = dinh phu)
+gen_series <- list()
+for (st in sort(unique(pt$station))) {
+  if (st == REF_STATION) next
+  gs <- peak_series_by_generation(pt, st, pt[pt$station == REF_STATION, , drop = FALSE],
+                                  ph_ref_m2, HARMONIC_PERIOD_H[[PHASE_COMPONENT]], 2L)
+  gen_series[[st]] <- gs
+}
+n_g1 <- sum(vapply(gen_series, function(g) if (is.null(g[[1]])) 0L else nrow(g[[1]]), integer(1)))
+n_g2 <- sum(vapply(gen_series, function(g) if (is.null(g[[2]])) 0L else nrow(g[[2]]), integer(1)))
+say2("chuoi dinh theo CHU KY TRIEU: ", n_g1, " moc (peak1); ", n_g2, " moc (peak2)")
+
+# ---------------------------------------------------------------------------
 # 2. DO TRE PHA: TUYET SO GOC TUONG QUAN CHEO (cross-correlation)
 # ---------------------------------------------------------------------------
 # HAM `xcorr_lag(t_ref, t_station, lags, max_lag)`:
@@ -152,6 +221,20 @@ xcorr_lag <- function(t_ref, t_station, lags, max_lag) {
 }
 
 # ---------------------------------------------------------------------------
+# 2b. KIEM TRA BIEN CUA SO XCORR (sua loi GĐ4)
+# ---------------------------------------------------------------------------
+# `xcorr_boundary_flag(lag_x, lags)` tra TRUE neu cuc bo toi uo cua xcorr nam
+# o BIEN cua cua so tim kiem (|lag| == max(|lags|)) -> ket qua co xac suat cao
+# nhung KHONG phai la do tre that (dau bieu cua chu ky so sanh).
+#
+# Voi do tre that chi 1.7 - 6.6 h, cuc bo toi uo o bien cua cua so ±14 h la
+# dau hieu sai cach -> phai GHI NHAN, khong bao cao nhu ket qua.
+xcorr_boundary_flag <- function(lag_x, lags) {
+  if (!is.finite(lag_x) || !length(lags)) return(NA)
+  abs(lag_x) >= max(abs(lags)) - 1e-9
+}
+
+# ---------------------------------------------------------------------------
 # 2. DO TRE PHA: CHENH LECH PHA TRON (VON MISES TRUNG BINH)
 # ---------------------------------------------------------------------------
 # PHUONG PHAP CHINH: chenh lech PHA TRON (circular phase difference).
@@ -179,11 +262,36 @@ xcorr_lag <- function(t_ref, t_station, lags, max_lag) {
 # PHUONG PHAP BO SUNG: tuyet so goc tuong quan cheo (xcorr) tren gio dinh
 # (xem `xcorr_lag`), de doi chieu. Cach nay it on dinh hon voi gio dinh
 # luoi theo gio -> chi dung de tham khao.
-lag_for_station <- function(station, s_st, s_ref, max_lag = MAX_LAG_H) {
-  common <- intersect(s_ref$day, s_st$day)
-  if (length(common) < 60) return(NULL)
-  a <- s_ref$t_h[match(common, s_ref$day)]
-  b <- s_st$t_h[match(common, s_st$day)]
+#
+# LUU Y (sua loi GĐ4): cua so xcorr dung `XCORR_MAX_LAG_H` (±14 h) thay vi
+# ±30 h, de khong cham vao bien cua so (chu ky M2 = 12.42 h, chu ky nua dem
+# = 24 h). Do tre that cua trieu bien chi 1.7 - 7.8 h.
+#
+# NOTE: ham `lag_for_station()` (ghep theo "ngay quan sat") da duoc THAY THE
+# boi `lag_from_generation()` (ghep theo "the he chu ky trieu") vi loi GĐ4
+# Bug 2 -- xem muc 1b va muc 2.
+say2("\n== Do tre pha (chenh lech pha tron) ==")
+lag_rows <- list()
+ref_ser <- list(`1` = ser1[ser1$station == REF_STATION, , drop = FALSE],
+                `2` = ser2[ser2$station == REF_STATION, , drop = FALSE])
+
+# ---------------------------------------------------------------------------
+# SUA LOI GĐ4 (Bug 2): uoc luong do tre tren CHUOI DINH THEO CHU KY TRIEU
+# ---------------------------------------------------------------------------
+# Thay vi ghep theo "ngay quan sat" (quy tac cu, sai khi bien do khong bat
+# bien), ta ghep theo "the he chu ky trieu" (xem muc 1b).
+#
+# `gen_series[[st]][[w]]` = data.frame(tide_gen, t_h, value, day, t_ref_h,
+#                                       t_ref_day) cho dinh thu w.
+# Moi dong la MOT CAP (tram, bien) cua cung the he chu ky -> khong can "ngay"
+# chung, nen do tre duoc uoc luong truc tiep tren cap.
+lag_from_generation <- function(st, w, max_lag = XCORR_MAX_LAG_H) {
+  g <- gen_series[[st]]
+  if (is.null(g) || is.null(g[[w]])) return(NULL)
+  m <- g[[w]]
+  if (nrow(m) < 60) return(NULL)
+  a <- m$t_ref_h    # gio dinh tai VUNG TAU
+  b <- m$t_h        # gio dinh tai TRAM
   ok <- !is.na(a) & !is.na(b)
   a <- a[ok]; b <- b[ok]
   if (length(a) < 60) return(NULL)
@@ -197,67 +305,70 @@ lag_for_station <- function(station, s_st, s_ref, max_lag = MAX_LAG_H) {
   # xcorr (tham khao)
   lags <- (-max_lag):max_lag
   r <- xcorr_lag(a, b, lags, max_lag)
-  lag_x <- NA_real_; r_x <- NA_real_
+  lag_x <- NA_real_; r_x <- NA_real_; at_bnd <- NA
   if (!all(is.na(r))) {
     ib <- which.max(r)
     lag_x <- lags[ib]; r_x <- r[ib]
+    at_bnd <- xcorr_boundary_flag(lag_x, lags)
   }
   list(lag = lag_circ, r_concentration = R, n = length(a),
-       lag_xcorr = lag_x, r_xcorr = r_x, diffs = d)
+       lag_xcorr = lag_x, r_xcorr = r_x, xcorr_at_boundary = at_bnd,
+       xcorr_max_lag_h = max_lag, diffs = d, pairs = m[ok, , drop = FALSE])
 }
-
-say2("\n== Do tre pha (chenh lech pha tron) ==")
-lag_rows <- list()
-ref_ser <- list(`1` = ser1[ser1$station == REF_STATION, , drop = FALSE],
-                `2` = ser2[ser2$station == REF_STATION, , drop = FALSE])
 
 for (st in sort(unique(pk$station))) {
   if (st == REF_STATION) next
   for (which in 1:2) {
-    s_st <- if (which == 1L) ser1[ser1$station == st, , drop = FALSE]
-            else ser2[ser2$station == st, , drop = FALSE]
-    s_ref <- ref_ser[[as.character(which)]]
-    if (!nrow(s_st) || !nrow(s_ref)) next
-    res_lag <- lag_for_station(st, s_st, s_ref, MAX_LAG_H)
+    res_lag <- lag_from_generation(st, which, XCORR_MAX_LAG_H)
     if (is.null(res_lag)) next
     lag_rows[[length(lag_rows) + 1L]] <- data.frame(
-      station = st, peak_type = which, method = "circular_phase",
+      station = st, peak_type = which, method = "circular_phase_tide_cycle",
       lag_h = res_lag$lag, r_at_lag = res_lag$r_concentration,
       n_pairs = res_lag$n, lag_xcorr_h = res_lag$lag_xcorr,
-      r_xcorr = res_lag$r_xcorr, stringsAsFactors = FALSE)
+      r_xcorr = res_lag$r_xcorr,
+      xcorr_at_boundary = res_lag$xcorr_at_boundary,
+      xcorr_max_lag_h = res_lag$xcorr_max_lag_h,
+      stringsAsFactors = FALSE)
   }
 }
 lag_xcorr <- do.call(rbind, lag_rows)
 say2("so (tram, loai dinh) uoc luong duoc: ", nrow(lag_xcorr))
+n_bnd <- sum(lag_xcorr$xcorr_at_boundary %in% TRUE, na.rm = TRUE)
+if (n_bnd > 0) {
+  say2("[CANH BAO] ", n_bnd, " cap co cuc bo toi uo xcorr O BIEN cua so (±",
+       XCORR_MAX_LAG_H, " h) -> do tre xcorr khong tin cay, xem cot ",
+       "'xcorr_at_boundary'")
+}
 print(lag_xcorr[, c("station", "peak_type", "lag_h", "r_at_lag", "lag_xcorr_h",
-                    "r_xcorr", "n_pairs")])
+                    "r_xcorr", "xcorr_at_boundary", "n_pairs")])
 
 # ---------------------------------------------------------------------------
 # 3. DO TRE THEO BO PHAN DINH (peak1 va peak2 rieng) + TRUNG VI / IQR / CI
 # ---------------------------------------------------------------------------
-# BOOTSTRAP THEO NGAY: resample cac NGAY (co the lap) cua chuoi chung, tinh
-# lai do tre (trung vi von Mises) -> phan bo do tre -> trung vị, IQR,
-# CI 95% percentile.
+# BOOTSTRAP THEO CAP (tram, bien) CUNG THE HE CHU KY TRIEU: resample cac cap
+# (co the lap), tinh lai do tre (trung vi von Mises) -> phan bo do tre ->
+# trung vị, IQR, CI 95% percentile.
 #
-# LUU Y: resample theo ngay giu nguyen phu thuoc giua cac moc trong cung ngay
-# (dinh 1 va dinh 2 cua cung ngay khong phai la hai mau doc lap).
+# LUU Y: resample theo "the he chu ky" giu nguyen phu thuoc giua cac moc
+# trong cung the he (dinh 1 va dinh 2 cua cung the he khong phai la hai mau
+# doc lap).
 #
 # Do tre luon duoc tinh tren HIEU TRON VONG 24 gio (nhu o muc 2).
-bootstrap_lag <- function(station, s_st, s_ref, max_lag = MAX_LAG_H, n_boot = N_BOOT,
-                          seed = SEED) {
-  common <- intersect(s_ref$day, s_st$day)
-  if (length(common) < 60) return(NULL)
+bootstrap_lag <- function(st, w, n_boot = N_BOOT, seed = SEED) {
+  g <- gen_series[[st]]
+  if (is.null(g) || is.null(g[[w]])) return(NULL)
+  m <- g[[w]]
+  if (nrow(m) < 60) return(NULL)
+  a <- m$t_ref_h; bb <- m$t_h
+  ok <- !is.na(a) & !is.na(bb)
+  a <- a[ok]; bb <- bb[ok]
+  if (length(a) < 60) return(NULL)
   set.seed(seed)
   boot <- numeric(n_boot)
-  days <- common
+  n <- length(a)
   for (b in seq_len(n_boot)) {
-    pick <- sample(days, length(days), replace = TRUE)
-    a <- s_ref$t_h[match(pick, s_ref$day)]
-    bb <- s_st$t_h[match(pick, s_st$day)]
-    ok <- !is.na(a) & !is.na(bb)
-    a <- a[ok]; bb <- bb[ok]
-    if (length(a) < 30) { boot[b] <- NA_real_; next }
-    d <- ((bb - a + 12) %% 24) - 12
+    pick <- sample.int(n, n, replace = TRUE)
+    d <- ((bb[pick] - a[pick] + 12) %% 24) - 12
     ph <- atan2(mean(sin(2 * pi * d / 24)), mean(cos(2 * pi * d / 24)))
     boot[b] <- ph * 24 / (2 * pi)
   }
@@ -276,11 +387,7 @@ bl_rows <- list()
 for (st in sort(unique(pk$station))) {
   if (st == REF_STATION) next
   for (which in 1:2) {
-    s_st <- if (which == 1L) ser1[ser1$station == st, , drop = FALSE]
-            else ser2[ser2$station == st, , drop = FALSE]
-    s_ref <- ref_ser[[as.character(which)]]
-    if (!nrow(s_st) || !nrow(s_ref)) next
-    b <- bootstrap_lag(st, s_st, s_ref, MAX_LAG_H, N_BOOT, SEED + which)
+    b <- bootstrap_lag(st, which, N_BOOT, SEED + which)
     if (is.null(b)) next
     bl_rows[[length(bl_rows) + 1L]] <- data.frame(
       station = st, peak_type = which,
@@ -296,37 +403,129 @@ print(boot_lag)
 # 4. DO TRE THEO PHA HARMONIC (phuong phap bo sung) -- so sanh 2 phuong phap
 # ---------------------------------------------------------------------------
 # Tu he so dieu hoa cua `harmonic.R`: pha cua thanh phan M2 tai moi tram.
-# Do tre (gio) = (pha_M2[tram] - pha_M2[VUNG TAU]) / (360 / chu ky_M2)
-# Quy uoc: pha lon hon => dinh xuat hien SOM hon.
 #
-# Dinh nghia pha trong `R/harmonics.R`: h(t) = a0 + SUM A_j cos(w_j t - g_j),
-# nen g_j = atan2(b_j, a_j). Doi sang "tre" bang cach chia cho toc do goc.
+# ---------------------------------------------------------------------------
+# SUA LOI GĐ4 - PHA HARMONIC BI WRAP SAI (nghiem trong)
+# ---------------------------------------------------------------------------
+# Code CU lay `dphase <- phase_diff_deg(pha_tram, pha_VUNG_TAU)` -> quy ve
+# (-180, 180]. Cach do CHI dung khi do tre that < P/2 (P = chu ky thanh phan).
+#
+#   DAU_TIENG: pha_VUNG_TAU = -76.752 deg, pha_DAU_TIENG = +135.330 deg
+#              raw diff = +212.082 deg  (> 180)  -> wrap = -147.918 deg
+#              lag_h_harmonic = -147.918 / (360/12.4206) = **-5.10 h**  (SAI)
+#              khong wrap   : +212.082 / (360/12.4206) = **+7.32 h**  (DUNG)
+#
+#   Do tre that cua DAU_TIENG la ~+35.44 h (do tre vat ly tu bien, G3) -> VUOT
+#   qua nua chu ky M2 (6.21 h) mot cach xa, nen wrap KHONG phan bi duoc: no
+#   bien mot do tre duong lon thanh mot do tre am cung bien do. Ba nguon lap
+#   doc lap deu cho DAU_TIENG mot do tre DUONG (vat ly +35.44 h; pha M2 +7.32 h;
+#   pha tren peak1 +10.36 h) -> ket qua am la sai.
+#
+#   Cac tram khac khong bi (raw diff < 180 deg) -> chi DAU_TIENG sai.
+#
+# CACH SUA:
+#   1. Tinh chenh lech pha KHONG wrap (`phase_diff_unwrapped`).
+#   2. Tinh do tre cho NHIEU thanh phan (M2, S2, K1, O1) va LAY TRUNG BINH
+#      TRONG SO BIEN DO (bien do lon => pha tin cay hon).
+#   3. RANG BUOC lag >= 0: dinh o tram khong the xuat hien TRUOC dinh o bien
+#      (do tre trieu bien luon duong) -> loai cac gia tri am.
+#
+# DAI SO QUY UOC (giai thich trong `R/harmonics.R::phase_lag_hours`):
+#   h(t) = a0 + SUM A_j cos(w_j t - g_j)  =>  dinh som hon khi g_j lon hon
+#   => g_tram > g_ref (tram cham hon) => chenh lech pha (+) => do tre (+) h.
 comp_path <- file.path(OUT_E1, "harmonic_components.csv")
+
+# Cac thanh phan dung de uoc luong do tre (bien do du thap -> nhieu -> bo qua).
+PHASE_LAG_COMPONENTS <- c("M2", "S2", "K1", "O1")
+
 if (file.exists(comp_path)) {
-  comp <- read_csv_df(comp_path)
-  comp <- comp[comp$component == PHASE_COMPONENT, , drop = FALSE]
-  if (nrow(comp)) {
-    ph_ref <- comp$phase_deg[comp$station == REF_STATION]
+  comp_all <- read_csv_df(comp_path)
+  comp_m2 <- comp_all[comp_all$component == PHASE_COMPONENT, , drop = FALSE]
+  phase_lag_harm <- NULL
+  phase_lag_harm_w <- NULL
+  if (nrow(comp_m2)) {
+    ph_ref <- comp_m2$phase_deg[comp_m2$station == REF_STATION]
     per_h <- HARMONIC_PERIOD_H[[PHASE_COMPONENT]]
     if (length(ph_ref) && is.finite(ph_ref)) {
+      # --- 4a. Do tre theo thanh phan CHINH (M2), KHONG wrap ---------------
       ph_rows <- list()
-      for (i in seq_len(nrow(comp))) {
-        if (comp$station[i] == REF_STATION) next
-        dphase <- phase_diff_deg(comp$phase_deg[i], ph_ref)
+      for (i in seq_len(nrow(comp_m2))) {
+        if (comp_m2$station[i] == REF_STATION) next
+        # KHONG wrap: do tre that co the vuot nua chu ky M2.
+        dphase <- phase_diff_unwrapped(comp_m2$phase_deg[i], ph_ref)
+        lag_raw <- phase_lag_hours(comp_m2$phase_deg[i], ph_ref, per_h, wrap = FALSE)
         ph_rows[[length(ph_rows) + 1L]] <- data.frame(
-          station = comp$station[i],
-          phase_ref_deg = ph_ref, phase_station_deg = comp$phase_deg[i],
+          station = comp_m2$station[i],
+          phase_ref_deg = ph_ref, phase_station_deg = comp_m2$phase_deg[i],
           phase_diff_deg = dphase,
-          lag_h_harmonic = dphase / (360 / per_h),
-          amp_m = comp$amplitude_m[i], stringsAsFactors = FALSE)
+          phase_diff_wrapped_deg = phase_diff_deg(comp_m2$phase_deg[i], ph_ref),
+          lag_h_harmonic_raw = lag_raw,
+          # rang buoc do tre trieu bien >= 0 (xem README muc 4.3)
+          lag_h_harmonic = max(lag_raw, 0),
+          lag_clamped = lag_raw < 0,
+          amp_m = comp_m2$amplitude_m[i], stringsAsFactors = FALSE)
       }
       phase_lag_harm <- do.call(rbind, ph_rows)
-      say2("\n== Do tre theo pha harmonic (", PHASE_COMPONENT, ") ==")
+
+      # --- 4b. Do tre trung binh TRONG SO BIEN DO tren nhieu thanh phan ----
+      # Chi dung thanh phan bien do >= PHASE_LAG_MIN_AMP_M (5 cm): thanh phan
+      # nho khong mang thong tin do tre, chi lam nhieu pha.
+      phw_rows <- list()
+      for (i in seq_len(nrow(comp_m2))) {
+        st_i <- comp_m2$station[i]
+        if (st_i == REF_STATION) next
+        parts <- list()
+        for (cp in PHASE_LAG_COMPONENTS) {
+          cc <- comp_all[comp_all$component == cp &
+                           comp_all$station == st_i, , drop = FALSE]
+          cr <- comp_all[comp_all$component == cp &
+                           comp_all$station == REF_STATION, , drop = FALSE]
+          if (!nrow(cc) || !nrow(cr)) next
+          amp <- cc$amplitude_m[1]
+          if (!is.finite(amp) || amp < PHASE_LAG_MIN_AMP_M) next
+          lag_cp <- phase_lag_hours(cc$phase_deg[1], cr$phase_deg[1],
+                                    HARMONIC_PERIOD_H[[cp]], wrap = FALSE)
+          parts[[length(parts) + 1L]] <- data.frame(
+            station = st_i, component = cp,
+            phase_diff_deg = cc$phase_deg[1] - cr$phase_deg[1],
+            lag_h = lag_cp, amp_m = amp, stringsAsFactors = FALSE)
+        }
+        if (!length(parts)) next
+        pp <- do.call(rbind, parts)
+        # trung binh trong so bien do (chi giu cac thanh phan co lag >= 0)
+        pp_ok <- pp[pp$lag_h >= 0, , drop = FALSE]
+        if (!nrow(pp_ok)) next
+        w <- pp_ok$amp_m
+        m2row <- pp$lag_h[pp$component == PHASE_COMPONENT]
+        phw_rows[[length(phw_rows) + 1L]] <- data.frame(
+          station = st_i,
+          lag_h_harmonic_w = sum(pp_ok$lag_h * w) / sum(w),
+          n_components = nrow(pp_ok),
+          components_used = paste(pp_ok$component, collapse = "+"),
+          amp_weight_sum = sum(w),
+          lag_h_M2 = if (length(m2row)) m2row[1] else NA_real_,
+          stringsAsFactors = FALSE)
+      }
+      phase_lag_harm_w <- if (length(phw_rows)) do.call(rbind, phw_rows) else NULL
+
+      say2("\n== Do tre theo pha harmonic (", PHASE_COMPONENT, ", KHONG wrap) ==")
       print(phase_lag_harm)
+      say2("\n== Do tre theo pha harmonic TRONG SO BIEN DO (",
+           paste(PHASE_LAG_COMPONENTS, collapse = "/"), ") ==")
+      if (!is.null(phase_lag_harm_w)) print(phase_lag_harm_w) else
+        say2("  (khong co du lieu)")
+      n_clamp <- sum(phase_lag_harm$lag_clamped)
+      if (n_clamp > 0) {
+        say2("[CANH BAO] ", n_clamp, " tram co lag_h_harmonic_raw < 0 -> da RANG BUOC ve 0 ",
+             "(do tre trieu bien khong am)")
+      }
+    } else {
+      say2("[CANH BAO] khong tim thay pha cua tram tham chieu -> bo qua uoc luong theo pha harmonic")
     }
   }
 } else {
   phase_lag_harm <- NULL
+  phase_lag_harm_w <- NULL
   say2("[CANH BAO] khong tim thay ", comp_path, " -> bo qua uoc luong theo pha harmonic")
 }
 
@@ -335,8 +534,59 @@ if (!is.null(phase_lag_harm) && !is.null(boot_lag)) {
   cmp <- merge(boot_lag, phase_lag_harm, by = "station")
   cmp <- cmp[cmp$peak_type == 1L, , drop = FALSE]
   cmp$diff_h <- cmp$lag_median_h - cmp$lag_h_harmonic
+  if (!is.null(phase_lag_harm_w)) {
+    cmp <- merge(cmp, phase_lag_harm_w[, c("station", "lag_h_harmonic_w",
+                                           "components_used", "n_components")],
+                 by = "station", all.x = TRUE)
+  }
   write_csv_df(cmp, file.path(OUT_E1, "phase_lag_method_compare.csv"))
   say2("bang so sanh phuong phap: ", nrow(cmp), " dong")
+}
+
+# ---------------------------------------------------------------------------
+# 4b. SO SANH PHUONG PHAP GAN NHOM DINH (TRUOC / SAU sua loi GĐ4 Bug 2)
+# ---------------------------------------------------------------------------
+# Ghi lai ca hai phuong phap de theo doi va ghi ro trong README:
+#   "obs_day"    : gan dinh 1/2 theo thu tu gio trong ngay quan sat (QUY TAC CU)
+#   "tide_cycle" : gan dinh 1/2 theo the he chu ky trieu M2 (QUY TAC MOI)
+cmp_grp_rows <- list()
+for (st in sort(unique(pk$station))) {
+  if (st == REF_STATION) next
+  for (which in 1:2) {
+    # --- QUY TAC CU: theo gio trong ngay quan sat ---
+    s_st <- if (which == 1L) ser1[ser1$station == st, , drop = FALSE]
+            else ser2[ser2$station == st, , drop = FALSE]
+    s_ref <- ref_ser[[as.character(which)]]
+    old <- NA_real_; n_old <- 0L
+    if (nrow(s_st) && nrow(s_ref)) {
+      common <- intersect(s_ref$day, s_st$day)
+      a <- s_ref$t_h[match(common, s_ref$day)]
+      b <- s_st$t_h[match(common, s_st$day)]
+      ok <- !is.na(a) & !is.na(b)
+      if (sum(ok) >= 60) {
+        d <- ((b[ok] - a[ok] + 12) %% 24) - 12
+        old <- atan2(mean(sin(2*pi*d/24)), mean(cos(2*pi*d/24))) * 24 / (2*pi)
+        n_old <- sum(ok)
+      }
+    }
+    # --- QUY TAC MOI: theo the he chu ky trieu ---
+    new <- NA_real_; n_new <- 0L
+    rl <- lag_from_generation(st, which, XCORR_MAX_LAG_H)
+    if (!is.null(rl)) { new <- rl$lag; n_new <- rl$n }
+    cmp_grp_rows[[length(cmp_grp_rows) + 1L]] <- data.frame(
+      station = st, peak_type = which,
+      lag_obs_day_h = old, n_obs_day = n_old,
+      lag_tide_cycle_h = new, n_tide_cycle = n_new,
+      delta_h = if (is.finite(old) && is.finite(new)) new - old else NA_real_,
+      stringsAsFactors = FALSE)
+  }
+}
+if (length(cmp_grp_rows)) {
+  cmp_grp <- do.call(rbind, cmp_grp_rows)
+  write_csv_df(cmp_grp, file.path(OUT_E1, "phase_lag_grouping_compare.csv"))
+  say2("bang so sanh pHUONG PHAP gan nhom dinh (obs_day vs tide_cycle): ",
+       nrow(cmp_grp), " dong")
+  print(cmp_grp)
 }
 
 # ---------------------------------------------------------------------------
@@ -347,8 +597,22 @@ if (!is.null(phase_lag_harm) && !is.null(boot_lag)) {
 lag_sum <- boot_lag
 if (!is.null(phase_lag_harm)) {
   lag_sum <- merge(lag_sum, phase_lag_harm[, c("station", "lag_h_harmonic",
-                                               "phase_diff_deg", "amp_m")],
+                                               "lag_h_harmonic_raw",
+                                               "phase_diff_deg",
+                                               "phase_diff_wrapped_deg",
+                                               "lag_clamped", "amp_m")],
                    by = "station", all.x = TRUE)
+}
+if (!is.null(phase_lag_harm_w)) {
+  lag_sum <- merge(lag_sum, phase_lag_harm_w[, c("station", "lag_h_harmonic_w",
+                                                  "components_used", "n_components")],
+                   by = "station", all.x = TRUE)
+}
+# Thong tin xcorr (tham khao) + canh bao bien cua so.
+if (!is.null(lag_xcorr) && nrow(lag_xcorr)) {
+  xc <- lag_xcorr[, c("station", "peak_type", "lag_xcorr_h", "r_xcorr",
+                      "xcorr_at_boundary", "xcorr_max_lag_h")]
+  lag_sum <- merge(lag_sum, xc, by = c("station", "peak_type"), all.x = TRUE)
 }
 # `dist_tbl` co cot `code` -> chi lay cot can dung de tranh trung ten khi merge.
 lag_sum <- merge(lag_sum,
@@ -522,25 +786,22 @@ if (nrow(res_rel)) {
   }
   q_all <- do.call(rbind, q_rows)
   q_all$day <- as.character(q_all$day)
-  # DO TRE THEO TUNG NGAY (de hoi quy H6): dung chinh cac CHENH LECH PHA TRON
-  # cua cap (tram, ngay) da tinh o muc 2 -> bo sung vao bang ghep.
-  # `lag_for_station()` tra `diffs` = hieu gio (VUNG TAU - TRAM) theo ngay.
+  # DO TRE THEO TUNG CAP (tram, bien) DE HOI QUY H6: dung chinh cac CHENH
+  # LECH PHA TRON cua cap theo THE HE CHU KY TRIEU da tinh o muc 2 -> bo sung
+  # vao bang ghep.
+  # DAI SO: `d = b - a` voi b = gio dinh tai TRAM, a = gio dinh tai VUNG TAU,
+  # quy ve (-12, +12] gio -> dung ky hieu chuan: gia tri DUONG nghia la dinh tai
+  # TRAM xuat hien CHAM HON dinh tai VUNG TAU.
+  # (Comment CU ghi nguoc dau "(VUNG TAU - TRAM)" -> sai dau, sua loi GĐ4.)
   lag_day_rows <- list()
   for (st in sort(unique(pk$station))) {
     if (st == REF_STATION) next
     for (which in 1:2) {
-      s_st <- if (which == 1L) ser1[ser1$station == st, , drop = FALSE]
-              else ser2[ser2$station == st, , drop = FALSE]
-      s_ref <- ref_ser[[as.character(which)]]
-      if (!nrow(s_st) || !nrow(s_ref)) next
-      rl <- lag_for_station(st, s_st, s_ref, MAX_LAG_H)
+      rl <- lag_from_generation(st, which, XCORR_MAX_LAG_H)
       if (is.null(rl)) next
-      common <- intersect(s_ref$day, s_st$day)
-      a <- s_ref$t_h[match(common, s_ref$day)]
-      b <- s_st$t_h[match(common, s_st$day)]
-      ok <- !is.na(a) & !is.na(b)
+      pr <- rl$pairs
       lag_day_rows[[length(lag_day_rows) + 1L]] <- data.frame(
-        station = st, peak_type = which, day = common[ok],
+        station = st, peak_type = which, day = pr$day,
         lag_day_h = rl$diffs, stringsAsFactors = FALSE)
     }
   }

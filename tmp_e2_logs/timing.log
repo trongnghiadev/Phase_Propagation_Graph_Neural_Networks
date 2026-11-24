@@ -1,0 +1,30 @@
+[08:19:12] bắt đầu chạy; seeds=[0]; biến thể=['phasegnn']
+[08:20:26] môi trường: {'python': '3.15.2', 'platform': 'Windows-11-10.0.26300-SP0', 'machine': 'AMD64', 'processor': 'Intel64 Family 6 Model 165 Stepping 2, GenuineIntel', 'cpu_count': 8, 'torch': '2.14.0+cpu', 'torch_threads': 4, 'cuda_available': False, 'numpy': '2.5.5', 'pandas': '3.1.1', 'pyarrow': '26.0.1', 'mlflow': '3.18.0', 'torch_geometric': '2.8.1'}
+[08:20:28] G5: 32352 dòng, 9 trạm; đồ thị: 647 nút / 1291 cạnh (1.6s)
+[08:20:37] tập train: 19509 mẫu, 2168 ngày phát bản tin (2017-01-15 → 2022-12-27), rò rỉ: 0
+[08:20:37] tập val: 4743 mẫu, 527 ngày phát bản tin (2023-01-15 → 2024-06-26), rò rỉ: 0
+[08:20:37] tập test: 7605 mẫu, 845 ngày phát bản tin (2024-07-15 → 2026-11-06), rò rỉ: 0
+[08:20:37] === [phasegnn] seed=0 ===
+[08:44:34] [phasegnn] epoch 0: train_loss = 1.64425 | val MAE đỉnh = 0.2749 m (1436.8s)
+[08:53:53] [phasegnn] epoch 1: train_loss = 1.60824 | val MAE đỉnh = 0.3103 m (558.8s)
+[08:53:53] [phasegnn] seed=0 xong sau 1996.0s; val MAE đỉnh = 0.2749 m (epoch 0)
+[08:55:08] [phasegnn] seed=0: 76050 bản ghi dự báo; 0 bản ghi không hợp lệ schema
+[08:55:13] [phasegnn] seed=0 test: MAE=0.2732 RMSE=0.3560 NSE=0.8271 KGE=0.8669 MAE_dt=5.6228 (n=38025)
+[08:55:13] === [B1] điều hòa + hồi quy phần dư ===
+[08:55:48] [B1] test: MAE=0.2081 RMSE=0.2820 NSE=0.8914 KGE=0.9263 MAE_dt=3.3035 (n=38745)
+[08:55:48] === [B0/B_harm] mô hình tham chiếu ===
+[08:55:58] [B0] test: MAE=0.1635 RMSE=0.2292 NSE=0.9283 KGE=0.9558 MAE_dt=5.2713 (n=38565)
+[08:56:00] [B_harm] test: MAE=2.5175 RMSE=2.5276 NSE=-108.8478 KGE=-1.0339 MAE_dt=5.4054 (n=12915)
+[08:56:03] ghi 212585 bản ghi dự báo → tmp_e2_timing\predictions_test.csv
+[08:56:04] kiểm tra schema: 0 bản ghi không hợp lệ
+[08:56:05] ghi dự báo B0 → tmp_e2_timing\base\predictions_B0_test.csv
+[08:56:06] ghi dự báo B_harm → tmp_e2_timing\base\predictions_B_harm_test.csv
+[08:56:07] ghi dự báo B1 → tmp_e2_timing\base\predictions_B1_test.csv
+
+=== KẾT QUẢ TẬP TEST ===
+ variant  n_seeds     n      mae  mae_std     rmse  rmse_std         nse  nse_std       kge  kge_std   mae_dt  mae_dt_std
+phasegnn        1 38025 0.273238      0.0 0.356024       0.0    0.827140      0.0  0.866898      0.0 5.622757         0.0
+      B1        1 38745 0.208082      0.0 0.282024       0.0    0.891429      0.0  0.926256      0.0 3.303490         0.0
+      B0        1 38565 0.163467      0.0 0.229193       0.0    0.928327      0.0  0.955789      0.0 5.271309         0.0
+  B_harm        1 12915 2.517456      0.0 2.527636       0.0 -108.847770      0.0 -1.033908      0.0 5.405388         0.0
+[08:56:25] kết thúc. Kết quả tại tmp_e2_timing

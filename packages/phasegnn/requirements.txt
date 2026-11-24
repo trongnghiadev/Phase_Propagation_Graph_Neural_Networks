@@ -1,0 +1,45 @@
+# Môi trường huấn luyện PhaseGNN (GĐ6.1) — phiên bản cố định.
+#
+# Ghi chú về CUDA: máy dùng cho luận văn có driver CUDA 462.62, quá cũ cho torch 2.x
+# (torch 2.x yêu cầu driver >= 525.60.13 cho CUDA 12.x). Vì vậy bản cài đặt thực tế
+# dùng **torch CPU**. Mã nguồn trong `packages/phasegnn` KHÔNG phụ thuộc CUDA, nên khi
+# có GPU chỉ cần đổi index-url bên dưới (xem phần "GPU" ở cuối file).
+#
+#   pip install -r packages/phasegnn/requirements.txt \
+#       --extra-index-url https://download.pytorch.org/whl/cpu
+#
+# Kiểm tra sau khi cài:
+#   python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+
+# --- Torch (CPU) ---
+torch==2.14.0+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# --- Torch Geometric (2.8.1) ---
+torch-geometric==2.8.1
+
+# --- Thư viện huấn luyện / theo dõi ---
+mlflow==3.18.0
+optuna==5.1.0
+
+# --- Kiểm thử ---
+pytest==9.2.0
+
+# --- Dữ liệu / tiện ích ---
+numpy>=1.26
+pandas>=2.1
+pyarrow>=14
+pyyaml>=6
+pymongo>=4.6
+redis>=5.0
+
+# --- Cụm cụm ứng dụng (dùng cho khóa Redlock, ghi `models`, `forecasts`, `alerts`) ---
+# `vngis` nằm trong workspace monorepo (`packages/vngis`) — cài bằng:
+#   pip install -e ./packages/vngis
+vngis
+
+# ---------------------------------------------------------------------------
+# GPU (không dùng cho lần chạy hiện tại) — thay khối "torch" ở trên bằng:
+#   pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cu126
+# rồi đặt `torch.cuda.is_available() == True`.
+# ---------------------------------------------------------------------------

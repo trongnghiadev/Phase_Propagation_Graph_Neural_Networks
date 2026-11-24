@@ -19,8 +19,9 @@ from pymongo.collection import Collection
 from pymongo.database import Database
 from redis.sentinel import Sentinel
 
+from .cache import Cache, build_cache
 from .config import Config, ConfigError, get_config
-from .locks import Redlock, parse_nodes
+from .locks import Redlock, build_lock, parse_nodes
 
 
 def _cfg(cfg: Config | None) -> Config:
@@ -84,8 +85,13 @@ def redis_cache(cfg: Config | None = None, readonly: bool = False) -> redis.Redi
 
 
 def redlock(cfg: Config | None = None) -> Redlock:
-    """``Redlock`` trên các node ``redis.lock.nodes``."""
+    """Khoá phân tán theo cấu hình: ``redlock`` (N node) hoặc ``single`` (một node)."""
     lc = _cfg(cfg).redis.lock
     if not lc.nodes:
         raise ConfigError("redis.lock.nodes rỗng: đặt REDIS_LOCK_NODES hoặc khai báo trong config/env/*.yaml")
-    return Redlock(parse_nodes(",".join(lc.nodes)), timeout_s=lc.timeout_s)
+    return build_lock(lc.backend, parse_nodes(",".join(lc.nodes)), lc.timeout_s)
+
+
+def cache(cfg: Config | None = None, readonly: bool = False) -> "Cache":
+    """Cache Redis theo cấu hình (``vngis.cache.Cache``) trên master Sentinel hoặc một node."""
+    return build_cache(redis_cache(cfg, readonly=readonly), cfg)

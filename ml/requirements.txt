@@ -1,0 +1,24 @@
+# Môi trường huấn luyện PhaseGNN (GĐ6.1) — phiên bản cố định.
+#
+# Đây là bản "ngắn" dùng như một điểm vào thuận tiện (checklist 6.1 yêu cầu ghi
+# `ml/requirements.txt` có phiên bản cố định). Nội dung giống
+# `packages/phasegnn/requirements.txt`.
+#
+#   pip install -r ml/requirements.txt \
+#       --extra-index-url https://download.pytorch.org/whl/cpu
+#
+# CUDA: driver 462.62 của máy luận văn quá cũ cho torch 2.x (cần >= 525.60.13 cho
+# CUDA 12.x) ⇒ cài **torch CPU**. Mã nguồn không phụ thuộc CUDA.
+
+torch==2.14.0+cpu
+torch-geometric==2.8.1
+mlflow==3.18.0
+optuna==5.1.0
+pytest==9.2.0
+
+numpy>=1.26
+pandas>=2.1
+pyarrow>=14
+pyyaml>=6
+pymongo>=4.6
+redis>=5.0

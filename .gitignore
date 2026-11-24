@@ -27,6 +27,11 @@ results/**/runs/
 results/mlruns/
 mlruns/
 
+# Script tạm (probe/debug) ở thư mục gốc — không commit
+tmp_*.py
+tmp_*.R
+tmp_*.txt
+
 # Node / Next.js
 node_modules/
 .next/

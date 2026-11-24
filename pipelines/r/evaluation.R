@@ -67,6 +67,41 @@ OUT_E5 <- p_res("E5")
 ensure_dir(OUT_E5)
 
 # ---------------------------------------------------------------------------
+# 0. THAM SO DONG LENH
+# ---------------------------------------------------------------------------
+# `--pred PATH ...` : them file du bao ngoai (CSV/Parquet) vao danh sach danh gia.
+#   File co the chua nhieu model -> tach theo cot `model`.
+# `--out-dir PATH` : thu muc ghi ket qua (mac dinh `results/E5`).
+# `--no-plot`      : bo qua ve bieu do.
+argv <- commandArgs(trailingOnly = TRUE)
+get_opt <- function(flag) {
+  i <- match(flag, argv)
+  if (is.na(i)) return(character(0))
+  j <- argv[(i + 1):length(argv)]
+  j <- j[!(j %in% c("--obs-only", "--no-plot")) & !startsWith(j, "--")]
+  if (!length(j)) return(character(0))
+  j[1]
+}
+opt_pred <- character(0)
+ip <- which(argv == "--pred")
+if (length(ip)) {
+  for (k in ip) {
+    rest <- argv[(k + 1):length(argv)]
+    stop_at <- which(startsWith(rest, "--"))
+    if (length(stop_at)) rest <- rest[seq_len(stop_at[1] - 1)]
+    opt_pred <- c(opt_pred, rest)
+  }
+}
+opt_out <- get_opt("--out-dir")
+if (length(opt_out) && nzchar(opt_out)) OUT_E5 <- opt_out
+ensure_dir(OUT_E5)
+NO_PLOT <- "--no-plot" %in% argv
+if (length(opt_pred)) {
+  say2("== File du bao ngoai ==")
+  for (p in opt_pred) say2("   ", p)
+}
+
+# ---------------------------------------------------------------------------
 # 1. Thuc do
 # ---------------------------------------------------------------------------
 say2("== Doc du lieu thuc do ==")
@@ -239,6 +274,27 @@ if (nrow(ast)) {
   }
 } else {
   say2("[CANH BAO] khong co ", astro_path, " -> bo qua B_harm")
+}
+
+# --- Du bao ngoai (--pred) : PhaseGNN, B1, B2, ... --------------------------
+if (length(opt_pred)) {
+  say2("\n== Doc du bao ngoai (--pred) ==")
+  for (p in opt_pred) {
+    if (!file.exists(p)) {
+      say2("[CANH BAO] khong tim thay file: ", p)
+      next
+    }
+    d <- read_predictions(p)
+    if (!nrow(d)) {
+      say2("[CANH BAO] file rong: ", p)
+      next
+    }
+    say2("   ", basename(p), ": ", nrow(d), " ban ghi; model = ",
+         paste(unique(d$model), collapse = ", "))
+    for (mn in unique(d$model)) {
+      preds[[mn]] <- rbind(preds[[mn]], d[d$model == mn, , drop = FALSE])
+    }
+  }
 }
 
 # Gom tat ca thanh mot bang du bao

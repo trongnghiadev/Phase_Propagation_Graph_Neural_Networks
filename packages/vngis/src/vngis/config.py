@@ -90,6 +90,21 @@ class Collections(_Model):
     admin_unit_mappings: str
     province_timeline: str
     lock_fences: str
+    # Collection vận hành và nghiệp vụ (GĐ7).
+    users: str = "users"
+    roles: str = "roles"
+    forecasts: str = "forecasts"
+    alerts: str = "alerts"
+    models: str = "models"
+    job_locks: str = "job_locks"
+    jobs: str = "jobs"
+    graph_edges: str = "graph_edges"
+    tide_extremes: str = "tide_extremes"
+    official_forecasts: str = "official_forecasts"
+    reservoir_daily: str = "reservoir_daily"
+    rainfall_daily: str = "rainfall_daily"
+    qc_flags: str = "qc_flags"
+    audit_logs: str = "audit_logs"
 
 
 class MongoConfig(_Model):
@@ -150,10 +165,15 @@ class RedisCacheConfig(_Model):
 
 
 class RedisLockConfig(_Model):
-    backend: Literal["redlock"] = "redlock"
+    # `redlock`: N node Redis độc lập (đa số node). `single`: một node (dùng để so sánh ở E17/E19).
+    backend: Literal["single", "redlock"] = "redlock"
     nodes: list[str] = []
     timeout_s: PositiveFloat = 0.05
     default_ttl_ms: PositiveInt = 30000
+    # Số lần thử lại khi lấy khóa thất bại (backoff ngẫu nhiên).
+    max_attempts: PositiveInt = 20
+    # Khoá dựng lại cache (chống stampede) dùng node đầu tiên của `nodes`.
+    rebuild_lock_ms: PositiveInt = 30000
 
     @field_validator("nodes", mode="before")
     @classmethod
@@ -164,6 +184,12 @@ class RedisLockConfig(_Model):
     @classmethod
     def _nodes(cls, v: list[str]) -> list[str]:
         return _check_nodes(v)
+
+    @model_validator(mode="after")
+    def _need_nodes(self) -> "RedisLockConfig":
+        if not self.nodes:
+            raise ValueError("redis.lock.nodes rỗng: đặt REDIS_LOCK_NODES hoặc khai báo trong config/env/*.yaml")
+        return self
 
 
 class RedisConfig(_Model):
@@ -238,10 +264,51 @@ class CacheConfig(_Model):
     ttl_s: dict[str, PositiveInt]
     jitter: float = Field(0.1, ge=0, le=0.5)
     stale_factor: PositiveInt = 4
+    # Ngưỡng giá trị lớn (byte) thì nén zstd + msgpack thay vì JSON thô.
+    compress_threshold_bytes: PositiveInt = 4096
+    # Số lần chờ tối đa khi chờ một tiến trình khác dựng lại giá trị (chống stampede).
+    max_wait: PositiveInt = 20
+    # Khoá chống dựng lại trùng: TTL của lock:rebuild:{key}.
+    rebuild_lock_ttl_ms: PositiveInt = 30000
+
+
+class AuthConfig(_Model):
+    """Xác thực và phân quyền (đề cương 5.4, mục GĐ7.2–7.3)."""
+    # Thời hạn token (phút / ngày).
+    access_ttl_min: PositiveInt = 15
+    refresh_ttl_days: PositiveInt = 7
+    # Khóa ký JWT: lấy từ biến môi trường AUTH_SECRET; nếu thiếu thì sinh tạm (chỉ hợp cho dev).
+    secret_env: str = "AUTH_SECRET"
+    issuer: str = "gis-dist"
+    # TTL cache quyền trong Redis (giây) — 5 phút theo đề cương.
+    perm_ttl_s: PositiveInt = 300
+    # Số lần đăng nhập sai tối đa trước khi khóa tạm.
+    max_failed_logins: PositiveInt = 10
+    lockout_minutes: PositiveInt = 15
+    # Bật/tắt yêu cầu xác thực (chỉ dùng cho test tự động; KHÔNG bật trong production).
+    required: bool = True
+
+
+class RateLimitConfig(_Model):
+    """Giới hạn tần suất (đề cương 5.8: mã 429)."""
+    enabled: bool = True
+    # Số request cho mỗi cửa sổ.
+    requests: PositiveInt = 120
+    window_s: PositiveInt = 60
+    # Nới riêng cho các endpoint công khai (đăng nhập, health).
+    login_requests: PositiveInt = 10
+    login_window_s: PositiveInt = 60
 
 
 class SchedulerConfig(_Model):
     enabled: bool = True
+    # Giờ chạy job nạp bản tin mới và dự báo hằng ngày (giờ Việt Nam).
+    ingest_hour: int = Field(6, ge=0, le=23)
+    forecast_hour: int = Field(8, ge=0, le=23)
+    forecast_minute: int = Field(0, ge=0, le=59)
+    # TTL khóa job (giây) và chu kỳ ghi heartbeat (giây).
+    lock_ttl_s: PositiveInt = 600
+    heartbeat_s: PositiveInt = 30
 
 
 class Config(_Model):
@@ -255,6 +322,8 @@ class Config(_Model):
     stations: StationsConfig
     cache: CacheConfig
     qc: QcConfig
+    auth: AuthConfig = AuthConfig()
+    rate_limit: RateLimitConfig = RateLimitConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
 
     @field_validator("config_version")

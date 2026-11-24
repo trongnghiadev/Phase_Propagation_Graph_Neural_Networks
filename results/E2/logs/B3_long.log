@@ -1,0 +1,16 @@
+[train] đọc dữ liệu từ /work/data/processed/features/g5
+[train] G5: 32352 dòng; đồ thị: 647 nút, 1291 cạnh
+[train] tập train: 19509 mẫu; rò rỉ: 0
+[train] tập val: 4743 mẫu; rò rỉ: 0
+[train] tập test: 7605 mẫu; rò rỉ: 0
+/work/packages/phasegnn/src/phasegnn/train.py:531: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)
+  out_hd.append(float(hd_[idx].max()))
+[B3] epoch 0: train_loss = 0.95397 | val MAE đỉnh = 0.2566 m (85.7s)
+[B3] epoch 1: train_loss = 0.93424 | val MAE đỉnh = 0.1761 m (95.9s)
+[B3] epoch 2: train_loss = 0.93161 | val MAE đỉnh = 0.2082 m (109.6s)
+[B3] epoch 3: train_loss = 0.92987 | val MAE đỉnh = 0.2663 m (111.7s)
+[B3] epoch 4: train_loss = 0.92889 | val MAE đỉnh = 0.1927 m (111.8s)
+[B3] epoch 5: train_loss = 0.92801 | val MAE đỉnh = 0.1842 m (114.8s)
+[B3] dừng sớm sau 4 epoch không cải thiện.
+[train] xong. val MAE đỉnh = 0.1761 m; lưu tại results/E2/B3_long

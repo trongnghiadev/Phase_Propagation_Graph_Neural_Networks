@@ -1,13 +1,28 @@
 [project]
 name = "phasegnn"
 version = "0.1.0"
-description = "Mô hình PhaseGNN"
+description = "Mô hình PhaseGNN — dự báo đỉnh mực nước bằng lan truyền pha hai chiều trên đồ thị lưu vực"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "vngis",
   "torch>=2.4",
-  "torch-geometric>=2.6",
+  "numpy>=1.26",
+  "pandas>=2.1",
+  "pyarrow>=14",
 ]
+
+# Ghi chú: package **không** dùng `torch-geometric` — mọi phép gom đệm (scatter_add)
+# được viết bằng `index_add_` của PyTorch thuần, nhờ vậy image CPU tối giản
+# (`python:3.12-slim` + torch CPU) không cần biên dịch `pyg-lib`/`torch-scatter`.
+# Xem `packages/phasegnn/README.md`.
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+phasegnn-train = "phasegnn.train:main"
+phasegnn-forecast = "phasegnn.forecast:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -18,3 +33,6 @@ packages = ["src/phasegnn"]
 
 [tool.uv.sources]
 vngis = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

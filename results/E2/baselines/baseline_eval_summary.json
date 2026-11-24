@@ -1,0 +1,25 @@
+{
+ "split": "test",
+ "n_days": 300,
+ "metrics": [
+  {
+   "model": "B0",
+   "mae_peak_m": 0.18402953043630474,
+   "mae_hour_h": 1.6288094612927226,
+   "n_records": 24745
+  },
+  {
+   "model": "B_harm",
+   "mae_peak_m": 2.469922170095032,
+   "mae_hour_h": 1.5378383255142547,
+   "n_records": 9000
+  },
+  {
+   "model": "B1",
+   "mae_peak_m": 0.2006043625369908,
+   "mae_hour_h": 1.7314744069912607,
+   "n_records": 13500
+  }
+ ],
+ "b1_errors": []
+}

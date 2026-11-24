@@ -1,0 +1,1 @@
+CHANGELOG_GD7_ADD.md

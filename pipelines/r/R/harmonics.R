@@ -179,4 +179,58 @@ mean_phase <- function(phase) {
 }
 
 # Do lech pha (degree) giua hai goc, quy ve (-180, 180].
+#
+# LUU Y QUAN TRONG (sua loi GĐ4): ham nay CHỈ hợp lệ khi |do tre that| < P/2,
+# voi P la chu ky cua thanh phan dang xet. Neu do tre vuot nua chu ky (vd tram
+# cach bien xa, do tre > 6.21 h cho M2), wrap se "ghi de" do tre bang gia tri
+# am cùng bien do -> ket qua SAI DAU.
+#   -> Dung `phase_diff_unwrapped()` cho uoc luong do tre thuc te.
 phase_diff_deg <- function(a, b) ((a - b + 180) %% 360) - 180
+
+# ---------------------------------------------------------------------------
+# Do lech pha KHONG WRAP (dung cho uoc luong do tre)
+# ---------------------------------------------------------------------------
+# `phase_diff_unwrapped(a, b)` tra ve `a - b` (do) ma KHONG quy ve (-180, 180].
+#
+# LY DO (sua loi GĐ4 - xem README muc 4.3):
+#   Do tre thuc te cua trieu bien co the vuot nua chu ky cua thanh phan dang
+#   xet. Vi du DAU_TIENG cach VUNG_TAU 200 km: chenh lech pha M2 THUC TE =
+#   +212.08 deg. Neu wrap ve (-180, 180] ta duoc -147.92 deg -> do tre bi
+#   giam nguoc thanh tu +7.32 h thanh -5.10 h (sai dau, va khac dau voi ba
+#   nguon lap doc lap: do tre thuc do +35.44 h, pha M2 +2.7 h, pha tren peak1
+#   +10.36 h).
+#
+#   Do lai: -147.92 / (360 / 12.4206) = -5.10 h;  +212.08 / (360 / 12.4206) = +7.32 h
+#
+# DUNG CHI:
+#   - CHI dung khi quy doi chenh lech pha -> do tre (lag) theo gio.
+#   - LUON kem rang buoc `lag >= 0` (do tre trieu bien khong am: dinh o tram
+#     khong the xuat hien TRUOC dinh o bien).
+#   - KHONG dung de so sanh pha don le (vi du kiem tra do pha cua 2 tram) --
+#     o do, wrap van dung va de doc hon.
+phase_diff_unwrapped <- function(a, b) a - b
+
+# ---------------------------------------------------------------------------
+# Do tre (gio) tu chenh lech pha cua mot thanh phan dieu hoa
+# ---------------------------------------------------------------------------
+# `phase_lag_hours(phase_a, phase_b, period_h, wrap = FALSE)`:
+#   - `phase_a`, `phase_b`: pha (do) cua thanh phan tai TRAM va tai TRAM THAM CHIEU.
+#   - `period_h`: chu ky cua thanh phan (gio).
+#   - `wrap = TRUE` -> quy ve (-180, 180] (chi dung khi do tre < P/2).
+#   - `wrap = FALSE` (mac dinh) -> khong wrap, dung cho do tre thuc te.
+#
+# DAI SO QUY UOC (quan trong -- sua loi GĐ4):
+#   Pha duoc dinh nghia theo `fit_harmonics()`:
+#       h(t) = a0 + SUM A_j * cos(w_j * t - g_j),   g_j = atan2(b_j, a_j)
+#   Do do, dinh cua thanh phan xuat hien tai moc `t` khi
+#       w_j * t - g_j = 2*pi*k  =>  t = (g_j + 2*pi*k) / w_j
+#   => moc dinh SOM HON (t nho hon) khi g_j LON HON.
+#   Vung bien -> tram thuong nguon cham hon => dinh tai tram xuat hien CHAM HON
+#   => g_tram > g_ref => chenh lech pha (g_tram - g_ref) > 0 => do tre > 0.
+#
+#   => `lag_h = (phase_a - phase_b) / (360 / period_h)` cho do tre DUONG khi
+#      tram cham hon tham chieu. DAI SO NAY KHONG DOI.
+phase_lag_hours <- function(phase_a, phase_b, period_h, wrap = FALSE) {
+  d <- if (isTRUE(wrap)) phase_diff_deg(phase_a, phase_b) else phase_diff_unwrapped(phase_a, phase_b)
+  d / (360 / period_h)
+}

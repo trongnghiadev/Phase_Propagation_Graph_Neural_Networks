@@ -4,7 +4,7 @@
 
 | Module | Trạng thái | Nội dung |
 |---|---|---|
-| `locks.py` | **đã có** | Redlock trên N node (`Redlock.acquire/release/extend/ping`), `next_fence` (fencing token từ MongoDB), `parse_nodes`. Đang dùng ở `apps/api` |
+| `locks.py` | **đã có** | Redlock trên N node (`Redlock.acquire/release/extend/ping`), `next_fence` (fencing token từ MongoDB), `parse_nodes`. Ngoài ra: backend `single|redlock` theo `LOCK_BACKEND`, script Lua `RELEASE`/`EXTEND`, watchdog gia hạn mỗi TTL/3 với cờ `lost`, `LockGuard.write` kiểm tra `last_fence < fence`. Đang dùng ở `apps/api` và `apps/worker` |
 | `text.py` | **đã có** | `norm_name` (NFC, bỏ một tiền tố cấp hành chính, bỏ dấu, `-` → khoảng trắng, gộp khoảng trắng), `slug` (mã không dấu), `strip_accents`. Bản **duy nhất** trong repo: `pipelines/ingest/*` và job Spark đều import từ đây |
 | `config.py` | **đã có** | `load_config` / `get_config`: gộp `config/default.yaml` + `config/env/{APP_ENV}.yaml` + biến môi trường, kiểm tra bằng pydantic v2; sai → `ConfigError` liệt kê từng khóa lỗi. `load_stations_catalog`: đọc và kiểm tra `config/stations.yaml` |
 | `db.py` | **đã có** | `mongo_client` / `get_db` / `collection` (một node, replica set, mongos), `redis_cache` (một node hoặc master/replica qua Sentinel), `redis_sentinel`, `redlock`. Không kết nối khi import |
@@ -13,7 +13,8 @@
 | `bulletins.py` | **đã có** | `duplicate_exclusions`: bản tin chính trùng sha256 → bản bị loại (G0 và `create_stations.py`) |
 | `qc_rules.py` | **đã có** | QC bản tin, thuần Python: quy tắc R1–R3 (`r1_check`, `r2_check`, `r3_check`, `evaluate_group`), `DEFAULT_PARAMS` (= `config/default.yaml` mục `qc`), khóa cờ `flag_id`, `effective` (giá trị sau quyết định), `plan_updates` (gộp kết quả quy tắc vào `qc_flags`, không đụng field quyết định), validator/index của `qc_flags`, `audit_logs`. Dùng ở job Spark QC và G0 |
 | `qc.py` | **đã có** | ghi quyết định QC có kiểm toán (pymongo): `decide` (`find_one_and_update` có điều kiện `version`, `VersionConflict`), `create_manual_flag`, `update_bulletin_fields` (metadata bản tin được phép, điều kiện giá trị cũ), `record_review`, `reconcile_pending`, `ensure_collections`. Dùng ở CLI `pipelines/qc/qc_decide.py`, API về sau |
-| `cache.py` | dự kiến | cache-aside, khóa cache theo phiên bản, chống stampede (TTL đã có trong `config/default.yaml`, mục `cache`) |
+| `cache.py` | **đã có** | cache-aside trên Redis (một node hoặc Sentinel): khoá có phiên bản `ver:{coll}`, TTL kèm jitter, khoá `stale:` dự phòng, chống stampede bằng `lock:rebuild:{key}`, write-through cho dự báo, con trỏ `fc:{station}:latest`, nén zstd + msgpack, đo hit/miss theo loại khoá |
+| `atomic_reload.py` | **đã có** | nạp lại bản tin nguyên tử (ADR 0007): staging `hydromet_bulletins__staging_<run_id>` -> validator + index -> đối chiếu `hydromet_bulletin_files` (số bản tin, số bản chính, SHA-256) -> sao lưu `__prev` -> `renameCollection(..., dropTarget=True)` -> tăng `ver:hydromet_bulletins` -> chạy lại G0; bảo vệ bằng `lock:reload:bulletins` + watchdog |
 | `models/` | dự kiến | pydantic: `Station`, `TideExtreme`, `Forecast`… khớp `schemas/` |
 
 Cấu trúc: `src/vngis/`, `tests/`, `pyproject.toml`. Phụ thuộc: pymongo, redis, pydantic, pyyaml.
@@ -63,6 +64,14 @@ runs = assign_runs([(observation_date, "Tây Ninh"), ...], timeline, max_lag_day
 `era` của đoạn = thời kỳ đem tra; `obs_era` = thời kỳ theo ngày quan trắc.
 
 `vngis.bulletins.duplicate_exclusions`: chọn bản tin bỏ đi khi nhiều bản tin chính trùng sha256 (dùng chung cho G0 và `create_stations.py`).
+
+## Cache (`vngis.cache`)
+
+Cache-aside tren Redis (mot node hoac Sentinel). Khoa co phien ban `ver:{coll}` de vo hieu hoa khi du lieu doi; TTL lay tu `config/default.yaml` muc `cache` co jitter; ban `stale:` de du phong khi nguon loi; `lock:rebuild:{key}` chong stampede; gia tri lon nen zstd + msgpack (co fallback JSON); dem hit/miss theo loai khoa. Write-through dung cho du bao, con tro `fc:{station}:latest` tro toi ban moi nhat. PDF khong nhet vao Redis: tra `ETag` (SHA-256) + `Cache-Control`.
+
+## Nạp lại nguyên tử (`vngis.atomic_reload`)
+
+`reload_bulletins_atomic` theo ADR 0007: tao collection staging `<coll>__staging_<run_id>`, gan validator + index, doi chieu voi `hydromet_bulletin_files` (so ban tin, so ban chinh, SHA-256), sao luu `<coll>__prev`, `renameCollection(..., dropTarget=True)`, tang `ver:hydromet_bulletins`, chay lai G0. Toan bo thao tac duoc bao ve bang `lock:reload:bulletins` co watchdog.
 
 ## QC (`vngis.qc_rules`, `vngis.qc`)
 

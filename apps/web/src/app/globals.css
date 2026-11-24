@@ -1,0 +1,58 @@
+:root {
+  --fg: #1c2b36;
+  --muted: #607d8b;
+  --line: #dfe6ec;
+  --bg: #f2f5f8;
+  --brand: #0d47a1;
+  --brand-dark: #08306b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    "Segoe UI", system-ui, -apple-system, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+a {
+  color: var(--brand);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 8px;
+  line-height: 1.25;
+}
+
+h1 {
+  font-size: 20px;
+}
+
+h2 {
+  font-size: 17px;
+}
+
+h3 {
+  font-size: 15px;
+}
+
+/* Leaflet: nền bản đồ trong suốt cho khung */
+.leaflet-container {
+  background: #dfe8ef;
+  font-family: inherit;
+}

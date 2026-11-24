@@ -1,0 +1,2 @@
+variant,seed,val_mae_peak,val_mae_hour,val_pinball,best_epoch,n_pred_test,n_invalid,seconds
+phasegnn,0,0.35235974073410037,4.637461185097695,0.2310589887201786,0,76050,422,245.0

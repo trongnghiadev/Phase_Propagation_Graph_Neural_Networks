@@ -1,0 +1,30 @@
+{
+  "name": "gis-dist-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Giao dien web (Next.js + Leaflet) cho he thong du bao dinh muc nuoc mang luoi song VN bang GNN lan truyen pha",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "leaflet": "1.9.4",
+    "next": "^15.5.29",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "react-leaflet": "5.0.0"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.7",
+    "@types/leaflet": "1.9.16",
+    "@types/node": "22.10.7",
+    "@types/react": "19.0.7",
+    "@types/react-dom": "19.0.3",
+    "eslint": "9.18.0",
+    "eslint-config-next": "^15.5.29",
+    "typescript": "5.7.3"
+  }
+}

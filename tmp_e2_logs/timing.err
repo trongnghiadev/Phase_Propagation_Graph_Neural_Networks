@@ -1,0 +1,6 @@
+2026/11/24 08:19:33 INFO mlflow.agent.hint: Load the `mlflow-trace-instrumentation` skill at C:\Users\nghiadev\AppData\Local\Python\pythoncore-3.15-64\Lib\site-packages\mlflow\assistant\skills\mlflow-trace-instrumentation\SKILL.md before writing any tracing code; it ships with this MLflow install. Set MLFLOW_DISABLE_AGENT_HINT=1 to silence this.
+C:\Users\nghiadev\AppData\Local\Python\pythoncore-3.15-64\Lib\site-packages\torch\jit\_script.py:1485: FutureWarning: `torch.jit.script` is not supported in Python 3.14+ and may break. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+C:\Users\nghiadev\Desktop\bigdatanckh\Phase_Propagation_Graph_Neural_Networks\packages\phasegnn\src\phasegnn\train.py:531: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\torch\csrc\autograd\generated\python_variable_methods.cpp:821.)
+  out_hd.append(float(hd_[idx].max()))

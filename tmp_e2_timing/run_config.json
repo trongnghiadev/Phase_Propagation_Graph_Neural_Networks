@@ -1,0 +1,150 @@
+{
+ "run_started_utc": "2026-11-24T01:19:12.413992+00:00",
+ "run_finished_utc": "2026-11-24T01:56:25.883968+00:00",
+ "environment": {
+  "python": "3.15.2",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "machine": "AMD64",
+  "processor": "Intel64 Family 6 Model 165 Stepping 2, GenuineIntel",
+  "cpu_count": 8,
+  "torch": "2.14.0+cpu",
+  "torch_threads": 1,
+  "cuda_available": false,
+  "numpy": "2.5.5",
+  "pandas": "3.1.1",
+  "pyarrow": "26.0.1",
+  "mlflow": "3.18.0",
+  "torch_geometric": "2.8.1"
+ },
+ "seeds": [
+  0
+ ],
+ "variants": [
+  "phasegnn"
+ ],
+ "args": {
+  "out_dir": "tmp_e2_timing",
+  "baseline_out_dir": "tmp_e2_timing/base",
+  "seeds": "0",
+  "variants": "phasegnn",
+  "epochs": 2,
+  "patience": 2,
+  "batch_size": 16,
+  "lr": 0.001,
+  "hidden_dim": 32,
+  "num_gnn_layers": 2,
+  "delta_h": 12.42,
+  "t_in": 14,
+  "t_out": 5,
+  "max_train_samples": null,
+  "max_val_samples": null,
+  "b2_epochs": 1,
+  "b2_hidden": 48,
+  "skip_b2": true,
+  "data_root": null
+ },
+ "splits": {
+  "train": [
+   "2017-01-01",
+   "2022-12-31"
+  ],
+  "val": [
+   "2023-01-01",
+   "2024-06-30"
+  ],
+  "test": [
+   "2024-07-01",
+   "2026-11-23"
+  ]
+ },
+ "split_info": {
+  "train": {
+   "n_samples": 19509,
+   "n_issue_dates": 2168,
+   "issue_date_min": "2017-01-15",
+   "issue_date_max": "2022-12-27",
+   "n_leakage": 0
+  },
+  "val": {
+   "n_samples": 4743,
+   "n_issue_dates": 527,
+   "issue_date_min": "2023-01-15",
+   "issue_date_max": "2024-06-26",
+   "n_leakage": 0
+  },
+  "test": {
+   "n_samples": 7605,
+   "n_issue_dates": 845,
+   "issue_date_min": "2024-07-15",
+   "issue_date_max": "2026-11-06",
+   "n_leakage": 0
+  }
+ },
+ "train_logs": [
+  {
+   "variant": "phasegnn",
+   "seed": 0,
+   "seconds": 1995.9667434692383,
+   "best_val_mae": 0.27493002121683086,
+   "best_epoch": 0,
+   "epochs_run": 2,
+   "checkpoint": "tmp_e2_timing\\checkpoints\\phasegnn_seed0.pt"
+  }
+ ],
+ "data_snapshot": {
+  "run_date": "2026-11-23",
+  "job_version": "g5-v1",
+  "collections": {
+   "tide_extremes": 129420,
+   "official_forecasts": 38410,
+   "reservoir_daily": 15313,
+   "rainfall_daily": 13127,
+   "hydromet_bulletins": 3636,
+   "stations": 26,
+   "merit_river_reaches": 21508,
+   "qc_flags": 380
+  },
+  "max_timestamps": {
+   "tide_extremes_ts": "2026-11-10T16:00:00Z",
+   "reservoir_daily_date": "2026-11-09T17:00:00Z",
+   "rainfall_daily_date": "2026-11-09T17:00:00Z",
+   "official_forecasts_target_date": "2026-11-15"
+  },
+  "day_range": [
+   "2016-12-31",
+   "2026-11-10"
+  ],
+  "rows": 32352,
+  "rows_per_year": {
+   "2016": 9,
+   "2017": 3265,
+   "2018": 3276,
+   "2019": 3285,
+   "2020": 3294,
+   "2021": 3276,
+   "2022": 3275,
+   "2023": 3267,
+   "2024": 3294,
+   "2025": 3285,
+   "2026": 2826
+  },
+  "rows_per_station": {
+   "BEN_LUC": 3595,
+   "BIEN_HOA": 3595,
+   "DAU_TIENG": 3593,
+   "GO_DAU_HA": 3595,
+   "NHA_BE": 3595,
+   "PHU_AN": 3595,
+   "TAN_AN": 3595,
+   "THU_DAU_MOT": 3594,
+   "VUNG_TAU": 3595
+  },
+  "astro_merged": false,
+  "leak_check": {
+   "rows_with_input_obs": 32343,
+   "violations": 0
+  }
+ },
+ "n_prediction_records": 212585,
+ "n_schema_errors": 0
+}

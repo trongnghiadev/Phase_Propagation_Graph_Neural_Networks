@@ -1,12 +1,22 @@
 [project]
 name = "worker"
-version = "0.1.0"
-description = "Scheduler và job nền"
+version = "0.2.0"
+description = "Scheduler và job nền (GĐ7.7): APScheduler + khóa phân tán + fencing token"
 requires-python = ">=3.11"
 dependencies = [
   "vngis",
   "phasegnn",
   "apscheduler>=3.10",
+  "pymongo>=4.6",
+  "redis>=5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "mongomock>=4.1",
+  "fakeredis>=2.21",
 ]
 
 [build-system]
@@ -19,3 +29,8 @@ packages = ["src/worker"]
 [tool.uv.sources]
 vngis = { workspace = true }
 phasegnn = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
