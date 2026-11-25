@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from api.deps import require
 from api.permissions import P
-from api.router.common import check_era, clean
+from api.router.common import check_era, clean, to_lonlat
 from api.state import state
 
 log = logging.getLogger("api.features")
@@ -70,12 +70,18 @@ async def features(coll: str, bbox: str | None = Query(None, description="minx,m
         docs = list(db[coll].find(flt, {"_id": 0}).limit(limit))
         features_out = []
         for d in docs:
-            geom = d.get("geometry") or d.get("geom") or d.get("location")
+            geom = d.get("geometry") or d.get("geom")
+            if not geom:
+                # `location` có thể là GeoJSON Point hoặc mảng [lon, lat] → luôn trả về geometry GeoJSON.
+                loc = d.get("location")
+                if isinstance(loc, dict) and loc.get("type"):
+                    geom = loc
+                else:
+                    coords = to_lonlat(loc)
+                    geom = {"type": "Point", "coordinates": coords} if coords else None
             props = d.get("properties") or {k: v for k, v in d.items()
                                            if k not in ("_id", "geometry", "geom", "location")}
-            features_out.append({"type": "Feature",
-                                  "geometry": geom if geom else {"type": "Point", "coordinates": d.get("location")},
-                                  "properties": clean(props)})
+            features_out.append({"type": "Feature", "geometry": geom, "properties": clean(props)})
         return {"type": "FeatureCollection", "collection": coll, "era": era,
                 "count": len(features_out), "features": features_out}
 
@@ -101,5 +107,7 @@ async def trace(comid: int, limit: int = Query(500, ge=1, le=5000)):
     if "stations" in colls:
         stations = list(db["stations"].find({"merit_comid": int(comid)},
                                            {"_id": 0, "code": 1, "name": 1, "location": 1}).limit(limit))
+        for s in stations:
+            s["location"] = to_lonlat(s.get("location"))
     return {"comid": int(comid), "segments": clean(upstream), "upstream_edges": clean(edges),
             "stations": clean(stations), "count": len(upstream)}

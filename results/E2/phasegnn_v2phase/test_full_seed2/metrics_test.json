@@ -1,0 +1,110 @@
+{
+ "summary": {
+  "model": "phasegnn-v2phase-s2",
+  "mae_peak_m": 0.1689018880427272,
+  "mae_hour_h": 3.129901690123474,
+  "n_records": 76050
+ },
+ "by_station": [
+  {
+   "model": "phasegnn-v2phase-s2",
+   "station": "BEN_LUC",
+   "mae_peak_m": 0.16542636270237016,
+   "mae_hour_h": 2.923102534998108,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-v2phase-s2",
+   "station": "BIEN_HOA",
+   "mae_peak_m": 0.1989452454610453,
+   "mae_hour_h": 3.686284405579846,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-v2phase-s2",
+   "station": "DAU_TIENG",
+   "mae_peak_m": 0.17216739033307762,
+   "mae_hour_h": 3.4421729480179337,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-v2phase-s2",
+   "station": "GO_DAU_HA",
+   "mae_peak_m": 0.13823323382104086,
+   "mae_hour_h": 3.436427770300583,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-v2phase-s2",
+   "station": "NHA_BE",
+   "mae_peak_m": 0.1650024533461381,
+   "mae_hour_h": 2.9198085159989926,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-v2phase-s2",
+   "station": "PHU_AN",
+   "mae_peak_m": 0.16171408234180285,
+   "mae_hour_h": 3.5048554186572796,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-v2phase-s2",
+   "station": "TAN_AN",
+   "mae_peak_m": 0.16856225082285792,
+   "mae_hour_h": 3.1056680093991273,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-v2phase-s2",
+   "station": "THU_DAU_MOT",
+   "mae_peak_m": 0.14799795023063106,
+   "mae_hour_h": 3.9345750887874176,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-v2phase-s2",
+   "station": "VUNG_TAU",
+   "mae_peak_m": 0.20094643758828956,
+   "mae_hour_h": 1.188945471911088,
+   "n_records": 8450
+  }
+ ],
+ "by_lead": [
+  {
+   "model": "phasegnn-v2phase-s2",
+   "lead_day": 1,
+   "mae_peak_m": 0.1661487973412766,
+   "mae_hour_h": 3.0910201660735472,
+   "n_records": 15210
+  },
+  {
+   "model": "phasegnn-v2phase-s2",
+   "lead_day": 2,
+   "mae_peak_m": 0.16636738026277623,
+   "mae_hour_h": 3.121935747829799,
+   "n_records": 15210
+  },
+  {
+   "model": "phasegnn-v2phase-s2",
+   "lead_day": 3,
+   "mae_peak_m": 0.16815305529413652,
+   "mae_hour_h": 3.1361585438159607,
+   "n_records": 15210
+  },
+  {
+   "model": "phasegnn-v2phase-s2",
+   "lead_day": 4,
+   "mae_peak_m": 0.17063979506903776,
+   "mae_hour_h": 3.1465197543160697,
+   "n_records": 15210
+  },
+  {
+   "model": "phasegnn-v2phase-s2",
+   "lead_day": 5,
+   "mae_peak_m": 0.1731988231462015,
+   "mae_hour_h": 3.153856953139821,
+   "n_records": 15210
+  }
+ ]
+}

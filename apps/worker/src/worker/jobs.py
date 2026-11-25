@@ -20,11 +20,13 @@ Không bao giờ xoá rồi nạp.
 """
 from __future__ import annotations
 
+import atexit
 import hashlib
 import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -78,6 +80,51 @@ def _subprocess_env(db=None) -> dict:
     return env
 
 
+#: Tiến trình con đang chạy (để `kill_children` dừng khi worker thoát — tránh tiến trình mồ côi).
+_LIVE_PROCS: set[subprocess.Popen] = set()
+_LIVE_LOCK = threading.Lock()
+
+
+def _kill_proc(proc: subprocess.Popen) -> None:
+    """Dừng tiến trình con **và cả nhóm tiến trình** của nó (best effort; tiến trình con chạy nhóm riêng)."""
+    if proc.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            import signal
+
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except OSError:  # nhóm đã biến mất / không đủ quyền → thử dừng riêng tiến trình con
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def kill_children() -> int:
+    """Dừng mọi tiến trình con còn chạy (worker dừng: tín hiệu/``atexit``). Trả số tiến trình đã dừng.
+
+    Tiến trình bị dừng được đánh dấu ``_pgnn_shutdown`` ⇒ `_run_proc` ném `worker.scheduler.WorkerShutdown`
+    (không trả mã -9 như lỗi huấn luyện): việc hàng đợi được trả về ``queued`` thay vì ``failed``.
+    """
+    with _LIVE_LOCK:
+        procs = list(_LIVE_PROCS)
+    n = 0
+    for p in procs:
+        if p.poll() is None:
+            p._pgnn_shutdown = True  # type: ignore[attr-defined]
+            _kill_proc(p)
+            n += 1
+    if n:
+        log.warning("đã dừng %d tiến trình con khi worker thoát", n)
+    return n
+
+
+atexit.register(kill_children)
+
+
 def _run_proc(cmd: list[str], *, cwd: Path, env: dict, timeout_s: int, guard=None,
               on_tick=None, tick_s: float = 30.0) -> subprocess.CompletedProcess:
     """Chạy tiến trình con; mất khoá (``guard.lost``) hoặc quá giờ → dừng tiến trình.
@@ -85,32 +132,54 @@ def _run_proc(cmd: list[str], *, cwd: Path, env: dict, timeout_s: int, guard=Non
     Mất khoá → ném `LockLost` (scheduler ghi ``state="lost"``), không để tiến trình con tiếp tục ghi
     song song với instance mới đang giữ khoá. `on_tick` (nếu có) được gọi mỗi `tick_s` giây khi tiến trình
     còn chạy (ví dụ heartbeat của `models`); lỗi trong `on_tick` chỉ ghi log.
+
+    Tiến trình con chạy trong **nhóm tiến trình riêng** (POSIX ``start_new_session``; Windows
+    ``CREATE_NEW_PROCESS_GROUP``) và được đăng ký để `kill_children` (``atexit`` + `worker.__main__` khi nhận
+    SIGINT/SIGTERM) dừng cả nhóm. Worker bị SIGKILL thì không dọn được — fence của `models` vẫn chặn tiến trình
+    mồ côi ghi DB, và mỗi lượt huấn luyện ghi thư mục riêng (`worker.train`).
     """
     from vngis.locks import LockLost
 
+    kw: dict[str, Any] = {}
+    if os.name == "posix":
+        kw["start_new_session"] = True
+    elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     proc = subprocess.Popen(cmd, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace")
-    deadline = time.monotonic() + timeout_s
-    next_tick = time.monotonic() + tick_s
-    while True:
-        try:
-            out, err = proc.communicate(timeout=1.0)
-            return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
-        except subprocess.TimeoutExpired:
-            if guard is not None and guard.lost:
-                proc.kill()
-                proc.communicate()
-                raise LockLost("mất khoá khi đang chạy tiến trình con; đã dừng tiến trình") from None
-            if on_tick is not None and time.monotonic() >= next_tick:
-                next_tick = time.monotonic() + tick_s
-                try:
-                    on_tick()
-                except Exception as e:  # noqa: BLE001 - heartbeat lỗi không dừng tiến trình con
-                    log.warning("on_tick lỗi: %s", e)
-            if time.monotonic() > deadline:
-                proc.kill()
-                out, err = proc.communicate()
-                return subprocess.CompletedProcess(cmd, -9, out, (err or "") + "\n[timeout]")
+                            text=True, encoding="utf-8", errors="replace", **kw)
+    with _LIVE_LOCK:
+        _LIVE_PROCS.add(proc)
+    try:
+        deadline = time.monotonic() + timeout_s
+        next_tick = time.monotonic() + tick_s
+        while True:
+            try:
+                out, err = proc.communicate(timeout=1.0)
+                if getattr(proc, "_pgnn_shutdown", False):
+                    from worker.scheduler import WorkerShutdown
+
+                    raise WorkerShutdown(f"tiến trình con bị dừng khi worker thoát (mã {proc.returncode})")
+                return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+            except subprocess.TimeoutExpired:
+                if guard is not None and guard.lost:
+                    _kill_proc(proc)
+                    proc.communicate()
+                    raise LockLost("mất khoá khi đang chạy tiến trình con; đã dừng tiến trình") from None
+                if on_tick is not None and time.monotonic() >= next_tick:
+                    next_tick = time.monotonic() + tick_s
+                    try:
+                        on_tick()
+                    except Exception as e:  # noqa: BLE001 - heartbeat lỗi không dừng tiến trình con
+                        log.warning("on_tick lỗi: %s", e)
+                if time.monotonic() > deadline:
+                    _kill_proc(proc)
+                    out, err = proc.communicate()
+                    return subprocess.CompletedProcess(cmd, -9, out, (err or "") + "\n[timeout]")
+    finally:
+        if proc.poll() is None:  # ngoại lệ bất ngờ (KeyboardInterrupt…) → không để lại tiến trình con
+            _kill_proc(proc)
+        with _LIVE_LOCK:
+            _LIVE_PROCS.discard(proc)
 
 
 def _tail(proc: subprocess.CompletedProcess, n: int = 2000) -> dict:
@@ -290,13 +359,17 @@ def forecast_run(db, cache=None, *, basins: list[str] | None = None, horizon_h: 
 # ------------------------------------------------------------------ huấn luyện ---
 def train_run(db, cache=None, *, model_version: int | None = None, epochs: int = 50,
               learning_rate: float = 1e-3, station: str | None = None, basin: str | None = None,
+              max_train_samples: int | None = None, max_val_samples: int | None = None,
+              subsample: str = "spread", device: str | None = None,
               guard=None, job_id: str | None = None, repo_root: str | None = None, runner=None) -> dict:
     """Huấn luyện PhaseGNN cho bản ghi `models` ``phasegnn-<model_version>`` (xem `worker.train`)."""
     from worker.train import run_training
 
     root = Path(repo_root) if repo_root else _repo_root()
     return run_training(db, root=root, model_version=model_version, epochs=epochs, learning_rate=learning_rate,
-                        station=station, basin=basin, guard=guard, job_id=job_id, runner=runner)
+                        station=station, basin=basin, guard=guard, job_id=job_id, runner=runner,
+                        max_train_samples=max_train_samples, max_val_samples=max_val_samples,
+                        subsample=subsample, device=device)
 
 
 # ------------------------------------------------------------------ cache -------

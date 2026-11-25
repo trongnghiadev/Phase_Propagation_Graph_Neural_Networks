@@ -47,7 +47,7 @@ from typing import Any, Callable
 
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
-from vngis.job_params import INTERNAL_PARAMS
+from vngis.job_params import INTERNAL_PARAMS, MAX_TRAIN_EPOCHS
 from vngis.locks import LockBusy, LockGuard, LockLost
 
 log = logging.getLogger("worker.scheduler")
@@ -62,6 +62,17 @@ _RESERVED_KWARGS = INTERNAL_PARAMS
 #: đợi. Chỉ ``train`` (bản ghi `models` kẹt ``running`` nếu không chạy lại); việc khác mất khoá được trả về
 #: ngay trong `run_queue_once`, bản ghi ``lost`` cũ của chúng không bị chạy lại bất ngờ.
 REQUEUE_LOST_TYPES = ("train",)
+
+#: Lý do ghi vào `jobs.reclaims`/`models.train_reason` khi việc bị ngắt do worker dừng có trật tự.
+WORKER_SHUTDOWN_REASON = "worker_shutdown"
+
+
+class WorkerShutdown(Exception):
+    """Job bị ngắt vì worker dừng có trật tự (SIGTERM/SIGINT → `worker.jobs.kill_children`), không phải lỗi job.
+
+    `JobRunner.run` ghi ``state="interrupted"``; `Scheduler.run_queue_once` trả việc hàng đợi về ``queued``
+    **không tăng** ``attempts`` (ghi ``reclaims[].reason="worker_shutdown"``).
+    """
 
 
 def _now() -> datetime:
@@ -184,6 +195,12 @@ class JobRunner:
                                       "updated_at": _now()}, fence)
                 log.error("job %s mất khoá giữa chừng: %s", job_id, e)
                 return {"job_id": job_id, "state": "lost", "fence": fence, "error": str(e)}
+            except WorkerShutdown as e:
+                self._record(job_id, {"state": "interrupted", "error": f"{WORKER_SHUTDOWN_REASON}: {e}"[:500],
+                                      "finished_at": _now(), "updated_at": _now()}, fence)
+                log.warning("job %s bị ngắt do worker dừng: %s", job_id, e)
+                return {"job_id": job_id, "state": "interrupted", "fence": fence,
+                        "reason": WORKER_SHUTDOWN_REASON, "error": str(e)}
             except Exception as e:  # noqa: BLE001 - job lỗi không được làm chết scheduler
                 self._record(job_id, {"state": "failed", "error": str(e)[:500],
                                       "finished_at": _now(), "updated_at": _now()}, fence)
@@ -430,7 +447,8 @@ class Scheduler:
                {"$or": [{"started_at": None}, {"started_at": {"$lt": cutoff}}]},
                {"$or": [{"updated_at": None}, {"updated_at": {"$lt": cutoff}}]}]
         stale = [{"state": {"$in": ["claimed", "running"]}}, *old]
-        lost = [{"state": "lost"}, {"type": {"$in": list(REQUEUE_LOST_TYPES)}},
+        # ``interrupted`` sót lại (worker thoát trước khi kịp `requeue_interrupted`) → nhận lại như ``lost``.
+        lost = [{"state": {"$in": ["lost", "interrupted"]}}, {"type": {"$in": list(REQUEUE_LOST_TYPES)}},
                 {"$or": [{"updated_at": None}, {"updated_at": {"$lt": cutoff}}]}]
         queued = {"requested_by": {"$exists": True}}
         stuck = {"$or": [{"$and": stale}, {"$and": lost}]}
@@ -508,6 +526,32 @@ class Scheduler:
             return "failed"
         return None
 
+    def requeue_interrupted(self, job_id: Any, fence: int | None) -> str | None:
+        """Việc hàng đợi bị ngắt do worker dừng có trật tự → ``queued`` **không tăng** ``attempts``.
+
+        Không phải lỗi của việc (worker bị dừng/triển khai lại) ⇒ không tốn lượt; ghi ``reclaims[]`` với
+        ``reason="worker_shutdown"`` và ``last_interrupt``. Chỉ đổi bản ghi còn đúng ``state="interrupted"`` và
+        ``fence`` của lượt này. Trả ``"queued"`` hoặc ``None``.
+        """
+        now = _now()
+        flt: dict[str, Any] = {"_id": job_id, "state": "interrupted", "requested_by": {"$exists": True}}
+        if fence is not None:
+            flt["fence"] = fence
+        note = {"worker": self.instance, "at": now, "reason": WORKER_SHUTDOWN_REASON,
+                "note": "worker dừng có trật tự — trả về hàng đợi (không tính lượt)"}
+        try:
+            r = self.db[JOBS_COLLECTION].update_one(
+                flt, {"$set": {"state": "queued", "worker": None, "updated_at": now, "finished_at": None,
+                               "last_interrupt": {"reason": WORKER_SHUTDOWN_REASON, "at": now}},
+                      "$push": {"reclaims": {"$each": [note], "$slice": -20}}})
+        except Exception as e:  # noqa: BLE001
+            log.warning("không trả được việc %s về hàng đợi sau khi worker dừng: %s", job_id, e)
+            return None
+        if r.modified_count:
+            log.warning("việc %s bị ngắt do worker dừng → trả về hàng đợi", job_id)
+            return "queued"
+        return None
+
     def run_queue_once(self, handlers: dict[str, Callable[..., Any]], *,
                        lock_keys: dict[str, str] | None = None, types: list[str] | None = None,
                        exclude_types: list[str] | None = None, **kwargs: Any) -> dict | None:
@@ -552,7 +596,12 @@ class Scheduler:
             params = validate_job_params(job_type, doc.get("params"))
         except JobParamsError as e:
             log.warning("job %s: tham số bị từ chối: %s", job_id, e)
-            return _fail("invalid_params", str(e))
+            msg = (f"{e} — bị từ chối theo danh sách trắng hiện hành (vngis.job_params); việc giao trước khi "
+                   f"siết giới hạn (ví dụ train.epochs ≤ {MAX_TRAIN_EPOCHS}) cần giao lại với tham số mới")
+            out = _fail("invalid_params", msg)
+            # `train`: bản ghi `models` không được kẹt `queued` (giao lại qua API cần train_state=failed).
+            self._abandon({**doc, "state": "failed"}, msg)
+            return out
         names = _keyword_names(fn)
         call = {k: v for k, v in params.items()
                 if k not in _RESERVED_KWARGS and (names is None or k in names)}
@@ -567,6 +616,8 @@ class Scheduler:
         if out.get("state") == "lost":
             # Mất khoá: trả về hàng đợi (lượt sau fence lớn hơn), hết lượt → failed + abandon hook.
             out["requeue"] = self.requeue_lost(job_id, out.get("fence"), out.get("error"))
+        if out.get("state") == "interrupted":
+            out["requeue"] = self.requeue_interrupted(job_id, out.get("fence"))
         if out.get("state") == "skipped" and out.get("reason") != "job_skipped":
             # Khoá bận: trả việc về hàng đợi (chỉ khi vẫn do instance này nhận). Hàm job tự bỏ qua
             # (`job_skipped`) là trạng thái cuối, không trả về hàng đợi.

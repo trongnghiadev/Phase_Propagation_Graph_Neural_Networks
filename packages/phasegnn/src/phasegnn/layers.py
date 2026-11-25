@@ -36,6 +36,11 @@ DIR_UP = 1
 NUM_DIRS = 2
 
 #: Giới hạn của `δ` (log-hệ số hiệu chỉnh độ trễ) — đề cương 5.2.3: kẹp `δ ∈ [−1,5; 1,5]`.
+#: Chu kỳ sóng triều M2 (giờ) — dùng cho nhúng pha của τ (`PhaseMessage`, `tau_mode="phase"`).
+T_M2_H = 12.4206012
+#: Chế độ tác động của τ lên thông điệp (xem `PhaseMessage`).
+TAU_MODES = ("grid", "phase")
+
 DELTA_MIN = -1.5
 DELTA_MAX = 1.5
 
@@ -149,12 +154,25 @@ class PhaseMessage(nn.Module):
     smooth_steps : số bước làm trơn J.
     delta_h : bước nội bộ Δ (giờ).
     learn_tau : nếu `False` → `τ = τ_phys` cố định (biến thể B4).
+    tau_mode : cách τ tác động lên thông điệp (thêm 25/11/2026).
+
+        * ``"grid"`` (mặc định, hành vi cũ): chỉ dịch chuỗi trạng thái nguồn trên lưới Δ
+          (`PhaseShift`: nội suy giữa hai mốc lưới). Khi τ ≪ Δ (vd. τ ≈ 0.9 h, Δ = 12 h)
+          phép dịch gần như không đổi gì ⇒ gradient theo δ rất yếu (δ ≈ 0 sau huấn luyện).
+        * ``"phase"``: như ``"grid"`` **cộng** một nhúng pha liên tục của τ:
+          ``P · [sin, cos](2π τ / T_M2), [sin, cos](2π τ / 24 h)`` (`P`: tuyến tính 4 → node_dim).
+          Với sóng bán nhật triều, trễ τ tương đương quay pha M2 một góc 2πτ/T_M2; nhúng
+          này cho trạm đích biết độ lệch pha tích luỹ dọc cạnh, liên tục và khả vi theo τ ở
+          mọi độ lớn của τ (không phụ thuộc Δ).
     """
 
     def __init__(self, node_dim: int, edge_dim: int, q_dim: int = 0, hidden: int = 32,
                  smooth_steps: int = DEFAULT_SMOOTH_STEPS, delta_h: float = DEFAULT_DELTA_H,
-                 learn_tau: bool = True) -> None:
+                 learn_tau: bool = True, tau_mode: str = "grid") -> None:
         super().__init__()
+        if tau_mode not in TAU_MODES:
+            raise ValueError(f"tau_mode phải là một trong {TAU_MODES}, nhận {tau_mode!r}")
+        self.tau_mode = tau_mode
         self.node_dim = int(node_dim)
         self.edge_dim = int(edge_dim)
         self.q_dim = int(q_dim)
@@ -179,6 +197,18 @@ class PhaseMessage(nn.Module):
         self.smooth_logits = nn.Parameter(torch.zeros(max(self.smooth_steps, 1)))
 
         self.shifter = PhaseShift(delta_h=self.delta_h)
+
+        if self.tau_mode == "phase":
+            # nhúng pha của τ (4 kênh → node_dim); khởi tạo nhỏ, khác 0 để δ có gradient ngay
+            self.phase_proj = nn.Linear(4, self.node_dim, bias=False)
+            nn.init.normal_(self.phase_proj.weight, std=0.1)
+
+    def phase_embedding(self, tau: Tensor) -> Tensor:
+        """``tau`` (giờ, dạng bất kỳ ``[...]``) → nhúng pha ``[..., node_dim]`` (chế độ ``phase``)."""
+        a = 2.0 * math.pi * tau / T_M2_H
+        b = 2.0 * math.pi * tau / 24.0
+        feats = torch.stack([torch.sin(a), torch.cos(a), torch.sin(b), torch.cos(b)], dim=-1)
+        return self.phase_proj(feats)
 
     # -- trạng thái nội bộ -------------------------------------------------
     def effective_tau(self, tau_phys: Tensor, edge_dir: Tensor, delta: Tensor) -> Tensor:
@@ -241,6 +271,8 @@ class PhaseMessage(nn.Module):
             shifted = self._shift_per_edge(h[src], tau_j)          # [E, T, node_dim]
             acc = acc + w[j] * shifted
         h_tilde = acc
+        if self.tau_mode == "phase":
+            h_tilde = h_tilde + self.phase_embedding(tau)          # [E, T, node_dim]
 
         # --- biên độ γ ------------------------------------------------------
         gamma = torch.nn.functional.softplus(self.gamma_raw)[edge_dir.clamp(0, NUM_DIRS - 1)]
@@ -288,6 +320,8 @@ class PhaseMessage(nn.Module):
             shifted = self._shift_per_edge_batch(h_src, tau_j)    # [B, E, T, node_dim]
             acc = acc + w[j] * shifted
         h_tilde = acc
+        if self.tau_mode == "phase":
+            h_tilde = h_tilde + self.phase_embedding(tau)          # [B, E, T, node_dim]
 
         gamma = torch.nn.functional.softplus(self.gamma_raw)[edge_dir.clamp(0, NUM_DIRS - 1)]
         gamma = gamma.view(1, e, 1, 1)

@@ -22,8 +22,9 @@ from pymongo import ReturnDocument
 
 from api.deps import UserContext, rate_limit, require
 from api.permissions import P
-from api.router.common import (acquire_guard, attach_actor_labels, clean, guard_check,
-                               parse_day, parse_dt, qc_http_error, to_vn_date, to_vn_datetime)
+from api.router.common import (acquire_guard, attach_actor_labels, clean, clean_station, guard_check,
+                               parse_day, parse_dt, qc_http_error, to_lonlat, to_point, to_vn_date,
+                               to_vn_datetime)
 from api.state import state
 
 log = logging.getLogger("api.stations")
@@ -68,7 +69,7 @@ async def list_stations(kind: str | None = None, q: str | None = None,
     key = cache.versioned_key("st", STATIONS, kind or "all", q or "", limit)
 
     def compute():
-        return clean(list(db[STATIONS].find(flt).sort("code", 1).limit(limit)))
+        return clean_station(list(db[STATIONS].find(flt).sort("code", 1).limit(limit)))
 
     items = await _cache_get_or_compute(key, "stations", compute)
     return {"total": db[STATIONS].count_documents(flt), "count": len(items), "items": items}
@@ -84,7 +85,7 @@ async def get_station(code: str):
         doc = state.db[STATIONS].find_one({"code": code})
         if doc is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"không có trạm {code!r}")
-        return clean(doc)
+        return clean_station(doc)
 
     return await _cache_get_or_compute(key, "stations", compute)
 
@@ -99,6 +100,13 @@ async def patch_station(code: str, body: StationPatch,
     changes = body.model_dump(exclude_none=True, exclude={"reason", "version"})
     if not changes:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="không có trường nào để sửa")
+    # `location` nhận mảng `[lon, lat]` nhưng MongoDB lưu GeoJSON Point (index 2dsphere).
+    if "location" in changes:
+        point = to_point(changes["location"])
+        if point is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                detail="location phải là mảng [lon, lat]")
+        changes["location"] = point
     db = state.db
     cur = db[STATIONS].find_one({"code": code})
     if cur is None:
@@ -119,7 +127,7 @@ async def patch_station(code: str, body: StationPatch,
                                         "current": (actual or {}).get("version")})
         _invalidate("stations")
         _audit("stations", code, code, changes, body.reason, user.actor)
-        return clean(res)
+        return clean_station(res)
     finally:
         guard.release()
 

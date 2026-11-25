@@ -10,6 +10,12 @@ qua seed (`seed_mean`).
   `phasegnn-abl` (TB 3 seed), `phasegnn-long` (seed 0), B0, B_harm, B_KTTV — Holm trên 5.
 * ``--set v2`` → `results/E2/daypeak_tests_spread_v2.csv`: tham chiếu `phasegnn-spread-v2` (TB 3 seed) vs
   `phasegnn-spread` (v1), B0, B_harm, B_KTTV — Holm trên 4.
+* ``--set v3`` → `results/E2/daypeak_tests_v3.csv`: tham chiếu `phasegnn-v3` (đồ thị con v3 + `tau_mode=phase`,
+  TB 3 seed) vs `phasegnn-spread-v2`, `B5a-v3`, `B5b-v3`, B0, B_harm, B_KTTV — Holm trên 6.
+* ``--set diag`` → `results/E2/daypeak_tests_diag.csv`: bảng chẩn đoán đồ thị × τ — tham chiếu
+  `phasegnn-spread-v2` (v2 + grid, TB 3 seed) vs `phasegnn-v2phase`, `phasegnn-v3grid`, `phasegnn-v3` — **Holm trên 3**
+  (họ = 3 cấu hình phasegnn so với v2 + grid; không gồm mô hình cơ sở). Cặp v3 vs v2 cũng có trong ``--set v3`` nhưng
+  ở đó Holm trên 6 ⇒ cùng p thô, p_Holm khác.
 
 Chạy (Docker, gốc repo):
 
@@ -53,6 +59,19 @@ SETS: dict[str, dict] = {
                      "B0": [f"{BASE}/B0/predictions_test.csv"],
                      "B_harm": [f"{BASE}/B_harm/predictions_test.csv"],
                      "B_KTTV": [f"{BASE}/B_KTTV/predictions_test.csv"]}},
+    "v3": {"out": f"{E2}/daypeak_tests_v3.csv", "ref": "phasegnn-v3",
+           "preds": {"phasegnn-v3": _seeds("phasegnn_v3"),
+                     "phasegnn-spread-v2": _seeds("phasegnn_spread_v2"),
+                     "B5a-v3": _seeds("B5a_v3"),
+                     "B5b-v3": _seeds("B5b_v3"),
+                     "B0": [f"{BASE}/B0/predictions_test.csv"],
+                     "B_harm": [f"{BASE}/B_harm/predictions_test.csv"],
+                     "B_KTTV": [f"{BASE}/B_KTTV/predictions_test.csv"]}},
+    "diag": {"out": f"{E2}/daypeak_tests_diag.csv", "ref": "phasegnn-spread-v2",
+             "preds": {"phasegnn-spread-v2": _seeds("phasegnn_spread_v2"),
+                       "phasegnn-v2phase": _seeds("phasegnn_v2phase"),
+                       "phasegnn-v3grid": _seeds("phasegnn_v3grid"),
+                       "phasegnn-v3": _seeds("phasegnn_v3")}},
 }
 
 
@@ -91,15 +110,15 @@ def run_set(name: str, obs: pd.DataFrame, dm_lag: int = 4) -> pd.DataFrame:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="E2 – kiểm định ghép đỉnh ngày (spread, v2)")
-    ap.add_argument("--set", choices=["spread", "v2", "all"], default="all")
+    ap = argparse.ArgumentParser(description="E2 – kiểm định ghép đỉnh ngày (spread, v2, v3, diag)")
+    ap.add_argument("--set", choices=["spread", "v2", "v3", "diag", "all"], default="all")
     ap.add_argument("--dm-lag", type=int, default=4)
     args = ap.parse_args(argv)
     from phasegnn.data import default_paths, load_g5  # noqa: PLC0415
     from phasegnn.evaluate import observed_daily  # noqa: PLC0415
 
     obs = observed_daily(load_g5(paths=default_paths()))
-    for name in (["spread", "v2"] if args.set == "all" else [args.set]):
+    for name in (["spread", "v2", "v3", "diag"] if args.set == "all" else [args.set]):
         run_set(name, obs, args.dm_lag)
     return 0
 

@@ -131,7 +131,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         stop.wait()
     finally:
-        sched.shutdown()
+        from worker.jobs import kill_children
+
+        # Tiến trình con (huấn luyện…) chạy nhóm riêng → dừng chủ động, không để mồ côi. Tiến trình bị dừng
+        # được đánh dấu ⇒ job ném `WorkerShutdown` (không ghi `failed` mã -9): việc hàng đợi về `queued` không
+        # tính lượt, `models.train_state` về `queued` có fence. Chờ các luồng job ghi xong trước khi thoát.
+        kill_children()
+        sched.shutdown(wait=True)
     return 0
 
 

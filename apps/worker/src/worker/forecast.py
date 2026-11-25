@@ -220,7 +220,11 @@ def phasegnn_predictor(checkpoint: Path, *, run_date: str | None = None, station
     paths = default_paths(Path(data_root) if data_root else None)
     df = load_g5(paths=paths)
     graph = load_graph(paths=paths)
-    model, tcfg, _ = load_checkpoint(Path(checkpoint))
+    model, tcfg, _ = load_checkpoint(Path(checkpoint))  # luôn nạp lên CPU (map_location="cpu")
+    from phasegnn.device import resolve_device
+
+    # Mặc định CPU (dự báo một ngày rất nhẹ); `PGNN_FORECAST_DEVICE=auto|cuda` để dùng GPU nếu có.
+    model = model.to(resolve_device(os.getenv("PGNN_FORECAST_DEVICE") or "cpu"))
     seed_everything(tcfg.seed)
     datasets = build_datasets(df, t_in=tcfg.t_in, t_out=tcfg.t_out,
                               holdout_stations=tuple(tcfg.holdout_stations or ()))
