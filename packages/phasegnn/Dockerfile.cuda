@@ -1,0 +1,45 @@
+# Môi trường chạy PhaseGNN trên GPU NVIDIA (CUDA) — cùng mã nguồn với `Dockerfile` (bản CPU),
+# chỉ khác wheel torch.
+#
+#   docker build -f packages/phasegnn/Dockerfile.cuda -t phasegnn:cuda .
+#   docker run --rm --gpus all phasegnn:cuda \
+#       python -c "import torch;print(torch.cuda.is_available(), torch.cuda.get_arch_list())"
+#
+# Chọn torch==2.11.0+cu126:
+#   * wheel cu126/cu128/cu130 của torch 2.11 đều biên dịch sẵn sm_75 (Turing — RTX 20xx, GTX 16xx);
+#     theo `.ci/manywheel/build_cuda.sh` nhánh release/2.11: danh sách chung 7.5;8.0;8.6;9.0;10.0,
+#     cu126 thêm 5.0;6.0;7.0, cu128 thêm 12.0. Không cần JIT PTX cho sm_75.
+#   * cu126 cần driver thấp nhất trong ba bản. Driver NVIDIA trên **Windows** (WSL2 dùng driver của
+#     Windows, KHÔNG cài driver trong WSL/container): khuyến nghị ≥ 560.76 (CUDA 12.6 GA); tối thiểu lý
+#     thuyết ≥ 528.33 (tương thích phiên bản phụ CUDA 12.x). Driver 46x (CUDA 11.2) KHÔNG chạy được.
+#     Muốn dùng cu128 thì cần ≥ 570.65 (Windows).
+#   * GPU trong Docker Desktop cần backend WSL2 + Windows 10 21H2/Windows 11 + kernel WSL ≥ 5.10.43
+#     (`wsl --update`). Docker Desktop tự có NVIDIA container runtime, không cài thêm gì trong WSL.
+#
+# Image lớn (nhiều GB do các gói nvidia-* đi kèm wheel CUDA); bản CPU `phasegnn:local` vẫn dùng cho test.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    TORCH_HOME=/work/.cache/torch \
+    PYTHONPATH=/work/packages/phasegnn/src \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --upgrade pip \
+ && pip install \
+      "torch==2.11.0" --index-url https://download.pytorch.org/whl/cu126 \
+ && pip install \
+      "numpy>=1.26" "pandas>=2.1" "pyarrow>=14" "scikit-learn>=1.3" \
+      "pytest>=8" "pyyaml>=6" "pymongo>=4.10"
+
+# Phụ thuộc của vngis + worker: để image dùng luôn cho dịch vụ `worker-gpu` (compose, profile gpu).
+RUN pip install "redis>=5.2" "pydantic>=2.9" "apscheduler>=3.10"
+
+WORKDIR /work
+CMD ["python", "-c", "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gpu', torch.cuda.is_available())"]

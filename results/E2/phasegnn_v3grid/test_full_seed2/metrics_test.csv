@@ -1,0 +1,2 @@
+model,mae_peak_m,mae_hour_h,n_records
+phasegnn-v3grid-s2,0.1852468656619651,3.3666050717934852,76050

@@ -8,6 +8,105 @@
 > Huấn luyện bằng `python -m phasegnn.train` (như lần trước), **không** qua `scripts/run_experiments.py`
 > (mặc định của script đó khác: `hidden_dim` 32, `delta_h` 12.42, 3 seed → không so được với số cũ).
 
+## Đồ thị con v3 + τ `phase` (`*_v3`, 25/11/2026) — **kết quả âm: v3 kém v2**
+
+**Thay đổi code** (`packages/phasegnn`; v3 chỉ bật bằng `--subgraph-version 3`, **mặc định lượt huấn luyện mới là v2 +
+`tau_mode="phase"`** — `SUBGRAPH_VERSION = 2`, xem kết luận 4; checkpoint cũ ⇒ v1 + `grid`, dự báo không đổi — đã kiểm
+tra lại `phasegnn_abl` seed 1, sai khác 0.0):
+
+* **Đồ thị con v3** (`--subgraph-version 3`): phát hiện thông điệp PhaseGNN chỉ đi **một bước** (tính một lần từ mã hoá
+  đầu vào `h_seq` của nút nguồn, không lặp theo trạng thái) nên ở v1/v2 trạm chỉ nhận thông điệp từ đoạn sông kề bên —
+  nút không có số liệu. v3 **rút gọn đường đi**: chỉ giữ trạm, nút biển và mọi hồ chứa ở thượng nguồn (BFS theo cạnh
+  `up` từ trạm), nối thẳng vào trạm; τ = tổng τ dọc đường, đặc trưng cạnh gộp (độ dài tổng, độ dốc/celerity trung bình).
+  Không thêm nút đoạn sông thượng nguồn: với thông điệp một bước, các nút đó không có số liệu nên không đem thông tin.
+* **Bố cục đặc trưng v3**: nút biển nhận `astro_h1/2`, `astro_t1/2_h` **theo tên cột** (v1/v2 lấy nhầm cột 12:14 =
+  `res_turbine_m3s`, `rain_mm` làm độ cao và `astro_h1/2` làm giờ; với VUNG_TAU — trạm trùng nút biển — còn ghi đè quan
+  trắc của trạm); nút hồ nhận `res_inflow/spill/turbine_m3s`. **Giới hạn:** G5 chỉ có **tổng** các hồ theo ngày
+  (`build_training_set.py`), nên mọi nút hồ nhận cùng chuỗi, chỉ khác τ và đặc trưng tĩnh. Đặc trưng giờ (`t_peak*`) vẫn
+  bị z-score trước khi nội suy lên lưới (chung cho mọi phiên bản; chưa sửa).
+* **τ `phase`** (`--tau-mode phase`): ngoài dịch trên lưới Δ, thông điệp cộng nhúng pha liên tục
+  `P·[sin, cos](2πτ/T_M2), [sin, cos](2πτ/24 h)` (T_M2 = 12.42 h, `P` tuyến tính 4 → 64). Chọn cách này vì không đổi Δ
+  (giữ tốc độ CPU và so được với v1/v2) và cho gradient theo δ ở mọi độ lớn τ.
+
+**Đồ thị v3 thật** (số nút / cạnh; cạnh `down` vào trạm; τ vào trạm, giờ):
+
+| Trạm | nút | cạnh | `down` → trạm | τ `up` biển → trạm | τ `down` hồ → trạm |
+|---|---:|---:|---:|---|---|
+| BEN_LUC | 2 | 2 | **0** | 5.4 | — |
+| BIEN_HOA | 5 | 8 | 3 | 10.3 | 23.6, 18.0, 3.9 |
+| DAU_TIENG | 2 | 2 | **0** (trạm = nút hồ Dầu Tiếng) | 35.4 | — |
+| GO_DAU_HA | 2 | 2 | **0** | 19.3 | — |
+| NHA_BE | 6 | 10 | 4 | 3.8 | 25.4, 31.7, 26.1, 12.0 |
+| PHU_AN | 3 | 4 | 1 | 6.2 | 21.9 |
+| TAN_AN | 2 | 2 | **0** | 6.1 | — |
+| THU_DAU_MOT | 3 | 4 | 1 | 9.8 | 14.8 |
+| VUNG_TAU | 5 | 8 | 4 | — (trạm = nút biển) | 28.0, 34.3, 28.7, 14.5 |
+
+Trạm không có cạnh `down` vào: BEN_LUC, TAN_AN, GO_DAU_HA (không có hồ ở thượng nguồn trong đồ thị), DAU_TIENG.
+
+**Cấu hình:** như `*_spread_v2` (spread 1 200 / 300, 12 epoch, patience 4, `hidden_dim` 64, Δ = 12 h, seed 0/1/2),
+`--subgraph-version 3 --tau-mode phase`. **Thiết bị: CPU** (`phasegnn:local`, 1 luồng; cùng thiết bị với v1/v2 nên
+so được trực tiếp). 15 lượt, 7 song song, ≈ 50–70 s/epoch, xong 16:35. Hai lượt chẩn đoán (phasegnn, 3 seed, CPU):
+`phasegnn_v3grid` (v3 + `grid`) và `phasegnn_v2phase` (v2 + `phase`); thư mục `results/E2/phasegnn_{v3grid,v2phase}/`.
+
+**MAE (m) TB ± sd 3 seed** (`ablation_v3_mean_sd.csv`, `ablation_v3_by_seed.csv`):
+
+| Mô hình | v3 + phase | v2 (`*_spread_v2`) | MAE Δt v3 (h) | phasegnn-v3 vs biến thể: diff, DM p_Holm (`ablation_v3_tests.csv`) |
+|---|---|---|---|---|
+| phasegnn | 0.161 ± 0.003 | **0.146 ± 0.002** | 3.84 | — |
+| B4 τ cố định | 0.159 ± 0.002 | 0.146 ± 0.003 | 3.84 | +0.0016, 4e-10 (B4 tốt hơn) |
+| B5a chỉ `up` (biển) | **0.158 ± 0.002** | 0.145 ± 0.004 | 3.82 | +0.0042, 2e-12 (B5a tốt hơn) |
+| B5b chỉ `down` (hồ) | 0.174 ± 0.004 | 0.172 ± 0.001 | 4.21 | −0.0117, 3e-09 |
+| B3 GraphSAGE | 0.168 ± 0.005 | 0.161 ± 0.003 | 3.93 | −0.0063, 2e-04 |
+
+**Ghép đỉnh ngày** (`daypeak_tests_v3.csv`, `scripts/e2_daypeak_tests.py --set v3`, TB 3 seed, Holm trên 6):
+phasegnn-v3 vs phasegnn-spread-v2 0.161 / 0.145 m (+0.016, DM p_Holm = 1e-25); vs B0 persistence 0.160 / 0.166
+(p_Holm = **0.35**, không còn tốt hơn persistence); vs B_KTTV 0.139 / 0.081 (1e-28); vs B_harm 0.161 / 0.244.
+
+**Chẩn đoán (tách hiệu ứng đồ thị và τ)** — TB 3 seed, 9 trạm, ghép đỉnh ngày, tham chiếu phasegnn-spread-v2
+(`daypeak_tests_diag.csv`, `scripts/e2_daypeak_tests.py --set diag`, chỉ đọc dự báo có sẵn). **Họ Holm của bảng: 3
+phép so** (v2phase, v3grid, v3 cùng so với v2 + grid; không gồm mô hình cơ sở). Vì vậy v3 vs v2 ở đây p_Holm = 6e-26
+(p thô 2.1e-26 × 3) còn ở `daypeak_tests_v3.csv` là 1e-25 (cùng p thô × 6, họ 6 phép so có tham chiếu phasegnn-v3) —
+cùng một kiểm định DM, khác họ hiệu chỉnh:
+
+| Cấu hình | MAE TB ± sd (m) | MAE TB-seed | DM p_Holm vs v2 |
+|---|---|---|---|
+| v2 + grid (`phasegnn_spread_v2`) | 0.146 ± 0.002 | 0.1449 | — |
+| **v2 + phase** (`phasegnn_v2phase`) | **0.144 ± 0.002** | **0.1428** | 0.013 (phase tốt hơn 0.002 m) |
+| v3 + grid (`phasegnn_v3grid`) | 0.160 ± 0.003 | 0.1590 | 3e-19 |
+| v3 + phase (`phasegnn_v3`) | 0.161 ± 0.003 | 0.1608 | 6e-26 |
+
+MAE theo trạm (TB seed, v2 → v3): v3 kém hơn ở 8/9 trạm, nặng nhất VUNG_TAU 0.155 → 0.221, TAN_AN 0.171 → 0.188,
+NHA_BE 0.132 → 0.143, PHU_AN 0.123 → 0.133; kể cả trạm không có hồ (BEN_LUC 0.148 → 0.155, đồ thị chỉ còn trạm + biển).
+
+**τ học được v3** (`tau_summary_v3.csv`): δ nay **thực sự rời 0** — phasegnn |δ| 0.02–0.10 trên cạnh `up` (τ_eff/τ_phys
+p10 0.77–0.95, τ biển → trạm giảm 35.3 → 31.6–34.4 h), 0.004–0.017 trên cạnh `down`; không chạm biên kẹp.
+
+**Kết luận (trung thực):**
+
+1. **τ:** với `tau_mode = phase`, δ học được (khác hẳn v1/v2 với |δ| < 0.001), và trên đồ thị v2 cho cải thiện nhỏ
+   nhưng có ý nghĩa: −0.002 m (DM p_Holm = 0.013). Trên v3, phasegnn (τ học) **kém** B4 (τ cố định) 0.0016 m ⇒ chưa có
+   bằng chứng τ học được giúp khi đồ thị đúng nghĩa vật lý hơn. Cải thiện ở v2 nhỏ, mới 3 seed.
+2. **Đồ thị v3 (nối biển/hồ thẳng vào trạm) làm dự báo kém đi rõ** (+0.015 m so với v2, ở 8/9 trạm, mất lợi thế so với
+   persistence **theo ghép đỉnh ngày**: p_Holm = 0.35). *Dẫn chiếu chéo:* `results/evaluation/README.md` lượt 4 lại báo
+   phasegnn-v3 vẫn hơn B0_py persistence (p_Holm = 0.005). Hai số không mâu thuẫn mà do **hai cách ghép khác nhau**:
+   ở đây sai số so với **đỉnh ngày** quan trắc (`observed_daily`), ghép theo `(station, issued_date, target_date,
+   lead_day)`, DM trên chuỗi chênh lệch TB theo ngày phát hành (845 ngày), Holm trong họ 6 phép so của
+   `daypeak_tests_v3.csv`; `evaluation.R` ghép theo **từng đỉnh** `(station, target_date, peak_idx, issued_date,
+   lead_day)` (nhiều cặp hơn, gồm cả đỉnh thứ hai trong ngày), Holm trên 66 cặp của 12 mô hình. Chênh lệch TB cùng dấu
+   (v3 nhỉnh hơn persistence ≈ 0.006–0.009 m), chỉ mức ý nghĩa khác ⇒ lợi thế của v3 so với persistence là **mong manh,
+   phụ thuộc cách ghép**. Nguyên nhân chưa xác định; giả thuyết: (i) bỏ các nút trung gian làm mất thông điệp "tĩnh + đồng hồ"
+   mà v2 dùng như một kênh phụ có ích (B5b v2 — không có thông điệp — kém 0.026 m); (ii) tín hiệu triều đưa vào nút biển
+   (`astro_*`) đã có sẵn trong đặc trưng của trạm, lại qua phép nội suy với giờ bị z-score ⇒ thêm nhiễu; (iii) VUNG_TAU
+   đổi mạnh nhất vì v1/v2 ghi đè quan trắc bằng cột sai còn v3 nhận 4 cạnh hồ — cần xem riêng.
+3. **Chiều dòng chảy / hồ chứa:** lần đầu ablation đo được. Trong v3, B5a (chỉ biển) **tốt hơn** phasegnn (−0.004 m,
+   p_Holm = 2e-12) ⇒ thêm thông điệp từ hồ chứa **làm hại** chứ không giúp; B5b (chỉ hồ) kém nhất (0.174, ≈ v2-B5b không
+   có đồ thị 0.172) ⇒ thông điệp xả hồ dạng hiện tại không mang thông tin dùng được. Giới hạn: chỉ có **tổng** xả các
+   hồ (cùng một chuỗi cho mọi nút hồ, và trùng đặc trưng `res_*` sẵn có ở trạm); cần số liệu từng hồ trong G5.
+4. **Đã quyết định:** mặc định code cho lượt huấn luyện mới là **v2 + `tau_mode="phase"`** (`SUBGRAPH_VERSION = 2`,
+   `--tau-mode phase`; cấu hình tốt nhất của chẩn đoán, 0.1428 m). v3 chỉ dùng khi chỉ định `--subgraph-version 3`,
+   không làm mặc định cho đến khi sửa bố cục đặc trưng (giờ không z-score, số liệu từng hồ).
+
 ## Ablation `spread` với đồ thị con v2 (`*_spread_v2`, 25/11/2026) — có cạnh `down`
 
 **Sửa lỗi.** `build_station_subgraph(version=2)` (mặc định cho lượt huấn luyện mới; `TrainConfig.subgraph_version`,
@@ -266,6 +365,8 @@ Val (best): phasegnn_d12 0.308 → 0.299 m; B3_d12 0.268 → 0.301; phasegnn_lon
 `<mô hình>_spread_v2/` : như `_spread`, đồ thị con v2 (tên `<mô hình>-spread-v2`); `ablation_spread_v2_*.csv`,
 `tau_summary_v2.csv`; `daypeak_tests_spread.csv`, `daypeak_tests_spread_v2.csv` (ghép đỉnh ngày 9 trạm,
 `scripts/e2_daypeak_tests.py`).
+`<mô hình>_v3/` (đồ thị v3 + τ phase, tên `<mô hình>-v3`), `phasegnn_v3grid/`, `phasegnn_v2phase/` (chẩn đoán);
+`ablation_v3_*.csv`, `tau_summary_v3.csv`, `daypeak_tests_v3.csv`.
 `<mô hình>_abl/` : `checkpoint_seed{0,1,2}.pt`, `model_record_seed*.json`, `train_log_seed*.json`, `test_full_seed*/` (chấm từng seed), `test_full_seedmean/` (dự báo trung bình seed).
 `<mô hình>/` : `checkpoint_seed0.pt`, `model_record_seed0.json`, `train_log_seed0.json`, `metrics_test*.csv/json`
 (300 ngày); `<mô hình>/test_full/` : chấm toàn bộ test. `predictions_test.csv`, `*.pt`, `logs/` không commit.
@@ -278,8 +379,9 @@ Lưu ý: `phasegnn_long/predictions_test.csv` (300 ngày) mang tên `phasegnn-v1
 R="$(pwd -W)"   # Git Bash; cần MSYS_NO_PATHCONV=1
 MSYS_NO_PATHCONV=1 docker run --rm -v "$R:/work" -w /work -e PYTHONPATH=/work/packages/phasegnn/src phasegnn:local \
   python -X utf8 -m phasegnn.train --variant phasegnn --epochs 3 --delta-h 12 --max-train-samples 300 \
-    --max-val-samples 100 --out-dir results/E2/phasegnn_d12 --no-mlflow --no-register
-# long: --epochs 12 --max-train-samples 1200 --max-val-samples 300 --patience 4 --out-dir results/E2/phasegnn_long
+    --max-val-samples 100 --subgraph-version 1 --tau-mode grid --out-dir results/E2/phasegnn_d12 --no-mlflow --no-register
+# long: --epochs 12 --max-train-samples 1200 --max-val-samples 300 --patience 4 --subgraph-version 1 --tau-mode grid
+#       --out-dir results/E2/phasegnn_long
 MSYS_NO_PATHCONV=1 docker run --rm -v "$R:/work" -w /work -e PYTHONPATH=/work/packages/phasegnn/src phasegnn:local \
   python -X utf8 packages/phasegnn/scripts/evaluate_checkpoint.py --checkpoint results/E2/phasegnn_d12/checkpoint_seed0.pt \
     --split test --out-dir results/E2/phasegnn_d12/test_full          # thêm --max-days 300 để so với số cũ
@@ -289,7 +391,15 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$R:/work" -w /work -e PYTHONPATH=/work/pa
 
 (Lặp lại cho `--variant B3|B4|B5a|B5b`; với `long` thêm `--model-name phasegnn-long|B3-long` khi chấm.)
 
-**Ablation 3 seed (`*_abl`).** Huấn luyện như `long` với `--seed 0|1|2 --out-dir results/E2/<mô hình>_abl`;
+**Cờ đồ thị con / τ của từng lượt** (đọc từ `train_config` trong `model_record_seed0.json`; lượt cũ không có trường
+`subgraph_version`/`tau_mode` ⇒ v1 + `grid`). Mặc định hiện tại là v2 + `phase`, nên **lượt cũ phải ghi rõ cờ** mới tái
+lập được số: `*_d12`, `*_long`, `*_abl`, `*_spread` → `--subgraph-version 1 --tau-mode grid`; `*_spread_v2` →
+`--subgraph-version 2 --tau-mode grid`; `*_v3` → `--subgraph-version 3 --tau-mode phase`; `phasegnn_v3grid` →
+`--subgraph-version 3 --tau-mode grid`; `phasegnn_v2phase` → `--subgraph-version 2 --tau-mode phase` (= mặc định). Mọi
+lượt trong `results/E2` đều `device = cpu` (mặc định của `--device`).
+
+**Ablation 3 seed (`*_abl`).** Huấn luyện như `long` (gồm `--subgraph-version 1 --tau-mode grid`) với `--seed 0|1|2
+--out-dir results/E2/<mô hình>_abl`;
 chấm `evaluate_checkpoint.py --checkpoint results/E2/<mô hình>_abl/checkpoint_seed<k>.pt --split test
 --model-name <mô hình>-abl-s<k> --out-dir results/E2/<mô hình>_abl/test_full_seed<k>`; rồi tổng hợp:
 
@@ -300,7 +410,8 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$R:/work" -w /work -e PYTHONPATH=/work/pa
 Ghi `ablation_by_seed.csv`, `ablation_mean_sd.csv`, `ablation_tests.csv` và
 `<mô hình>_abl/test_full_seedmean/predictions_test.csv` (tên `<mô hình>-abl`, đưa vào `evaluation.R`).
 
-**Ablation `spread` (`*_spread`).** Như trên, thêm `--subsample spread`, `--out-dir results/E2/<mô hình>_spread`,
+**Ablation `spread` (`*_spread`).** Như trên (`--subgraph-version 1 --tau-mode grid`), thêm `--subsample spread`,
+`--out-dir results/E2/<mô hình>_spread`,
 chấm với `--model-name <mô hình>-spread-s<k> --out-dir results/E2/<mô hình>_spread/test_full_seed<k>`, rồi:
 
 ```bash
@@ -313,7 +424,13 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$R:/work" -w /work -e PYTHONPATH=/work/pa
     results/E2/phasegnn_abl/checkpoint_seed{0,1,2}.pt
 ```
 
-**Đồ thị con v2 (`*_spread_v2`).** Như `*_spread`, thêm `--subgraph-version 2` (mặc định), `--out-dir
+**Đồ thị con v2 (`*_spread_v2`).** Như `*_spread`, thay `--subgraph-version 2 --tau-mode grid`, `--out-dir
 results/E2/<mô hình>_spread_v2`, `--model-name <mô hình>-spread-v2-s<k>`; tổng hợp với `--suffix _spread_v2
 --out-prefix ablation_spread_v2`; τ: `scripts/tau_summary.py --out results/E2/tau_summary_v2.csv
 results/E2/{phasegnn,B5a,B5b}_spread_v2/checkpoint_seed{0,1,2}.pt`.
+
+**v3 (`*_v3`).** Như `*_spread_v2`, thay `--subgraph-version 3 --tau-mode phase` (v3 không phải mặc định), `--out-dir
+results/E2/<mô hình>_v3`, `--model-name <mô hình>-v3-s<k>`; tổng hợp `--suffix _v3 --out-prefix ablation_v3`;
+`scripts/e2_daypeak_tests.py --set v3`; τ: `scripts/tau_summary.py --out results/E2/tau_summary_v3.csv
+results/E2/{phasegnn,B5a,B5b}_v3/checkpoint_seed{0,1,2}.pt`. Chẩn đoán: `--subgraph-version 3 --tau-mode grid`
+(`phasegnn_v3grid`), `--subgraph-version 2 --tau-mode phase` (`phasegnn_v2phase`).

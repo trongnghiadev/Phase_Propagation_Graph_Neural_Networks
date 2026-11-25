@@ -84,3 +84,34 @@ def test_train_model_version_la_so_nguyen():
     for bad in ("abc", "v0", 0, True):
         with pytest.raises(JobParamsError):
             validate_job_params("train", {"model_version": bad})
+
+
+def test_train_gioi_han_mau_va_epochs():
+    from vngis.job_params import MAX_TRAIN_EPOCHS
+
+    ok = validate_job_params("train", {"epochs": 5, "max_train_samples": 2000, "max_val_samples": 400,
+                                       "subsample": "head"})
+    assert ok == {"epochs": 5, "max_train_samples": 2000, "max_val_samples": 400, "subsample": "head"}
+    assert "subsample" not in validate_job_params("train", {"max_train_samples": 100}), "mặc định do worker"
+    for bad in ({"max_train_samples": 99}, {"max_train_samples": 50_001}, {"max_val_samples": 10},
+                {"subsample": "all"}, {"max_train_samples": "1e9"}, {"epochs": MAX_TRAIN_EPOCHS + 1}):
+        with pytest.raises(JobParamsError):
+            validate_job_params("train", bad)
+
+
+def test_uoc_luong_thoi_gian_huan_luyen(monkeypatch):
+    from vngis.job_params import estimate_train_seconds, train_timeout_s
+
+    monkeypatch.delenv("PGNN_TRAIN_SEC_PER_SAMPLE", raising=False)
+    full = estimate_train_seconds({"epochs": 50}, timeout_s=6 * 3600)
+    assert 1400 <= full["per_epoch_s"] <= 1600, "toàn bộ ≈ 25 phút/epoch"
+    assert full["verdict"] == "may_exceed", "50 epoch toàn bộ vượt 6 h nếu không dừng sớm"
+    assert estimate_train_seconds({"epochs": 200}, timeout_s=3600)["verdict"] == "exceeds"
+    small = estimate_train_seconds({"epochs": 50, "max_train_samples": 1000, "max_val_samples": 200},
+                                   timeout_s=6 * 3600)
+    assert small["verdict"] == "ok" and small["train_samples"] == 1000
+    assert estimate_train_seconds({"epochs": 1, "max_train_samples": 50_000})["train_samples"] == 19_600
+    monkeypatch.setenv("TRAIN_TIMEOUT_S", "7200")
+    assert train_timeout_s() == 7200
+    monkeypatch.setenv("TRAIN_TIMEOUT_S", "abc")
+    assert train_timeout_s() == 6 * 3600

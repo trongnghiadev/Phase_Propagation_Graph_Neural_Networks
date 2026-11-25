@@ -11,7 +11,38 @@
 > triều thiên văn fit chỉ trên train; B0 climatology chỉ lấy trung bình trên train; kiểm định ghép cặp theo `(station,
 > target_date, peak_idx, issued_date, lead_day)`, Wilcoxon trên `|e|`, DM trên `|e_a| − |e_b|`, hiệu chỉnh Holm.
 
-> **LƯỢT 3 (25/11/2026, 13:21 – 14:09, 48 phút) — CSV/hình hiện tại là lượt này.** Gộp các mô hình đồ thị con v2
+> **LƯỢT 4 (25/11/2026, 19:25 – 20:11, 46 phút) — CSV/hình hiện tại là lượt này.** Chỉ các mô hình chính: B_KTTV,
+> B0 (climatology), B_harm (tự dựng), B0_py, B1, B2, phasegnn-spread-v2 và 5 mô hình v3 (`*-v3`, đồ thị con v3 + τ
+> `phase`, TB 3 seed; `results/E2/README.md`) ⇒ 12 mô hình, Holm trên **66** cặp. Mọi mô hình học máy huấn luyện trên CPU.
+
+| Mô hình | n | MAE (m) | RMSE | bias | MAE giờ (h) | NSE | KGE |
+|---|---:|---|---|---|---|---|---|
+| **B_KTTV** | 4 155 | **0.1347** | 0.200 | +0.000 | 5.05 | 0.609 | 0.789 |
+| **phasegnn-spread-v2** | 49 825 | **0.1602** | 0.216 | −0.015 | 2.32 | 0.938 | 0.966 |
+| B0_py (persistence) | 58 210 | 0.1704 | 0.241 | −0.024 | 2.18 | 0.917 | 0.948 |
+| B5a-v3 | 47 733 | 0.1723 | 0.233 | +0.005 | 2.40 | 0.926 | 0.933 |
+| B4-v3 | 44 193 | 0.1731 | 0.235 | −0.010 | 2.33 | 0.916 | 0.932 |
+| phasegnn-v3 | 45 760 | 0.1770 | 0.239 | −0.004 | 2.37 | 0.914 | 0.927 |
+| B3-v3 | 52 343 | 0.1820 | 0.243 | −0.005 | 2.50 | 0.920 | 0.958 |
+| B5b-v3 | 44 234 | 0.1886 | 0.252 | +0.009 | 2.51 | 0.899 | 0.941 |
+| B0 (climatology) | 14 386 | 0.1962 | 0.253 | −0.071 | — | 0.913 | 0.932 |
+| B1 | 34 394 | 0.2153 | 0.279 | +0.113 | 0.79 | 0.892 | 0.901 |
+| B2 | 60 293 | 0.2188 | 0.264 | −0.186 | 3.47 | 0.355 | 0.726 |
+| B_harm | 3 900 | 0.2848 | 0.352 | +0.154 | 4.79 | 0.840 | 0.859 |
+
+Kiểm định phasegnn-v3 (`mean_loss` = TB `|e_A| − |e_B|`, A vs phasegnn-v3; > 0 ⇒ v3 tốt hơn): phasegnn-spread-v2
+−0.017 (DM p_Holm = 4e-202, **v2 tốt hơn**); B5a-v3 −0.003 (5e-47) và B4-v3 −0.002 (7e-43) **tốt hơn** phasegnn-v3;
+B5b-v3 +0.010 (3e-36), B3-v3 +0.005 (9e-11); B0_py persistence +0.009 (p_Holm = 0.005; trung vị |e| persistence 0.115
+vs 0.131 — v3 chỉ hơn về |e| TB); B_KTTV −0.078 (1e-24). **Kết luận:** v3 kém v2 rõ; trong v3, thêm thông điệp hồ chứa
+(phasegnn so với B5a) và τ học (so với B4) đều không giúp.
+
+*Dẫn chiếu chéo (v3 vs persistence):* `results/E2/README.md` (mục v3, kết luận 2) báo phasegnn-v3 **không còn** hơn
+persistence (p_Holm = 0.35, `daypeak_tests_v3.csv`). Khác vì cách ghép: ở đây ghép theo **từng đỉnh** `(station,
+target_date, peak_idx, issued_date, lead_day)`, Holm trên 66 cặp; E2 ghép theo **đỉnh ngày** quan trắc `(station,
+issued_date, target_date, lead_day)`, DM trên chuỗi chênh lệch TB theo ngày phát hành, Holm trên 6. Cùng dấu (v3 nhỉnh
+hơn persistence về |e| TB), khác mức ý nghĩa ⇒ lợi thế này mong manh, phụ thuộc cách ghép.
+
+> **LƯỢT 3 (25/11/2026, 13:21 – 14:09, 48 phút) (CSV lượt 3 trong lịch sử git).** Gộp các mô hình đồ thị con v2
 > (`*-spread-v2`, `results/E2/README.md`). Để giữ thời gian < 1 h, **bỏ khỏi lượt này**: 5 mô hình `d12`
 > (`phasegnn-v1`, `B3-v1`, `B4-v1`, `B5a-v1`, `B5b-v1`), `B3-long`, `B4-abl`, `B5a-abl`, `B5b-abl`, `B3-abl`, và
 > `B4-spread-v2`, `B5b-spread-v2` (dự báo **trùng từng bit** với `B4-spread`, `B5b-spread`). Còn 16 mô hình ⇒ Holm
@@ -82,7 +113,7 @@ cạnh `down` không đóng góp (trạm không nhận cạnh `down` nào trong 
 `scripts/run_baselines.py` trùng tên nên được đổi thành **`B0_py`** (sửa 24/11/2026 trong `evaluation.R`: trước đây
 hai mô hình khác nhau bị gộp chung một nhóm "B0"). B_harm/B_KTTV của Python không đưa vào (trùng với bản R).
 
-## Chỉ số lượt 2 (23 mô hình; CSV hiện tại là lượt 3 ở trên)
+## Chỉ số lượt 2 (23 mô hình; CSV hiện tại là lượt 4 ở trên)
 
 Ghép mỗi đỉnh dự báo với đỉnh thực đo trong ±6 h (khác cách ghép theo ngày của `phasegnn.evaluate`, nên n và
 MAE khác `results/baselines/summary.csv`). Độ phủ phân vị 10–90 % không có trong `evaluation.R` — xem

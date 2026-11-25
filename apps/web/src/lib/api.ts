@@ -614,6 +614,9 @@ export const api = {
       /** `false`: phiên bản đã có, không giao việc mới. */
       created?: boolean;
       retry?: boolean;
+      /** Ước lượng thời gian có thể vượt `TRAIN_TIMEOUT_S` (không dừng sớm). */
+      warning?: string;
+      estimate?: { per_epoch_s: number; min_s: number; max_s: number; timeout_s: number; verdict: string };
     }>("/models/train", {
       method: "POST",
       body,

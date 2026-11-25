@@ -95,6 +95,8 @@ def load_checkpoint(path: Path) -> tuple[PhaseGNN, TrainConfig, dict]:
     # Checkpoint trước 25/11/2026 không ghi `subgraph_version` ⇒ dựng đồ thị con kiểu cũ (v1,
     # thiếu cạnh `down`) để dự báo của chúng không đổi (xem `train.build_station_subgraph`).
     tc.setdefault("subgraph_version", 1)
+    # Checkpoint trước 25/11/2026 không có `tau_mode` (cả trong `config`) ⇒ "grid".
+    tc.setdefault("tau_mode", blob["config"].get("tau_mode", "grid"))
     tcfg = TrainConfig(**{k: v for k, v in tc.items() if k in TrainConfig.__dataclass_fields__})
     dims = blob.get("dims", {})
     # `in_dim` của checkpoint cũ (trước 24/11/2026) KHÔNG có 2 kênh đồng hồ lưới;
@@ -149,11 +151,12 @@ def predict_split(model: PhaseGNN, tcfg: TrainConfig, graph, dataset,
     with torch.no_grad():
         for st, samples in by_station.items():
             sub = subgraphs[st]
-            ei = torch.as_tensor(sub.edge_index, dtype=torch.long)
-            ea = torch.as_tensor(sub.edge_attr, dtype=torch.float32)
-            ed = torch.as_tensor(sub.edge_dir, dtype=torch.long)
-            tau = torch.as_tensor(sub.tau_phys, dtype=torch.float32)
-            static = torch.as_tensor(sub.static, dtype=torch.float32)
+            dev = next(model.parameters()).device  # thiết bị của mô hình (cpu mặc định)
+            ei = torch.as_tensor(sub.edge_index, dtype=torch.long, device=dev)
+            ea = torch.as_tensor(sub.edge_attr, dtype=torch.float32, device=dev)
+            ed = torch.as_tensor(sub.edge_dir, dtype=torch.long, device=dev)
+            tau = torch.as_tensor(sub.tau_phys, dtype=torch.float32, device=dev)
+            static = torch.as_tensor(sub.static, dtype=torch.float32, device=dev)
             idx = int(sub.station_node)
             # **Thang độ cao của trạm** (mét ↔ chuẩn hoá) — xem `data.HeightScale`.
             if hscale is not None:
@@ -166,15 +169,17 @@ def predict_split(model: PhaseGNN, tcfg: TrainConfig, graph, dataset,
                 chunk = samples[start:start + bs]
                 sts = [prepare_sample(s, sub, mcfg, tcfg.t_in, tcfg.t_out) for s in chunk]
                 node_seq = torch.as_tensor(np.stack([x.node_seq for x in sts]),
-                                           dtype=torch.float32)
+                                           dtype=torch.float32, device=dev)
                 out = model.forward_batch(node_seq, static, ei, ea, ed, tau,
-                                          target_nodes=torch.as_tensor([idx], dtype=torch.long))
+                                          target_nodes=torch.as_tensor([idx], dtype=torch.long,
+                                                                       device=dev))
                 # `forward_batch` giữ chiều node: `peak_height` = [B, 1, T, 2, Q],
                 # `peak_hour` = [B, 1, T, 2] → bỏ chiều node để còn [B, T, ...].
                 peak = out.peak_height.squeeze(1)      # [B, T, 2, Q]
                 hours = out.peak_hour.squeeze(1)       # [B, T, 2]
                 p_peak, p_hours, _p_pd, _p_hd = _select_daily(peak, hours, tcfg.t_out,
                                                               mcfg.delta_h)
+                p_peak, p_hours = p_peak.cpu(), p_hours.cpu()  # np.argsort/np.mod cần CPU
                 for bi, s in enumerate(chunk):
                     for d in range(p_peak.shape[1]):
                         target = _add_days(s.issue_date, d)

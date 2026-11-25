@@ -9,9 +9,13 @@ luyện mỗi lúc trên toàn cụm) và:
 2. ``train_state: queued|running|failed → running`` có fence (``train_fence`` ≤ fence của lượt; bản ghi đã
    ``succeeded`` → bỏ qua, idempotent);
 3. chạy tiến trình con ``python -m phasegnn.train`` — tham số chỉ lấy từ `vngis.job_params.TrainParams` đã kiểm
-   tra (``epochs``, ``learning_rate``; ``station``/``basin`` chưa được trình huấn luyện hỗ trợ → ghi
-   ``params_ignored``), thư mục ra ``results/models/phasegnn-<n>/`` (``*.pt`` và ``results/models/`` bị
-   gitignore), ``--model-version n --train-fence <fence>`` để tiến trình con chỉ cập nhật đúng bản ghi
+   tra (``epochs`` ≤ 500, ``learning_rate``, ``max_train_samples``/``max_val_samples``/``subsample`` → cờ
+   ``--max-train-samples``/``--max-val-samples``/``--subsample`` chỉ khi có; ``station``/``basin`` chưa được
+   trình huấn luyện hỗ trợ → ghi ``params_ignored``), **mỗi lượt một thư mục riêng**
+   ``results/models/phasegnn-<n>/attempt-<fence>/`` (``*.pt`` và ``results/models/`` bị gitignore) — tiến trình
+   con mồ côi của lượt cũ không ghi đè được checkpoint của lượt thắng; sau khi lượt thắng ghi DB (điều kiện
+   fence) thì xoá ``attempt-<k>`` với ``k < fence``, lượt thua tự xoá thư mục của nó;
+   ``--model-version n --train-fence <fence>`` để tiến trình con chỉ cập nhật đúng bản ghi
    ``phasegnn-<n>``; heartbeat ``models.train_heartbeat`` mỗi `heartbeat_s`; mất khoá → dừng tiến trình con,
    không ghi thêm; scheduler trả việc về ``queued`` (``attempts += 1``, tối đa ``max_attempts``) và lượt mới
    (fence lớn hơn) ghi đè ``train_state``; hết lượt → `abandon_training` đánh ``train_state="failed"``;
@@ -41,6 +45,18 @@ MODELS_OUT_DIR = "results/models"
 TRAIN_SEED = 0
 #: Trạng thái được phép chuyển sang ``running`` (``running``: lượt trước chết, việc được nhận lại).
 _RESTARTABLE = ("queued", "running", "failed", None)
+#: Giá trị của cờ ``--subsample`` (khớp `phasegnn.train.SUBSAMPLE_MODES`; worker không import phasegnn).
+SUBSAMPLE_MODES = ("spread", "head")
+#: Giá trị của cờ ``--device`` (khớp `TrainParams.device`; `phasegnn.device` còn nhận ``cuda:N``).
+DEVICE_CHOICES = ("auto", "cpu", "cuda")
+
+
+def train_device(device: str | None = None) -> str:
+    """Thiết bị cho ``--device``: tham số việc → ``PGNN_TRAIN_DEVICE`` → ``auto``; giá trị lạ ⇒ `ValueError`."""
+    dev = (device or os.getenv("PGNN_TRAIN_DEVICE") or "auto").strip().lower()
+    if dev not in DEVICE_CHOICES:
+        raise ValueError(f"device không hợp lệ: {dev!r} (chọn {'|'.join(DEVICE_CHOICES)})")
+    return dev
 
 
 def _now() -> datetime:
@@ -105,8 +121,14 @@ def _default_runner(cmd: list[str], *, cwd: Path, env: dict, timeout_s: int, gua
 
 
 def build_command(*, model_version: int, epochs: int, learning_rate: float, out_dir: str,
-                  fence: int | None, data_root: str | None = None) -> list[str]:
-    """Dòng lệnh tiến trình con — chỉ từ giá trị đã qua `TrainParams` (số đã ép kiểu), không chuỗi tự do."""
+                  fence: int | None, data_root: str | None = None, max_train_samples: int | None = None,
+                  max_val_samples: int | None = None, subsample: str | None = None,
+                  device: str | None = None) -> list[str]:
+    """Dòng lệnh tiến trình con — chỉ từ giá trị đã qua `TrainParams` (số đã ép kiểu), không chuỗi tự do.
+
+    ``--max-train-samples``/``--max-val-samples`` chỉ thêm khi có; ``--subsample`` (``spread``|``head``) chỉ thêm
+    khi có giới hạn mẫu (mặc định của `phasegnn.train` là ``head``; worker mặc định ``spread``).
+    """
     cmd = [sys.executable, "-X", "utf8", "-m", "phasegnn.train", "--variant", "phasegnn",
            "--epochs", str(int(epochs)), "--lr", repr(float(learning_rate)), "--seed", str(TRAIN_SEED),
            "--out-dir", out_dir, "--no-mlflow", "--model-version", str(int(model_version))]
@@ -114,7 +136,48 @@ def build_command(*, model_version: int, epochs: int, learning_rate: float, out_
         cmd += ["--train-fence", str(int(fence))]
     if data_root:
         cmd += ["--data-root", data_root]
+    if max_train_samples is not None:
+        cmd += ["--max-train-samples", str(int(max_train_samples))]
+    if max_val_samples is not None:
+        cmd += ["--max-val-samples", str(int(max_val_samples))]
+    if max_train_samples is not None or max_val_samples is not None:
+        mode = subsample or "spread"
+        if mode not in SUBSAMPLE_MODES:
+            raise ValueError(f"subsample không hợp lệ: {mode!r}")
+        cmd += ["--subsample", mode]
+    if device is not None:
+        if device not in DEVICE_CHOICES:
+            raise ValueError(f"device không hợp lệ: {device!r}")
+        cmd += ["--device", device]
     return cmd
+
+
+def attempt_dir_name(fence: int | None) -> str:
+    """Thư mục con của một lượt: ``attempt-<fence>`` (không có khoá — chạy trực tiếp/test — ``attempt-local``)."""
+    return f"attempt-{int(fence)}" if fence is not None else "attempt-local"
+
+
+def _cleanup_losers(model_abs: Path, fence: int | None) -> list[str]:
+    """Xoá thư mục ``attempt-<k>`` của các lượt cũ (``k < fence``) sau khi lượt này đã ghi DB thành công.
+
+    An toàn vì: fence cấp tăng đơn điệu ⇒ lượt ``k < fence`` không bao giờ thắng được nữa (mọi lệnh ghi
+    `models` của nó bị điều kiện fence chặn) và ``checkpoint_path`` đã trỏ sang thư mục của lượt này. Tiến
+    trình mồ côi còn ghi vào thư mục cũ (hiếm) chỉ làm lệnh xoá lỗi → bỏ qua.
+    """
+    import shutil
+
+    removed: list[str] = []
+    if fence is None or not model_abs.is_dir():
+        return removed
+    for p in model_abs.iterdir():
+        name = p.name
+        if not (p.is_dir() and name.startswith("attempt-") and name[8:].isdigit()):
+            continue
+        if int(name[8:]) < int(fence):
+            shutil.rmtree(p, ignore_errors=True)
+            if not p.exists():
+                removed.append(name)
+    return removed
 
 
 def _read_record(out_abs: Path) -> dict:
@@ -136,6 +199,8 @@ def _clean_metrics(m: Any) -> dict:
 
 def run_training(db, *, root: Path, model_version: Any, epochs: int = 50, learning_rate: float = 1e-3,
                  station: str | None = None, basin: str | None = None, guard=None, job_id: str | None = None,
+                 max_train_samples: int | None = None, max_val_samples: int | None = None,
+                 subsample: str = "spread", device: str | None = None,
                  runner=None, available: Callable[[], tuple[bool, str]] | None = None,
                  heartbeat_s: float | None = None, timeout_s: int | None = None) -> dict:
     """Chạy một lượt huấn luyện cho ``phasegnn-<model_version>``; trả dict kết quả cho `jobs.result`.
@@ -147,6 +212,7 @@ def run_training(db, *, root: Path, model_version: Any, epochs: int = 50, learni
     from worker.forecast import UnsafeCheckpoint, phasegnn_available, safe_checkpoint_path
 
     ver = parse_model_version(model_version)
+    device = train_device(device)  # kiểm tra trước mọi lệnh ghi (giá trị lạ của PGNN_TRAIN_DEVICE ⇒ lỗi sớm)
     if ver is None or ver < 1:
         raise ValueError("việc train thiếu model_version (API luôn cấp số)")
     doc_id = model_doc_id("phasegnn", ver)
@@ -175,16 +241,36 @@ def run_training(db, *, root: Path, model_version: Any, epochs: int = 50, learni
                  extra={"train_state": {"$in": list(_RESTARTABLE)}}):
         return {**out, "status": "skipped", "reason": "không chuyển được sang running (fence cũ hoặc trạng thái đổi)"}
 
-    out_rel = f"{MODELS_OUT_DIR}/{doc_id}"
+    # Mỗi lượt (fence) một thư mục riêng: tiến trình con mồ côi của lượt cũ không ghi đè checkpoint của lượt mới.
+    model_rel = f"{MODELS_OUT_DIR}/{doc_id}"
+    out_rel = f"{model_rel}/{attempt_dir_name(w.fence)}"
     out_abs = Path(root) / out_rel
+    if out_abs.exists():  # cùng fence chỉ có một lượt ⇒ đây là rác (hoặc lượt không khoá chạy lại): làm sạch
+        import shutil
+
+        shutil.rmtree(out_abs, ignore_errors=True)
     out_abs.mkdir(parents=True, exist_ok=True)
+    out["out_dir"] = out_rel
+    from vngis.job_params import estimate_train_seconds
+
+    limit = int(timeout_s if timeout_s is not None else os.getenv("TRAIN_TIMEOUT_S", str(6 * 3600)))
+    sample_params = {k: v for k, v in (("max_train_samples", max_train_samples),
+                                       ("max_val_samples", max_val_samples)) if v is not None}
+    if sample_params:
+        sample_params["subsample"] = subsample or "spread"
+    out["estimate"] = est = estimate_train_seconds({"epochs": epochs, "device": device, **sample_params},
+                                                   timeout_s=limit)
+    if est["verdict"] != "ok":
+        log.warning("models[%s]: ước lượng %s–%s s so với TRAIN_TIMEOUT_S=%s (%s)", doc_id, est["min_s"],
+                    est["max_s"], limit, est["verdict"])
     cmd = build_command(model_version=ver, epochs=epochs, learning_rate=learning_rate, out_dir=out_rel,
-                        fence=w.fence, data_root=os.getenv("TRAIN_DATA_ROOT") or os.getenv("FORECAST_DATA_ROOT"))
+                        fence=w.fence, data_root=os.getenv("TRAIN_DATA_ROOT") or os.getenv("FORECAST_DATA_ROOT"),
+                        max_train_samples=max_train_samples, max_val_samples=max_val_samples,
+                        subsample=subsample, device=device)
     from worker.jobs import _subprocess_env
 
     env = _subprocess_env(db)
     tick = float(heartbeat_s if heartbeat_s is not None else os.getenv("TRAIN_HEARTBEAT_S", "30"))
-    limit = int(timeout_s if timeout_s is not None else os.getenv("TRAIN_TIMEOUT_S", str(6 * 3600)))
 
     def _beat() -> None:
         if guard is not None and guard.lost:
@@ -193,9 +279,24 @@ def run_training(db, *, root: Path, model_version: Any, epochs: int = 50, learni
 
     from vngis.locks import LockLost
 
+    from worker.scheduler import WORKER_SHUTDOWN_REASON, WorkerShutdown
+
     try:
         proc = (runner or _default_runner)(cmd, cwd=Path(root), env=env, timeout_s=limit, guard=guard,
                                            on_tick=_beat, tick_s=tick)
+    except WorkerShutdown:
+        # Worker dừng có trật tự (SIGTERM): không phải lỗi huấn luyện ⇒ `train_state` về ``queued`` (có fence,
+        # chỉ khi còn ``running`` của lượt này); scheduler trả việc về hàng đợi không tính lượt. Thư mục lượt
+        # dở dang bị xoá (lượt sau có fence lớn hơn ⇒ thư mục khác).
+        try:
+            w.set({"train_state": "queued", "train_reason": WORKER_SHUTDOWN_REASON, "train_heartbeat": None,
+                   "train_interrupted_at": _now()}, extra={"train_state": "running"})
+        except LockLost:
+            pass
+        import shutil
+
+        shutil.rmtree(out_abs, ignore_errors=True)
+        raise
     except LockLost:
         # Không ghi gì nữa: scheduler trả việc về hàng đợi (`Scheduler.requeue_lost`); lượt mới (fence lớn hơn)
         # chuyển `train_state` running → running và ghi đè. Hết lượt → `abandon_training` đánh ``failed``.
@@ -226,8 +327,18 @@ def run_training(db, *, root: Path, model_version: Any, epochs: int = 50, learni
     metrics = _clean_metrics(rec.get("metrics"))
     fields = {"train_state": "succeeded", "train_finished_at": _now(), "checkpoint_path": ckpt_rel,
               "artifact_path": ckpt_rel, "metrics": metrics, "train_error": None,
-              "train_params": {"epochs": int(epochs), "learning_rate": float(learning_rate), "seed": TRAIN_SEED}}
+              "train_params": {"epochs": int(epochs), "learning_rate": float(learning_rate), "seed": TRAIN_SEED,
+                               "device": device,
+                               **sample_params}}
     if not w.set(fields, extra={"train_state": "running"}):
+        # Lượt này thua (fence cũ hoặc trạng thái đổi): tiến trình con đã kết thúc ⇒ xoá thư mục của chính nó.
+        import shutil
+
+        shutil.rmtree(out_abs, ignore_errors=True)
         raise RuntimeError(f"không ghi được kết quả huấn luyện vào models[{doc_id}] (fence cũ hoặc trạng thái đổi)")
+    # Lượt thắng: `checkpoint_path` đã trỏ vào `attempt-<fence>/` ⇒ dọn thư mục các lượt cũ (k < fence).
+    removed = _cleanup_losers(Path(root) / model_rel, w.fence)
+    if removed:
+        out["removed_attempts"] = removed
     out.update({"status": "ok", "checkpoint_path": ckpt_rel, "metrics": metrics})
     return out

@@ -220,7 +220,7 @@ def mono_loss(pred: Tensor) -> Tensor:
 def tau_loss(delta: Tensor) -> Tensor:
     """`L_τ = mean(δ²)`: giữ độ trễ học được gần vật lý."""
     if delta.numel() == 0:
-        return torch.zeros((), dtype=torch.float32)
+        return torch.zeros((), dtype=torch.float32, device=delta.device)
     return (delta ** 2).mean()
 
 

@@ -100,6 +100,9 @@ export default function ModelsPage() {
   const { canManageModel, canRunForecast } = usePermission();
   const [epochs, setEpochs] = useState("50");
   const [lr, setLr] = useState("0.001");
+  /** Giới hạn số mẫu (bỏ trống = toàn bộ ~19,6 nghìn mẫu train, ~25 phút/epoch). */
+  const [maxTrain, setMaxTrain] = useState("");
+  const [maxVal, setMaxVal] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<Error | null>(null);
   const [ok, setOk] = useState<string | null>(null);
@@ -132,16 +135,21 @@ export default function ModelsPage() {
     setErr(null);
     setOk(null);
     try {
-      const res = await api.trainModel({
+      const body: Record<string, unknown> = {
         epochs: Number(epochs) || 50,
         learning_rate: Number(lr) || 0.001,
         // Không gửi `station`: trình huấn luyện chưa hỗ trợ (worker bỏ qua, ghi `params_ignored`).
-      });
+      };
+      // Chỉ gửi khi nhập: lấy mẫu đều (`subsample=spread`, mặc định của API).
+      if (maxTrain.trim()) body.max_train_samples = Number(maxTrain);
+      if (maxVal.trim()) body.max_val_samples = Number(maxVal);
+      const res = await api.trainModel(body);
       const job = res.job_id ? `job ${res.job_id}, ` : "";
       setOk(
         res.created === false
           ? `Phiên bản ${res.model_version} đã có (${job}trạng thái ${res.state}). ${res.note ?? ""}`
-          : `Đã giao huấn luyện phiên bản ${res.model_version} (${job}trạng thái ${res.state}). ${res.note ?? ""}`,
+          : `Đã giao huấn luyện phiên bản ${res.model_version} (${job}trạng thái ${res.state}). ${res.note ?? ""}` +
+              (res.warning ? ` Cảnh báo: ${res.warning}` : ""),
       );
       trainJobs.reload();
       models.reload();
@@ -332,7 +340,34 @@ export default function ModelsPage() {
                 style={{ ...inputStyle, marginBottom: 10 }}
               />
 
+              <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 3 }}>
+                Số mẫu train (tùy chọn, 100–50000)
+              </label>
+              <input
+                type="number"
+                min={100}
+                max={50000}
+                placeholder="toàn bộ"
+                value={maxTrain}
+                onChange={(e) => setMaxTrain(e.target.value)}
+                style={{ ...inputStyle, marginBottom: 10 }}
+              />
+
+              <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 3 }}>
+                Số mẫu val (tùy chọn, 50–50000)
+              </label>
+              <input
+                type="number"
+                min={50}
+                max={50000}
+                placeholder="toàn bộ"
+                value={maxVal}
+                onChange={(e) => setMaxVal(e.target.value)}
+                style={{ ...inputStyle, marginBottom: 10 }}
+              />
+
               <p style={{ fontSize: 12, color: "#607d8b", marginTop: 0, marginBottom: 12 }}>
+                Bỏ trống số mẫu = toàn bộ (~25 phút/epoch); cấu hình chắc chắn vượt giới hạn thời gian bị từ chối.
                 Huấn luyện trên toàn bộ các trạm (chưa hỗ trợ chọn riêng một trạm).
               </p>
 

@@ -20,16 +20,17 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from api.deps import UserContext, require, rate_limit
 from api.permissions import P
 from api.router.common import (acquire_guard, actor_labels, clean, guard_check, to_vn_date,
                                to_vn_datetime)
 from api.state import state
+from vngis.job_params import MAX_TRAIN_EPOCHS, TRAIN_SAMPLE_PARAMS
 
 log = logging.getLogger("api.forecasts")
 
@@ -144,12 +145,52 @@ class ForecastRunRequest(BaseModel):
 
 
 class TrainRequest(BaseModel):
-    """Yêu cầu huấn luyện mô hình (bỏ trống `model_version` → hệ thống cấp số nguyên mới)."""
+    """Yêu cầu huấn luyện mô hình (bỏ trống `model_version` → hệ thống cấp số nguyên mới).
+
+    Khoá lạ → 422 (``extra="forbid"``). Bỏ trống ``max_train_samples``/``max_val_samples`` → toàn bộ dữ liệu
+    (~19,6 nghìn mẫu train, ~25 phút/epoch trên CPU); cấu hình chắc chắn vượt ``TRAIN_TIMEOUT_S`` → 422.
+    """
+    model_config = ConfigDict(extra="forbid")
+
     model_version: int | str | None = Field(default=None, description="chỉ để hỏi lại phiên bản đã có")
-    epochs: int = Field(default=50, ge=1, le=2000)
+    epochs: int = Field(default=50, ge=1, le=MAX_TRAIN_EPOCHS)
     learning_rate: float = Field(default=1e-3, gt=0, le=1)
     station: str | None = None
     basin: str | None = None
+    max_train_samples: int | None = Field(default=None, ge=100, le=50_000,
+                                          description="giới hạn số mẫu train (bỏ trống = toàn bộ)")
+    max_val_samples: int | None = Field(default=None, ge=50, le=50_000,
+                                        description="giới hạn số mẫu val (bỏ trống = toàn bộ)")
+    subsample: Literal["spread", "head"] = Field(default="spread",
+                                                 description="cách chọn mẫu khi giới hạn: spread (đều) | head")
+    device: Literal["auto", "cpu", "cuda"] | None = Field(
+        default=None, description="thiết bị huấn luyện; bỏ trống → PGNN_TRAIN_DEVICE (không có → auto). "
+                                  "Không lưu vào hyperparams: giao lại dùng mặc định trừ khi gửi kèm")
+
+
+#: Khoá tham số huấn luyện lưu trong `models.hyperparams` (giao lại dùng lại đúng cấu hình).
+_HYPERPARAM_KEYS = ("epochs", "learning_rate", *TRAIN_SAMPLE_PARAMS)
+
+
+def _check_train_budget(params: dict) -> dict:
+    """Ước lượng thời gian (`vngis.job_params.estimate_train_seconds`); chắc chắn vượt timeout → 422."""
+    from vngis.job_params import estimate_train_seconds
+
+    est = estimate_train_seconds(params)
+    if est["verdict"] == "exceeds":
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail={
+            "error": "train_exceeds_timeout", "estimate": est,
+            "reason": "ước lượng ngay cả khi dừng sớm (patience) vẫn vượt TRAIN_TIMEOUT_S; giảm epochs hoặc đặt "
+                      "max_train_samples/max_val_samples"})
+    return est
+
+
+def _budget_note(est: dict) -> dict:
+    out: dict[str, Any] = {"estimate": est}
+    if est["verdict"] == "may_exceed":
+        out["warning"] = (f"ước lượng {est['min_s']}–{est['max_s']} s có thể vượt TRAIN_TIMEOUT_S="
+                          f"{est['timeout_s']} s nếu không dừng sớm; cân nhắc giới hạn số mẫu")
+    return out
 
 
 @router.get("/forecasts/latest", dependencies=[Depends(require(P.READ, FORECASTS))])
@@ -470,6 +511,7 @@ async def train_model(body: TrainRequest,
     except JobParamsError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail={"message": str(e), "errors": e.errors}) from None
+    est = _check_train_budget(params)
     ver = allocate_model_version(db)
     params["model_version"] = ver
     now = datetime.now(timezone.utc)
@@ -478,11 +520,11 @@ async def train_model(body: TrainRequest,
     db[MODELS].insert_one({"_id": model_id, "model_id": model_id,
                            "name": "phasegnn", "variant": "phasegnn", "version": ver, "status": STAGING,
                            "train_state": "queued", "job_id": job_id, "train_attempt": 1, "requested_by": actor,
-                           "hyperparams": {k: params[k] for k in ("epochs", "learning_rate") if k in params},
+                           "hyperparams": {k: params[k] for k in _HYPERPARAM_KEYS if k in params},
                            "created_at": now, "updated_at": now})
     _insert_train_job(db, _train_job_doc(job_id, ver, params, actor, now, 1), model_id, now)
     return {"job_id": job_id, "model_version": ver, "status": STAGING, "state": "queued", "created": True,
-            "note": "đã giao cho worker; apps/api không import phasegnn theo luật phụ thuộc"}
+            "note": "đã giao cho worker; apps/api không import phasegnn theo luật phụ thuộc", **_budget_note(est)}
 
 
 def _existing_reply(doc: dict, ver: int, note: str) -> dict:
@@ -518,12 +560,26 @@ def _retry_or_report(db, existing: dict, ver: int, overrides: dict, actor: str) 
         if hb is not None and hb >= cutoff:
             return _existing_reply(existing, ver, "đang huấn luyện (heartbeat còn mới)")
         cond["$or"] = [{"train_heartbeat": None}, {"train_heartbeat": {"$lt": cutoff}}]
-    base = {k: v for k, v in (existing.get("hyperparams") or {}).items() if k in ("epochs", "learning_rate")}
+    base = {k: v for k, v in (existing.get("hyperparams") or {}).items() if k in _HYPERPARAM_KEYS}
     try:
         params = validate_job_params("train", {**base, **overrides})
     except JobParamsError as e:
+        # Lỗi nằm ở `hyperparams` cũ (không gửi kèm), ví dụ bản ghi từ trước khi siết ``epochs`` ≤ 500: không
+        # tự kẹp (đổi cấu hình của phiên bản mà người dùng không biết) — 422 nêu rõ trường cần gửi giá trị mới.
+        stale = sorted({str(x["loc"][1]) for x in e.errors
+                        if len(x.get("loc") or ()) > 1 and str(x["loc"][1]) in base
+                        and str(x["loc"][1]) not in overrides})
+        if stale:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail={
+                "error": "legacy_hyperparams_invalid", "model_version": ver, "fields": stale,
+                "legacy_values": {k: base[k] for k in stale}, "limits": {"epochs": {"max": MAX_TRAIN_EPOCHS}},
+                "message": str(e),
+                "reason": f"hyperparams đã lưu của phiên bản {ver} không còn hợp lệ ({', '.join(stale)}); gửi kèm "
+                          f"giá trị mới khi giao lại, ví dụ {{\"model_version\": {ver}, \"epochs\": "
+                          f"{MAX_TRAIN_EPOCHS}}}"}) from None
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail={"message": str(e), "errors": e.errors}) from None
+    est = _check_train_budget(params)
     params["model_version"] = ver
     # Bản ghi cũ chưa có `train_attempt` (lượt đầu = 1) → lượt giao lại đầu tiên là 2.
     if existing.get("train_attempt") is None:
@@ -534,7 +590,7 @@ def _retry_or_report(db, existing: dict, ver: int, overrides: dict, actor: str) 
         cond, {"$inc": {"train_attempt": 1},
                "$set": {"train_state": "queued", "updated_at": now, "train_error": None, "train_reason": None,
                         "retried_by": actor,
-                        "hyperparams": {k: params[k] for k in ("epochs", "learning_rate") if k in params}}},
+                        "hyperparams": {k: params[k] for k in _HYPERPARAM_KEYS if k in params}}},
         return_document=True)
     if doc is None:
         cur = db[MODELS].find_one({"_id": existing["_id"]}) or existing
@@ -545,7 +601,7 @@ def _retry_or_report(db, existing: dict, ver: int, overrides: dict, actor: str) 
     _insert_train_job(db, _train_job_doc(job_id, ver, params, actor, now, attempt), existing["_id"], now)
     return {"job_id": job_id, "model_version": ver, "status": STAGING, "state": "queued", "created": True,
             "retry": True, "train_attempt": attempt, "previous_train_state": ts,
-            "note": f"giao lại huấn luyện (lượt {attempt}, trước đó train_state={ts})"}
+            "note": f"giao lại huấn luyện (lượt {attempt}, trước đó train_state={ts})", **_budget_note(est)}
 
 
 @router.post("/models/{version}/promote", dependencies=[Depends(require(P.MANAGE_MODEL, MODELS)),
