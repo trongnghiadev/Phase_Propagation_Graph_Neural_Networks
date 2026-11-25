@@ -28,7 +28,7 @@ import {
 } from "@/components/ui";
 import { JobStateBadge } from "@/components/JobStateBadge";
 import { api, toError } from "@/lib/api";
-import { formatDateTime } from "@/lib/format";
+import { formatActor, formatDateTime } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
 import { usePermission } from "@/lib/session";
 import { COLLECTIONS } from "@/lib/permissions";
@@ -109,7 +109,12 @@ export default function ModelsPage() {
     setOk(null);
     try {
       const res = await api.promoteModel(v);
-      setOk(`Đã phát hành mô hình ${res.model_version} (${res.promoted_at}).`);
+      setOk(
+        `Đã phát hành mô hình ${res.model_version} (${formatDateTime(res.promoted_at)}, ${formatActor(
+          res.promoted_by,
+          res.promoted_by_label,
+        )}).`,
+      );
       trainJobs.reload();
     } catch (e) {
       setErr(toError(e));
@@ -166,7 +171,7 @@ export default function ModelsPage() {
       header: "Phiên bản",
       render: (j) => j.model_version ?? (j.params?.model_version as string) ?? "—",
     },
-    { key: "requested_by", header: "Người giao", render: (j) => j.requested_by ?? "—" },
+    { key: "requested_by", header: "Người giao", render: (j) => formatActor(j.requested_by, j.requested_by_label) },
     { key: "worker", header: "Worker", render: (j) => j.worker ?? "—" },
     { key: "created_at", header: "Tạo lúc", render: (j) => formatDateTime(j.created_at) },
     {

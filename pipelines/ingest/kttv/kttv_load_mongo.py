@@ -12,8 +12,20 @@ from kttv_parser import to_json
 from kttv_english import to_english
 from bson import ObjectId
 
-MONGO_URI = "mongodb://localhost:27017"
-DB, COLL = "vietnam_gis", "hydromet_bulletins"
+# `vngis` (packages/vngis/src) — dùng chung hàm promote với API/worker. Khi chưa cài package, thêm
+# đường dẫn trong repo (script nằm ở pipelines/ingest/kttv/ → lên 3 cấp là gốc repo).
+try:
+    from vngis.atomic_reload import (ReloadBlocked, apply_bulletin_overrides, promote_staging, staging_name,
+                                     validate_ingest_staging)
+except ImportError:  # pragma: no cover - chạy tay khi chưa cài vngis
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..",
+                                    "packages", "vngis", "src"))
+    from vngis.atomic_reload import (ReloadBlocked, apply_bulletin_overrides, promote_staging, staging_name,
+                                     validate_ingest_staging)
+
+# Kết nối theo biến môi trường (như vngis.config và các job Spark); mặc định localhost khi chạy tay trên máy.
+MONGO_URI = os.environ.get("MONGO_URI") or "mongodb://localhost:27017"
+DB, COLL = os.environ.get("MONGO_DB") or "vietnam_gis", "hydromet_bulletins"
 OLD_COLL = "kttv_ban_tin_thuy_van"   # tên cũ (tiếng Việt) -> xóa khi nạp lại
 VN = dt.timezone(dt.timedelta(hours=7))
 
@@ -84,9 +96,12 @@ db = client[DB]
 # Chế độ nạp (ADR 0007 — "nạp thay thế toàn bộ" bằng staging + kiểm tra + rename):
 #   --staging              nạp vào collection tạm `hydromet_bulletins__staging_<run_id>`
 #   --run-id <id>         định danh lượt chạy (mặc định: timestamp UTC)
-#   --promote             sau khi nạp staging: kiểm tra → sao lưu `__prev` → renameCollection
+#   --promote             (chạy tay) sau khi nạp staging: kiểm tra → sao lưu `__prev` → renameCollection
+#                         → xoá `__prev` (vngis.atomic_reload.promote_staging). Worker KHÔNG dùng cờ này:
+#                         worker tự promote sau khi kiểm tra còn giữ khoá.
 #   --g0-only             chỉ dựng lại collection chính + index từ dữ liệu đang có (chạy lại G0)
 #   --no-validate         bỏ qua validator khi nạp staging
+#   --no-overrides        KHÔNG áp lại sửa metadata đã duyệt từ `audit_logs` (mặc định có áp)
 def _arg(flag: str) -> bool:
     return flag in sys.argv
 
@@ -104,9 +119,10 @@ RUN_ID = _arg_value("--run-id") or dt.datetime.now(dt.timezone.utc).strftime("%Y
 PROMOTE = _arg("--promote")
 G0_ONLY = _arg("--g0-only")
 NO_VALIDATE = _arg("--no-validate")
+NO_OVERRIDES = _arg("--no-overrides")
 
 #: Collection đích của lượt nạp (collection tạm khi --staging).
-TARGET_COLL = f"{COLL}__staging_{RUN_ID}" if STAGING else COLL
+TARGET_COLL = staging_name(RUN_ID) if STAGING else COLL   # run_id chỉ gồm chữ/số/_/-
 #: Collection bản chính (đích rename khi promote).
 MAIN_COLL = COLL
 #: Collection sao lưu bản chính trước khi thay thế.
@@ -152,74 +168,27 @@ def _build_indexes(col) -> None:
     col.create_index([("rainfall.stations.station", ASCENDING), ("observation_date", ASCENDING)], name="rainfall_station_date_idx")
 
 
-def _checksum_index() -> dict:
-    """Đối chiếu SHA-256 / số bản tin / số bản chính với `hydromet_bulletin_files`."""
-    files_coll = db["hydromet_bulletin_files"]
-    if files_coll not in db.list_collection_names():
-        return {"n_files": 0, "n_primary": 0, "n_sha": 0, "sha_by_file": {}}
-    sha_by_file, n_primary = {}, 0
-    for f in files_coll.find({}, {"_id": 0, "sha256": 1, "sha256_file": 1, "source_file": 1,
-                                 "path": 1, "nguon.la_ban_chinh": 1, "is_primary": 1}):
-        sha = f.get("sha256") or f.get("sha256_file")
-        name = f.get("source_file") or f.get("path")
-        if sha and name:
-            sha_by_file[name] = sha
-        if f.get("is_primary") or (f.get("nguon") or {}).get("la_ban_chinh"):
-            n_primary += 1
-    return {"n_files": len(sha_by_file), "n_primary": n_primary, "n_sha": len(sha_by_file),
-            "sha_by_file": sha_by_file}
+def _promote(target: str) -> dict:
+    """Kiểm tra → sao lưu `__prev` → `renameCollection(dropTarget=True)` → kiểm tra → xoá `__prev`.
 
-
-def _validate_staging(target: str) -> dict:
-    """Kiểm tra collection tạm trước khi thay thế collection chính.
-
-    - số bản tin > 0;
-    - mọi bản tin có SHA-256 khớp với `hydromet_bulletin_files` (nếu có file đối chiếu);
-    - số bản chính khớp với số bản chính trong `hydromet_bulletin_files`.
+    Dùng **chung** hàm của `vngis.atomic_reload` với API và worker (một chính sách `__prev`):
+    còn `__prev` sót từ lượt hỏng → từ chối (mã 4), không tự xoá; rename dùng writeConcern majority.
+    Khi chạy từ worker, bước này do worker làm (sau `guard.check()`); cờ `--promote` dành cho chạy tay.
     """
-    col = db[target]
-    n_docs = col.count_documents({})
-    if n_docs == 0:
-        raise SystemExit(f"[LỖI] collection tạm {target} rỗng — huỷ nạp lại (exit 3)")
-    info = _checksum_index()
-    sha_by_file = info["sha_by_file"]
-    mismatch, checked = [], 0
-    n_primary_loaded = 0
-    for d in col.find({}, {"_id": 0, "source_file": 1, "source.sha256": 1, "source.is_primary": 1,
-                           "source.la_ban_chinh": 1}):
-        src = d.get("source") or {}
-        if src.get("is_primary") or src.get("la_ban_chinh"):
-            n_primary_loaded += 1
-        got = src.get("sha256")
-        want = sha_by_file.get(d.get("source_file"))
-        if want and got:
-            checked += 1
-            if got != want:
-                mismatch.append({"source_file": d.get("source_file"), "got": got, "want": want})
-    if mismatch:
-        raise SystemExit(f"[LỖI] {len(mismatch)} bản tin lệch SHA-256 — huỷ nạp lại (exit 4)")
-    if info["n_primary"] and n_primary_loaded != info["n_primary"]:
-        raise SystemExit(f"[LỖI] số bản chính lệch: nạp {n_primary_loaded}, "
-                         f"file {info['n_primary']} — huỷ nạp lại (exit 5)")
-    return {"n_bulletins": n_docs, "n_primary": n_primary_loaded, "n_sha_checked": checked,
-            "n_files": info["n_files"]}
-
-
-def _promote(target: str) -> None:
-    """Kiểm tra → sao lưu `__prev` → `renameCollection(dropTarget=True)` → tăng `ver:`.
-
-    Đây là bước **nguyên tử**: collection chính được thay bằng một lệnh `renameCollection`
-    của MongoDB, nên không có trạng thái trung gian mà collection "chính" rỗng hoặc nửa vời.
-    """
-    checks = _validate_staging(target)
-    # 1) sao lưu bản chính hiện tại sang `__prev` (để lùi lại được)
-    if MAIN_COLL in db.list_collection_names():
-        _drop_if_exists(PREV_COLL)
-        db[MAIN_COLL].aggregate([{"$match": {}}, {"$out": PREV_COLL}], allowDiskUse=True)
-    # 2) thay thế nguyên tử
-    db.command({"renameCollection": f"{DB}.{target}", "to": f"{DB}.{MAIN_COLL}", "dropTarget": True})
-    print(f"[OK] đã thay thế nguyên tử {DB}.{MAIN_COLL} (checks={checks})")
-    return checks
+    checks = validate_ingest_staging(db, target)
+    failed = [c for c in checks if not c["ok"]]
+    if failed:
+        db[target].drop()
+        print("[LỖI] kiểm tra collection tạm hỏng — huỷ nạp lại: "
+              + "; ".join(f"{c['name']}: {c['detail']}" for c in failed), file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        info = promote_staging(db, target, target=MAIN_COLL, prev=PREV_COLL)
+    except ReloadBlocked as e:
+        print(f"[LỖI] {e}", file=sys.stderr)
+        raise SystemExit(4)
+    print(f"[OK] đã thay thế nguyên tử {DB}.{MAIN_COLL} (count={info['count']}, checks={checks})")
+    return {"checks": checks, **info}
 
 
 # ------------------------------------------------------------ chạy nạp ----------
@@ -246,13 +215,22 @@ else:
     TARGET_COLL = COLL
 
 col = db[TARGET_COLL]
-res = col.insert_many([to_aware(d) for d in docs], ordered=False)
+n_inserted = len(col.insert_many([to_aware(d) for d in docs], ordered=False).inserted_ids) if docs else 0
 _build_indexes(col)
-print(f"Đã nạp {len(res.inserted_ids)} document vào {DB}.{TARGET_COLL}; count = {col.count_documents({})}")
+print(f"Đã nạp {n_inserted} document vào {DB}.{TARGET_COLL}; count = {col.count_documents({})}")
+
+# Áp lại sửa metadata đã duyệt (K2 `bulletin_date`/`weekday`/`qc_note`, K6 `source.is_primary`) — nguồn
+# `audit_logs` (action `bulletin_metadata`, state `applied`); idempotent, xung đột (nguồn đã đổi) chỉ báo, không ghi đè.
+if not NO_OVERRIDES:
+    _ov = apply_bulletin_overrides(db, TARGET_COLL)
+    print(f"[overrides] áp {_ov['applied']} field, đã đúng {_ov['unchanged']}, xung đột {len(_ov['conflicts'])}, "
+          f"thiếu bản tin {len(_ov['missing'])} (từ audit_logs.bulletin_metadata)")
+    for _c in _ov["conflicts"]:
+        print(f"[overrides] XUNG ĐỘT {_c['source_file']} {_c['field']}: hiện {_c['current']!r}, "
+              f"gốc lúc sửa {_c['original']!r}, giá trị duyệt {_c['value']!r}", file=sys.stderr)
 
 if STAGING and PROMOTE:
-    checks = _promote(TARGET_COLL)
-    # Dọn staging còn sót (không bắt buộc — collection chính đã là bản mới)
+    _promote(TARGET_COLL)
     raise SystemExit(0)
 elif STAGING:
     print(f"[--staging] đã nạp vào collection tạm {TARGET_COLL}. "

@@ -49,6 +49,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--model-name", default=None)
     ap.add_argument("--max-days", type=int, default=None,
                     help="giới hạn số ngày phát bản tin (chạy nhanh)")
+    ap.add_argument("--stations", default="",
+                    help="chỉ chấm các trạm này (cách nhau dấu phẩy; E5 giữ riêng trạm)")
     ap.add_argument("--out-dir", default=None)
     ap.add_argument("--data-root", default=None)
     args = ap.parse_args(argv)
@@ -59,7 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     model, tcfg, _result = load_checkpoint(Path(args.checkpoint))
     seed_everything(tcfg.seed)
 
-    datasets = build_datasets(df, t_in=tcfg.t_in, t_out=tcfg.t_out)
+    datasets = build_datasets(df, t_in=tcfg.t_in, t_out=tcfg.t_out,
+                              holdout_stations=tuple(tcfg.holdout_stations or ()))
     ds = datasets[args.split]
 
     lo, hi = SPLITS[args.split]
@@ -68,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
         days = set(days[:args.max_days])
     # chỉ giữ mẫu có ngày phát bản tin trong tập đã chọn
     ds.samples = [s for s in ds.samples if s.issue_date in days]
+    keep_st = {x.strip() for x in args.stations.split(",") if x.strip()}
+    if keep_st:
+        ds.samples = [s for s in ds.samples if s.station in keep_st]
     print(f"[eval] tập {args.split}: {len(days)} ngày phát bản tin, "
           f"{len(ds.samples)} mẫu", flush=True)
 

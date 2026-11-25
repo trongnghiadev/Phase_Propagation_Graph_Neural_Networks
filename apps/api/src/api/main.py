@@ -32,6 +32,33 @@ API_PREFIX = "/api/v1"
 
 
 # ------------------------------------------------------------------ middleware ---
+def _register_cors(target: FastAPI) -> None:
+    """CORS có `allow_credentials` cho đúng các origin trong `auth.cors_origins` (không dùng `*`).
+
+    Danh sách rỗng (web cùng origin qua Nginx hoặc proxy dev) → không gắn CORS: trình duyệt chặn mọi
+    request chéo origin có header tuỳ biến/cookie. Header `X-Requested-With` (chống CSRF) phải nằm trong
+    `allow_headers` để preflight của web hợp lệ.
+    """
+    try:
+        auth = state.config.auth
+    except Exception as e:  # noqa: BLE001 - thiếu cấu hình thì không bật CORS
+        log.warning("không đọc được cấu hình CORS: %s", e)
+        return
+    origins = list(auth.cors_origins)
+    if not origins:
+        return
+    from fastapi.middleware.cors import CORSMiddleware
+    target.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", auth.csrf_header, "X-Request-Id"],
+        expose_headers=["X-Request-Id", "X-Instance", "Retry-After", "ETag", "X-SHA256"],
+        max_age=600,
+    )
+
+
 def _register_middleware(target: FastAPI) -> None:
     """Gắn middleware gắn `request_id` (Nginx gửi `X-Request-Id`) + tên instance."""
 
@@ -161,6 +188,10 @@ def _register_events(target: FastAPI) -> None:
             state.repo.ensure_roles()
         except Exception as e:  # noqa: BLE001 - không có MongoDB thì API vẫn khởi động
             log.warning("không tạo được bảng vai trò: %s", e)
+        try:
+            state.repo.ensure_indexes()   # `users.account_code` unique (partial) — idempotent, như migration 0008
+        except Exception as e:  # noqa: BLE001 - trùng mã cũ / thiếu quyền: báo, không chặn khởi động
+            log.warning("không tạo được index của users: %s", e)
 
     @target.on_event("shutdown")
     async def on_shutdown() -> None:  # pragma: no cover
@@ -184,6 +215,7 @@ app = FastAPI(
 )
 
 _register_middleware(app)
+_register_cors(app)
 _register_handlers(app)
 _register_health(app)
 _include_routers(app)
@@ -204,6 +236,7 @@ def create_app() -> FastAPI:
         openapi_url=app.openapi_url,
     )
     _register_middleware(new_app)
+    _register_cors(new_app)
     _register_handlers(new_app)
     _register_health(new_app)
     _include_routers(new_app)

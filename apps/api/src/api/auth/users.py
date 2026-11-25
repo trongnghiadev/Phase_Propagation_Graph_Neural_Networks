@@ -2,8 +2,12 @@
 
 Hai collection MongoDB:
 
-- **`users`**: `{_id, username, password_hash, role, roles, perm: {coll: mask}, perm_ver,
+- **`users`**: `{_id, username, account_code, password_hash, role, roles, perm: {coll: mask}, perm_ver,
   active, failed_logins, locked_until, created_at, updated_at}`.
+
+`account_code` (dạng `acc_<12 hex>`, ngẫu nhiên, không suy ra được từ tên) là định danh ổn định dùng
+để ghi người thực hiện vào `audit_logs.actor`, `jobs.requested_by`, … (`actor_id`): không lưu tên đăng
+nhập vào nhật ký. Tài khoản cũ chưa có mã được cấp mã ở lần đầu cần (`ensure_account_code`).
 - **`roles`**: `{_id, name, mask, perm: {coll: mask}, description}` — bảng vai trò mặc định.
 
 Quyền thực tế của một người dùng = `perm` của họ (theo collection) **cộng** quyền được cấp
@@ -24,26 +28,69 @@ trong `KNOWN_PERM_COLLECTIONS`.
 """
 from __future__ import annotations
 
+import re
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
+from pymongo.errors import DuplicateKeyError
 from pymongo.database import Database
 
 from api.permissions import (P, PERM_ALL, ROLE_MASKS, ROLES, flag_names, has, mask_of,
                              validate_mask, validate_perm_collection)
 
 __all__ = ["UserRepo", "PERM_CACHE_PREFIX", "USER_COLLECTION", "ROLE_COLLECTION", "perm_cache_key",
-           "PermissionChanged", "UserNotFound", "InvalidRole"]
+           "PermissionChanged", "UserNotFound", "InvalidRole", "new_account_code", "actor_id",
+           "parse_actor", "ACTOR_PREFIX", "USERS_INDEXES", "MISSING_ACCOUNT_CODE"]
 
 PERM_CACHE_PREFIX = "perm:"
 USER_COLLECTION = "users"
 ROLE_COLLECTION = "roles"
 
 
+#: Index của `users`. `account_code` unique nhưng chỉ trên document có mã dạng chuỗi (partial) — tài khoản cũ
+#: chưa có mã (thiếu trường / ``null``) không va nhau. Trùng định nghĩa `migrations/mongo/0008_users_account_code.py`
+#: (test kiểm tra). API tạo idempotent khi khởi động (`UserRepo.ensure_indexes`).
+USERS_INDEXES: list[dict] = [
+    {"name": "account_code_unique", "key": {"account_code": 1}, "unique": True,
+     "partialFilterExpression": {"account_code": {"$type": "string"}}},
+]
+
+#: Bộ lọc "chưa có mã tài khoản": thiếu trường, ``null``, chuỗi rỗng hoặc không phải chuỗi.
+MISSING_ACCOUNT_CODE: dict = {"$or": [{"account_code": {"$in": [None, ""]}},
+                                      {"account_code": {"$not": {"$type": "string"}}}]}
+
+
 def perm_cache_key(user_id: str) -> str:
     """Khoá cache quyền trong Redis: ``perm:{user_id}``."""
     return f"{PERM_CACHE_PREFIX}{user_id}"
+
+
+#: Tiền tố của định danh người thực hiện là tài khoản: ``user:<account_code>:<role>``.
+ACTOR_PREFIX = "user:"
+_ACTOR_RE = re.compile(r"^user:(acc_[0-9a-f]{6,32})(?::([A-Za-z0-9_.-]+))?$")
+
+
+def new_account_code() -> str:
+    """Mã tài khoản ngẫu nhiên, ổn định suốt đời tài khoản, không chứa tên người."""
+    return f"acc_{secrets.token_hex(6)}"
+
+
+def actor_id(account_code: str, role: str = "") -> str:
+    """Định danh người thực hiện ghi vào nhật ký: ``user:<account_code>[:<role>]``.
+
+    Vai trò là vai trò TẠI THỜI ĐIỂM thao tác; lọc theo người dùng chỉ dùng phần ``user:<account_code>``.
+    """
+    return f"{ACTOR_PREFIX}{account_code}" + (f":{role}" if role else "")
+
+
+def parse_actor(actor: Any) -> tuple[str, str] | None:
+    """``user:<account_code>[:<role>]`` → ``(account_code, role)``; giá trị cũ (tên đăng nhập, `cli`, …) → None."""
+    if not isinstance(actor, str):
+        return None
+    m = _ACTOR_RE.match(actor)
+    return (m.group(1), m.group(2) or "") if m else None
 
 
 class UserNotFound(LookupError):
@@ -120,6 +167,7 @@ class UserRepo:
         doc = {
             "_id": user_id or username,
             "username": username,
+            "account_code": new_account_code(),
             "display_name": display_name or username,
             "password_hash": password_hash,
             "role": role_list[0],
@@ -145,6 +193,74 @@ class UserRepo:
 
     def get_user_by_username(self, username: str) -> dict | None:
         return self.users.find_one({"username": username})
+
+    def ensure_indexes(self) -> None:
+        """Index của `users` (idempotent; gọi khi API khởi động). Định nghĩa trùng migration `0008`."""
+        for ix in USERS_INDEXES:
+            self.users.create_index(list(ix["key"].items()), name=ix["name"], unique=bool(ix.get("unique")),
+                                    partialFilterExpression=ix["partialFilterExpression"])
+
+    def ensure_account_code(self, user_id: str, doc: dict | None = None) -> str:
+        """Mã tài khoản của `user_id`; tài khoản cũ chưa có thì cấp (nguyên tử, chỉ ghi khi còn thiếu).
+
+        "Chưa có" = thiếu trường, ``null``, chuỗi rỗng hoặc không phải chuỗi (bộ lọc `MISSING_ACCOUNT_CODE`).
+        Trùng mã (index unique `account_code_unique`, xác suất rất nhỏ) → thử mã khác.
+        """
+        doc = doc if doc is not None else self.users.find_one({"_id": user_id}, {"account_code": 1})
+        if doc is None:
+            raise UserNotFound(f"không có người dùng {user_id!r}")
+        code = doc.get("account_code")
+        if isinstance(code, str) and code:
+            return code
+        for _ in range(5):
+            try:
+                self.users.update_one({"_id": user_id, **MISSING_ACCOUNT_CODE},
+                                      {"$set": {"account_code": new_account_code()}})
+                break
+            except DuplicateKeyError:
+                continue
+        cur = self.users.find_one({"_id": user_id}, {"account_code": 1}) or {}
+        code = cur.get("account_code")
+        if not (isinstance(code, str) and code):
+            raise UserNotFound(f"không cấp được account_code cho {user_id!r}")
+        return code
+
+    def get_user_by_account_code(self, code: str) -> dict | None:
+        return self.users.find_one({"account_code": code})
+
+    def actor_labels(self, actors: list[Any]) -> dict[str, dict]:
+        """Nhãn hiển thị cho danh sách actor (chỉ trả khi đọc, KHÔNG ghi vào nhật ký).
+
+        ``user:<code>[:<role>]`` → `{username, display_name, role, user_id}` của tài khoản hiện tại; giá trị
+        cũ (tên đăng nhập) → tra theo `username` để vẫn đọc được bản ghi cũ; không khớp → không có nhãn.
+        """
+        codes: dict[str, str] = {}
+        legacy: set[str] = set()
+        for a in {x for x in actors if isinstance(x, str) and x}:
+            parsed = parse_actor(a)
+            if parsed:
+                codes[a] = parsed[0]
+            else:
+                legacy.add(a)
+        out: dict[str, dict] = {}
+        proj = {"username": 1, "display_name": 1, "role": 1, "account_code": 1}
+        by_code = {d.get("account_code"): d for d in
+                   self.users.find({"account_code": {"$in": sorted(set(codes.values()))}}, proj)} if codes else {}
+        for a, code in codes.items():
+            role = parse_actor(a)[1]  # type: ignore[index]
+            d = by_code.get(code)
+            out[a] = {"actor_id": f"{ACTOR_PREFIX}{code}", "role": role or (d or {}).get("role"),
+                      "username": (d or {}).get("username"), "user_id": (d or {}).get("_id"),
+                      "display_name": (d or {}).get("display_name") or (d or {}).get("username"),
+                      "legacy": False}
+        if legacy:
+            for d in self.users.find({"username": {"$in": sorted(legacy)}}, proj):
+                out[d["username"]] = {"actor_id": f"{ACTOR_PREFIX}{d['account_code']}"
+                                      if d.get("account_code") else None,
+                                      "role": d.get("role"), "username": d.get("username"), "user_id": d["_id"],
+                                      "display_name": d.get("display_name") or d.get("username"),
+                                      "legacy": True}
+        return out
 
     def list_users(self, limit: int = 200) -> list[dict]:
         out = []
@@ -426,6 +542,7 @@ class UserRepo:
         """Thông tin người dùng an toàn để trả về client (không có hash)."""
         perm = {k: int(v) for k, v in (doc.get("perm") or {}).items()}
         return {"user_id": doc["_id"], "username": doc.get("username"),
+                "account_code": doc.get("account_code"),
                 "display_name": doc.get("display_name", doc.get("username")), "role": doc.get("role"),
                 "roles": doc.get("roles", []), "active": bool(doc.get("active", True)),
                 "perm_ver": int(doc.get("perm_ver", 1)), "perm": perm,

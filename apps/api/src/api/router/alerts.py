@@ -2,6 +2,7 @@
 
 Cảnh báo được sinh bởi scheduler/worker (GĐ7.7) và lưu trong `alerts`:
 ``{alert_id, station, basin, type, severity, issued_at, valid_to, message, status, ack_by, acked_at}``.
+Khi đọc, API gắn ``ack_by_label`` (tra `users`, không lưu).
 
 Mỗi cảnh báo có ``era`` của địa giới liên quan (luôn kèm `era` — ADR 0006).
 """
@@ -18,7 +19,7 @@ from pymongo import ReturnDocument
 
 from api.deps import UserContext, require
 from api.permissions import P
-from api.router.common import clean, to_vn_datetime
+from api.router.common import attach_actor_labels, clean, to_vn_datetime
 from api.state import state
 
 log = logging.getLogger("api.alerts")
@@ -66,6 +67,7 @@ async def list_alerts(station: str | None = None, basin: str | None = None,
                       "message": d.get("message"), "status": d.get("status"),
                       "ack_by": d.get("ack_by"), "acked_at": to_vn_datetime(d.get("acked_at")),
                       "era": d.get("era") or (d.get("province") or {}).get("era")})
+    attach_actor_labels(items, "ack_by")
     return {"count": len(items), "items": items}
 
 
@@ -79,6 +81,7 @@ async def get_alert(alert_id: str):
     doc["issued_at"] = to_vn_datetime(doc.get("issued_at"))
     doc["valid_to"] = to_vn_datetime(doc.get("valid_to"))
     doc["acked_at"] = to_vn_datetime(doc.get("acked_at"))
+    attach_actor_labels([doc], "ack_by")
     return doc
 
 
@@ -91,7 +94,7 @@ async def ack_alert(alert_id: str, body: AckRequest,
     flt = {"alert_id": alert_id} if db[ALERTS].find_one({"alert_id": alert_id}) else {"_id": alert_id}
     res = db[ALERTS].find_one_and_update(
         flt,
-        {"$set": {"status": body.status, "ack_by": user.username, "acked_at": now,
+        {"$set": {"status": body.status, "ack_by": user.actor, "acked_at": now,
                   "ack_note": body.note, "updated_at": now}},
         return_document=ReturnDocument.AFTER)
     if res is None:
@@ -103,4 +106,5 @@ async def ack_alert(alert_id: str, body: AckRequest,
     out = clean(res)
     out["issued_at"] = to_vn_datetime(out.get("issued_at"))
     out["acked_at"] = to_vn_datetime(out.get("acked_at"))
+    attach_actor_labels([out], "ack_by")
     return out

@@ -1,0 +1,92 @@
+{
+  "collection": "audit_logs",
+  "version": 1,
+  "description": "Nhật ký thay đổi do người ghi (CLI qc_decide.py, API).",
+  "validationLevel": "moderate",
+  "validationAction": "error",
+  "validator": {
+    "$jsonSchema": {
+      "bsonType": "object",
+      "required": [
+        "at",
+        "actor",
+        "action",
+        "collection",
+        "doc_id",
+        "before",
+        "after",
+        "reason",
+        "state"
+      ],
+      "properties": {
+        "at": {
+          "bsonType": "date"
+        },
+        "actor": {
+          "bsonType": "string"
+        },
+        "action": {
+          "bsonType": "string"
+        },
+        "source": {
+          "bsonType": [
+            "string",
+            "null"
+          ]
+        },
+        "collection": {
+          "bsonType": "string"
+        },
+        "doc_id": {
+          "bsonType": "string"
+        },
+        "target": {
+          "bsonType": [
+            "object",
+            "null"
+          ]
+        },
+        "before": {
+          "bsonType": [
+            "object",
+            "null"
+          ]
+        },
+        "after": {
+          "bsonType": [
+            "object",
+            "null"
+          ]
+        },
+        "reason": {
+          "bsonType": "string"
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "applied"
+          ]
+        }
+      }
+    }
+  },
+  "indexes": [
+    {
+      "key": {
+        "collection": 1,
+        "doc_id": 1,
+        "at": 1
+      },
+      "name": "doc_at_idx"
+    },
+    {
+      "key": {
+        "at": -1
+      },
+      "name": "at_idx"
+    }
+  ],
+  "notes": [
+    "Bản gốc trong code: vngis.qc_rules.AUDIT_LOGS_VALIDATOR / AUDIT_LOGS_INDEXES (test kiểm tra khớp)."
+  ]
+}

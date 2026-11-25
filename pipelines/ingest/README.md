@@ -14,7 +14,7 @@
 python -X utf8 pipelines/ingest/kttv/kttv_parser.py data/raw/kttv data/interim/kttv/kttv_ban_tin_parsed.json
 ```
 ```powershell
-python -X utf8 pipelines/ingest/kttv/kttv_load_mongo.py data/interim/kttv/kttv_ban_tin_parsed.json data/interim/kttv/hydromet_bulletins.json data/raw/kttv
+python -X utf8 pipelines/ingest/kttv/kttv_load_mongo.py data/interim/kttv/kttv_ban_tin_parsed.json data/interim/kttv/hydromet_bulletins.json data/raw/kttv --staging --promote
 ```
 ```powershell
 python -X utf8 pipelines/ingest/kttv/kttv_load_files.py data/raw/kttv
@@ -25,6 +25,23 @@ python -X utf8 pipelines/ingest/admin_units/create_admin_units.py
 ```powershell
 python -X utf8 pipelines/ingest/stations/create_stations.py
 ```
+
+### Nạp bản tin `hydromet_bulletins` (ADR 0007)
+
+`kttv_load_mongo.py` đọc 3 đường dẫn ở **vị trí** argv[1..3] (JSON parse, JSON đầu ra, thư mục PDF); cờ đứng sau. Kết nối qua `MONGO_URI`/`MONGO_DB` (mặc định `mongodb://localhost:27017`, `vietnam_gis`).
+
+| Cờ | Tác dụng |
+|---|---|
+| `--staging` | chỉ nạp vào collection tạm `hydromet_bulletins__staging_<run_id>` (validator + index như bản chính); bản chính không đổi |
+| `--run-id <id>` | định danh lượt (chữ/số/`_`/`-`); mặc định timestamp UTC |
+| `--promote` | (chạy tay, cùng `--staging`) kiểm tra staging → sao lưu `__prev` → `renameCollection(dropTarget=True)` writeConcern majority → kiểm tra số bản tin → xoá `__prev` (`vngis.atomic_reload.promote_staging`) |
+| `--no-overrides` | không áp lại sửa metadata đã duyệt (mặc định có áp) |
+| `--g0-only` | chỉ dựng lại validator + index của bản chính |
+| không cờ | chế độ cũ: xoá rồi nạp thẳng bản chính (chỉ giữ để tương thích; không dùng cho dữ liệu thật) |
+
+- **Worker** (`apps/worker`, job `ingest_bulletins`): mỗi lượt một thư mục `BULLETIN_WORK_DIR/<run_id>` (mặc định `data/interim/kttv/runs/<run_id>`, xoá sau lượt trừ khi `BULLETIN_KEEP_RUN_FILES=1`); gọi parser rồi loader **chỉ `--staging --run-id <id>`** (tiến trình con nhận `MONGO_URI`/`MONGO_DB` của worker). **Worker tự promote**: áp lại sửa metadata, `validate_ingest_staging`, `guard.check()` (còn giữ khoá `lock:reload:bulletins`) rồi `promote_staging`. Lỗi bất kỳ bước nào → xoá staging, bản chính giữ nguyên. Nguồn PDF: `BULLETIN_SOURCE_DIR` (mặc định `data/raw/kttv`).
+- **`__prev`**: một chính sách cho API/worker/loader — còn `hydromet_bulletins__prev` khi bắt đầu promote (lượt trước hỏng giữa chừng) → từ chối (loader thoát mã 4), không tự xoá; người vận hành so `__prev` với bản chính, lùi lại hoặc xoá tay. Promote thành công + số bản tin khớp → xoá `__prev`.
+- **Áp lại sửa metadata đã duyệt** (`vngis.atomic_reload.apply_bulletin_overrides`; loader, worker và `reload_bulletins_atomic` đều gọi trên staging, trước kiểm tra): nguồn sự thật là `audit_logs` (`action = bulletin_metadata`, `state = applied`, gồm cả bản hoàn tác `source = api_revert`), theo thời gian `at`: giá trị hiệu lực = `after` của bản cuối. Field cho phép: `source.is_primary` (K6), `bulletin_date`, `weekday`, `qc_note` (K2). Staging đang mang giá trị gốc (`before` của bản đầu, hoặc chưa có field khi gốc là `null`) → đặt giá trị đã duyệt; đã đúng → bỏ qua (idempotent); khác cả hai (PDF/parser đổi) → **không ghi đè**, in `XUNG ĐỘT …` để người xem lại. Không ghi thêm `audit_logs`. Đã kiểm tra trên bản sao dữ liệu thật (DB tạm): sau nạp lại từ giá trị gốc, đủ 10 bản tin / 12 field K2+K6; K1 nằm ở `qc_flags` (tách khỏi bản tin) không bị ảnh hưởng.
 
 - URI MongoDB truyền làm tham số cuối (mặc định `mongodb://localhost:27017`); với replica set dùng `mongodb://mongo1:27101,mongo2:27102,mongo3:27103/?replicaSet=rs0`.
 - Chuẩn hóa tên dùng `vngis.text.norm_name` (bản duy nhất). Script tự thêm `packages/vngis/src` vào `sys.path` nếu chưa cài `vngis`; cài thì dùng bản cài.
@@ -40,4 +57,4 @@ python -X utf8 pipelines/ingest/stations/create_stations.py
 - Chi tiết field: `docs/data/du_lieu_kttv.md` (tài liệu private, submodule `docs/`).
 
 ## Việc còn lại
-- `kttv_load_mongo.py` đang xóa rồi nạp lại collection: đổi sang nạp vào `__staging` rồi `renameCollection` (đề cương 5.6.4).
+- Bỏ hẳn chế độ "không cờ" (xoá rồi nạp thẳng) của `kttv_load_mongo.py` khi không còn ai dùng.

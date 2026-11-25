@@ -1,31 +1,162 @@
 # results/E2 – PhaseGNN và biến thể (B3, B4, B5a, B5b)
 
-> **TRẠNG THÁI (24/11/2026): cần chạy lại.**
->
-> - `baselines/` (B_harm, B1): dùng triều thiên văn của bản cũ `harmonic.R` — **fit trên cả test – cần chạy lại**.
-> - PhaseGNN/B3/B4/B5: G5 lần chạy 2026-11-23 có `astro_*` = null (`astro_merged = false`), nên mô hình
->   **không** dùng triều thiên văn bị rò rỉ. Nhưng tập mẫu đã đổi: `phasegnn.data.build_dataset` trước đây dựng
->   cửa sổ theo vị trí phần tử (bỏ qua ngày thiếu) → 848 / 19 509 mẫu train (4,3 %) và 324 / 4 743 mẫu val
->   (6,8 %) lệch ngày lịch; tập test không có ngày thiếu (0 mẫu lệch). Nay dùng lưới ngày lịch liên tục
->   (train 19 557, val 4 761, test 7 605 mẫu).
-> - `scripts/run_experiments.py` (B2 trong E2) sinh `t_peak` sai định dạng khi giờ VN < 7 — đã sửa.
-> - Chấm lại `phasegnn_d12/predictions_test.csv` bằng `phasegnn.evaluate` đã sửa: MAE 0.6956 m (không đổi),
->   MAE Δt 5.295 → 5.212 h; `B3_d12`: MAE 0.6632 m, MAE Δt 5.123 → 5.200 h. (Các checkpoint `*_d12` là bản trước
->   khi sửa `HeightScale`.)
+> **TRẠNG THÁI (24/11/2026): đã chạy lại** trên G5 mới (`astro_merged = true`, triều thiên văn fit chỉ trên train)
+> và mẫu theo lưới ngày lịch (train 19 557, val 4 761, test 7 605 mẫu; rò rỉ 0).
+> **Cấu hình giữ nguyên như lần trước** (đọc từ `model_record_seed0.json` cũ và lệnh `docker run` cũ):
+> seed 0, `hidden_dim` 64, `delta_h` 12, `t_in` 14, `t_out` 5, batch 16, lr 1e-3;
+> `*_d12`: 3 epoch, 300 mẫu train / 100 mẫu val, patience 10; `*_long`: 12 epoch, 1 200 / 300 mẫu, patience 4.
+> Huấn luyện bằng `python -m phasegnn.train` (như lần trước), **không** qua `scripts/run_experiments.py`
+> (mặc định của script đó khác: `hidden_dim` 32, `delta_h` 12.42, 3 seed → không so được với số cũ).
 
-## Chạy lại (thứ tự)
+## Ablation 3 seed (`*_abl`, 25/11/2026) — thay cho so sánh biến thể ở `d12`
 
-1. `pipelines/r/harmonic.R` → (Spark G5 nếu muốn ghép `astro_*`; G5 sẽ dừng mã 1 nếu triều chưa fit lại).
-2. Huấn luyện lại (CPU, lâu):
+**Cấu hình:** đúng `long` (12 epoch, 1 200 mẫu train / 300 val, patience 4, `hidden_dim` 64, `delta_h` 12,
+batch 16, lr 1e-3), seed **0, 1, 2**, cho phasegnn, B4 (τ cố định), B5a (chỉ cạnh `up`), B5b (chỉ cạnh `down`),
+B3 (GraphSAGE). Seed 0 của `phasegnn_abl` tái tạo **đúng từng số** `phasegnn_long` (tất định). Chấm trên **toàn
+bộ tập test** (863 ngày, 7 605 mẫu, 38 025 cặp đỉnh ngày) bằng `phasegnn.evaluate`.
+Tổng thời gian máy: huấn luyện ≈ 4–12 phút/mô hình (6 song song), chấm ≈ 1,5 phút/mô hình khi chạy một mình
+(43 phút khi 7 cùng lúc).
+
+> **Giới hạn quan trọng (phát hiện 25/11/2026):** với `--max-train-samples 1200` kiểu cũ (`head`), 1 200 mẫu
+> train và 300 mẫu val **đều là của BEN_LUC** (mẫu xếp theo trạm → ngày). Mọi mô hình `long`/`abl` chỉ học nhãn
+> của một trạm (2017-01 → 2020-04) rồi dự báo cho 9 trạm. Ablation dưới đây vẫn so được giữa các biến thể (cùng
+> dữ liệu), nhưng không đại diện cho mô hình huấn luyện đầy đủ. `train.py` nay có `--subsample spread` (xem
+> `results/E5/README.md`); chưa chạy lại ablation với tùy chọn này.
+
+**Trung bình ± độ lệch chuẩn qua 3 seed** (`ablation_mean_sd.csv`; từng seed: `ablation_by_seed.csv`):
+
+| Mô hình | MAE (m) | RMSE | bias | NSE | KGE | MAE Δt (h) | Phủ 10–90 % |
+|---|---|---|---|---|---|---|---|
+| **phasegnn** | **0.180 ± 0.021** | **0.236 ± 0.022** | −0.098 ± 0.066 | **0.924 ± 0.014** | 0.916 ± 0.026 | 4.82 ± 0.20 | 0.51 ± 0.05 |
+| B4 τ cố định | 0.187 ± 0.024 | 0.242 ± 0.027 | −0.107 ± 0.076 | 0.919 ± 0.017 | 0.914 ± 0.036 | **4.79 ± 0.25** | 0.49 ± 0.06 |
+| B5a chỉ `up` | 0.189 ± 0.030 | 0.247 ± 0.038 | −0.099 ± 0.064 | 0.915 ± 0.027 | **0.923 ± 0.038** | 5.16 ± 0.51 | 0.62 ± 0.04 |
+| B5b chỉ `down` | 0.207 ± 0.017 | 0.264 ± 0.017 | −0.097 ± 0.080 | 0.904 ± 0.012 | 0.918 ± 0.038 | 5.18 ± 0.27 | 0.64 ± 0.17 |
+| B3 GraphSAGE | 0.212 ± 0.052 | 0.272 ± 0.057 | −0.074 ± 0.135 | 0.897 ± 0.045 | 0.913 ± 0.069 | 4.86 ± 0.12 | 0.54 ± 0.18 |
+| *Tham chiếu:* B0 persistence | 0.166 | 0.231 | +0.043 | 0.927 | 0.954 | 4.01 | 0.59 |
+| *Tham chiếu:* B_KTTV (3 trạm) | 0.081 | 0.117 | +0.002 | 0.769 | 0.880 | 2.59 | 0.86 |
+
+MAE từng seed (0/1/2): phasegnn 0.157/0.197/0.187; B4 0.159/0.201/0.202; B5a 0.165/0.223/0.180;
+B5b 0.188/0.222/0.209; B3 0.176/0.188/0.272.
+
+**Kiểm định ghép cặp phasegnn vs biến thể** (`ablation_tests.csv`, `scripts/ablation_summary.py`).
+Chọn **dự báo trung bình qua seed** làm kiểm định chính (q10/q50/q90 trung bình cộng, giờ đỉnh trung bình vòng
+24 h; file `<mô hình>_abl/test_full_seedmean/`), và lặp lại trên từng seed để xem chiều có ổn định không.
+Ghép theo `(station, target_date, lead_day)`; Wilcoxon ký hạng trên `|e_phasegnn| − |e_biến thể|`; DM trên chuỗi
+trung bình theo ngày phát bản tin (845 ngày), Newey–West lag 4; Holm trên 4 so sánh. `diff` < 0 ⇒ phasegnn tốt hơn.
+
+| phasegnn vs | MAE TB-seed phasegnn / biến thể | diff | Wilcoxon p_Holm | DM t | DM p_Holm | diff seed 0 / 1 / 2 |
+|---|---|---|---|---|---|---|
+| B4 τ cố định | 0.175 / 0.179 | −0.004 | < 1e-300 | −6.69 | 6.7e-11 | −0.002 / −0.004 / −0.015 (3/3 tốt hơn) |
+| B5a chỉ `up` | 0.175 / 0.186 | −0.011 | 2e-272 | −4.92 | 1.7e-06 | −0.008 / −0.026 / **+0.007** (2/3) |
+| B5b chỉ `down` | 0.175 / 0.199 | −0.024 | < 1e-300 | −6.93 | 1.6e-11 | −0.031 / −0.026 / −0.022 (3/3) |
+| B3 GraphSAGE | 0.175 / 0.181 | −0.006 | 5e-32 | −2.53 | 0.011 | −0.019 / **+0.009** (DM p = 0.18) / −0.085 (2/3) |
+
+(Trung bình 3 seed của phasegnn — MAE 0.175 — kém seed 0 đơn lẻ (0.157) vì hai seed còn lại kém hơn; trung bình
+dự báo không tự động tốt hơn seed tốt nhất.)
+
+**Đọc kết quả (trung thực, sơ bộ):**
+
+1. **Bỏ cạnh `up` (B5b, chỉ lan truyền xuôi dòng) hại rõ nhất**: +0.024 m MAE, ổn định cả 3 seed. Phù hợp vật lý:
+   sóng triều đi từ biển vào là tín hiệu chính. Bỏ cạnh `down` (B5a) hại ít hơn và không ổn định (1 seed B5a tốt hơn).
+2. **τ học được (phasegnn vs B4) giúp rất ít**: −0.004 m MAE (≈ 2 %), cùng chiều cả 3 seed và có ý nghĩa thống kê,
+   nhưng nhỏ hơn nhiều so với độ lệch giữa các seed (0.021 m); MAE giờ đỉnh của B4 còn hơi tốt hơn (4.79 vs 4.82 h).
+   Kết luận: ở cấu hình này τ học được **chưa** đem lại cải thiện có ý nghĩa thực tế.
+3. **So với GraphSAGE (B3)** phasegnn tốt hơn trung bình (−0.006 m, DM p_Holm = 0.011) nhưng không ổn định theo seed
+   (seed 1 B3 tốt hơn); B3 dao động mạnh nhất giữa các seed (sd 0.052 m).
+4. **Không biến thể nào tốt hơn persistence (B0, 0.166 m) khi tính trung bình qua seed**; chỉ seed 0 của
+   phasegnn/B4 gần bằng B0. Khoảng cách tới B_KTTV (0.081 m) không đổi. Kiểm định ±6 h trong
+   `results/evaluation/` (tên mô hình `phasegnn-abl`, `B4-abl`, …).
+
+## Sửa lỗi trong lần chạy này
+
+`phasegnn/train.py::evaluate` gọi `pinball_loss(...)` (trả về **vô hướng**) rồi lấy `pin_all[bi]` → mọi lệnh
+huấn luyện dừng ở epoch 0 với `IndexError: invalid index of a 0-dim tensor`. Đã sửa: tính pinball cho từng mẫu.
+117 test `packages/phasegnn/tests` đạt.
+
+## Thời gian chạy (CPU, 1 luồng/mô hình, chạy song song trong Docker)
+
+| Việc | Thời gian |
+|---|---|
+| Huấn luyện `*_d12` (mỗi mô hình) | 45 – 58 s (≈ 7 – 16 s/epoch) |
+| Huấn luyện `phasegnn_long` / `B3_long` | 5 phút 35 s / 3 phút 56 s (dừng sớm, best epoch 5 / 2) |
+| `evaluate_checkpoint.py --max-days 300` (mỗi mô hình) | 1,2 phút (chạy 2 cùng lúc) – 9 phút (7 cùng lúc) |
+| `evaluate_checkpoint.py` toàn bộ test (863 ngày, 7 605 mẫu) | 22 – 32 phút (7 cùng lúc) |
+
+## Kết quả trên toàn bộ tập test (`summary_test_full.csv`)
+
+Chấm bằng `phasegnn.evaluate` — **cùng hàm chấm với `results/baselines/summary.csv`**
+(`scripts/summarize_predictions.py`), nên so được trực tiếp với mô hình cơ sở. 9 trạm, 38 025 cặp.
+
+| Mô hình | MAE (m) | RMSE | bias | NSE | KGE | MAE Δt (h) | Phủ 10–90 % |
+|---|---|---|---|---|---|---|---|
+| phasegnn (d12) | 0.2374 | 0.303 | −0.159 | 0.875 | 0.880 | 6.25 | 0.405 |
+| B3 GraphSAGE (d12) | 0.2391 | 0.305 | −0.165 | 0.873 | 0.875 | 6.20 | 0.345 |
+| B4 τ cố định (d12) | 0.2374 | 0.303 | −0.159 | 0.875 | 0.880 | 6.25 | 0.405 |
+| B5a chỉ `up` (d12) | 0.2371 | 0.303 | −0.158 | 0.875 | 0.880 | 6.26 | 0.423 |
+| B5b chỉ `down` (d12) | 0.2359 | 0.301 | −0.156 | 0.876 | 0.882 | 6.11 | 0.719 |
+| **phasegnn (long)** | **0.1573** | **0.212** | −0.021 | **0.939** | 0.946 | 4.80 | 0.558 |
+| B3 GraphSAGE (long) | 0.1763 | 0.233 | −0.002 | 0.926 | 0.955 | 4.92 | 0.740 |
+| *Tham chiếu:* B0 persistence | 0.1661 | 0.231 | +0.043 | 0.927 | 0.954 | 4.01 | 0.592 |
+| *Tham chiếu:* **B_KTTV** (3 trạm, 11 050 cặp) | **0.0806** | 0.117 | +0.002 | 0.769 | 0.880 | **2.59** | 0.862 |
+
+**Đọc kết quả (trung thực):**
+
+- **Không mô hình nào trong E2 thắng B_KTTV.** PhaseGNN tốt nhất (`long`) có MAE 0.157 m, gần gấp đôi B_KTTV
+  (0.081 m), và MAE giờ đỉnh 4.8 h so với 2.6 h. Kiểm định trên cùng cặp ghép: `results/evaluation/README.md`.
+- `phasegnn_long` có MAE thấp hơn B3_long (0.176 m). So với B0 persistence (0.166 m) thì **không khác biệt có ý nghĩa** (DM p = 0.94 trước hiệu chỉnh, p_Holm = 1.0, `results/evaluation/`; ghép ±6 h MAE B0_py còn thấp hơn: 0.170 so với 0.172 m), và giờ đỉnh kém B0 (4.80 h so với 4.01 h).
+- Các mô hình `d12` gần như **chưa học** (best epoch 0 ở 4/5 mô hình, MAE gần như không đổi theo chân trời: phasegnn_d12
+  0.2697 → 0.2703 m từ lead 1 → 5, chấm 300 ngày) và kém cả B0 persistence. So sánh biến thể ở cấu hình này **không có ý nghĩa**.
+- **phasegnn và B4 cho kết quả có MAE/RMSE trùng nhau tới 1e-6** (độ phủ 10–90 % lệch ~3e-5) (cả lần cũ lẫn lần này): với 3 epoch, `learn_tau` không làm
+  đổi dự báo. Đã chạy ablation 3 seed ở cấu hình `long`: xem mục "Ablation 3 seed" ở trên (thư mục `d12`/`long` cũ giữ nguyên để đối chiếu).
+
+## So với số cũ (`--max-days 300`, `phasegnn/scripts/scoring.py`, giống lần chạy trước)
+
+| Mô hình | MAE đỉnh cũ (m) | MAE đỉnh cũ – chấm lại (m) | **MAE đỉnh mới (m)** | MAE giờ cũ – chấm lại (h) | **MAE giờ mới (h)** |
+|---|---|---|---|---|---|
+| phasegnn_d12 | 0.6993 | 0.6956 | **0.2701** | 5.212 | **5.072** |
+| B3_d12 | 0.6822 | 0.6632 | **0.2702** | 5.200 | **5.077** |
+| B4_d12 | — | — | 0.2701 | — | 5.072 |
+| B5a_d12 | — | — | 0.2701 | — | 5.038 |
+| B5b_d12 | — | — | 0.2613 | — | 4.961 |
+| phasegnn_long | — (chưa chấm) | — | **0.1828** | — | 1.281 |
+| B3_long | — (chưa chấm) | — | 0.1958 | — | 3.781 |
+
+MAE đỉnh d12 giảm 0.70 → 0.27 m chủ yếu vì checkpoint cũ là bản **trước** khi sửa `HeightScale`, không phải do
+`astro_*`. "MAE giờ" của `scoring.py` khác định nghĩa `mae_dt` của `phasegnn.evaluate` (bảng trên) — không trộn hai cột.
+Val (best): phasegnn_d12 0.308 → 0.299 m; B3_d12 0.268 → 0.301; phasegnn_long 0.180 → 0.211; B3_long 0.176 → 0.190 m.
+
+## File
+
+`<mô hình>_abl/` : `checkpoint_seed{0,1,2}.pt`, `model_record_seed*.json`, `train_log_seed*.json`, `test_full_seed*/` (chấm từng seed), `test_full_seedmean/` (dự báo trung bình seed).
+`<mô hình>/` : `checkpoint_seed0.pt`, `model_record_seed0.json`, `train_log_seed0.json`, `metrics_test*.csv/json`
+(300 ngày); `<mô hình>/test_full/` : chấm toàn bộ test. `predictions_test.csv`, `*.pt`, `logs/` không commit.
+Lưu ý: `phasegnn_long/predictions_test.csv` (300 ngày) mang tên `phasegnn-v1`; bản `test_full/` mang tên
+`phasegnn-long` / `B3-long` để không trùng với `d12` khi đưa vào `evaluation.R`.
+
+## Chạy lại
 
 ```bash
-docker run --rm -v "$PWD:/work" -w /work phasegnn:local \
-    python -m phasegnn.train --variant phasegnn --epochs 20 --delta-h 12 --out-dir results/E2/phasegnn
-docker run --rm -v "$PWD:/work" -w /work phasegnn:local \
-    python packages/phasegnn/scripts/evaluate_checkpoint.py --checkpoint results/E2/phasegnn/checkpoint_seed0.pt \
-        --split test --out-dir results/E2/phasegnn
-docker run --rm -v "$PWD:/work" -w /work phasegnn:local \
-    python packages/phasegnn/scripts/evaluate_baselines.py --split test --out-dir results/E2/baselines
+R="$(pwd -W)"   # Git Bash; cần MSYS_NO_PATHCONV=1
+MSYS_NO_PATHCONV=1 docker run --rm -v "$R:/work" -w /work -e PYTHONPATH=/work/packages/phasegnn/src phasegnn:local \
+  python -X utf8 -m phasegnn.train --variant phasegnn --epochs 3 --delta-h 12 --max-train-samples 300 \
+    --max-val-samples 100 --out-dir results/E2/phasegnn_d12 --no-mlflow --no-register
+# long: --epochs 12 --max-train-samples 1200 --max-val-samples 300 --patience 4 --out-dir results/E2/phasegnn_long
+MSYS_NO_PATHCONV=1 docker run --rm -v "$R:/work" -w /work -e PYTHONPATH=/work/packages/phasegnn/src phasegnn:local \
+  python -X utf8 packages/phasegnn/scripts/evaluate_checkpoint.py --checkpoint results/E2/phasegnn_d12/checkpoint_seed0.pt \
+    --split test --out-dir results/E2/phasegnn_d12/test_full          # thêm --max-days 300 để so với số cũ
+MSYS_NO_PATHCONV=1 docker run --rm -v "$R:/work" -w /work -e PYTHONPATH=/work/packages/phasegnn/src phasegnn:local \
+  python -X utf8 scripts/summarize_predictions.py --out results/E2/summary_test_full.csv results/E2/*/test_full/predictions_test.csv
 ```
 
-(Lặp lại cho `--variant B3|B4|B5a|B5b`.)
+(Lặp lại cho `--variant B3|B4|B5a|B5b`; với `long` thêm `--model-name phasegnn-long|B3-long` khi chấm.)
+
+**Ablation 3 seed (`*_abl`).** Huấn luyện như `long` với `--seed 0|1|2 --out-dir results/E2/<mô hình>_abl`;
+chấm `evaluate_checkpoint.py --checkpoint results/E2/<mô hình>_abl/checkpoint_seed<k>.pt --split test
+--model-name <mô hình>-abl-s<k> --out-dir results/E2/<mô hình>_abl/test_full_seed<k>`; rồi tổng hợp:
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm -v "$R:/work" -w /work -e PYTHONPATH=/work/packages/phasegnn/src phasegnn:local   python -X utf8 scripts/ablation_summary.py --root results/E2 --out-dir results/E2     --models phasegnn B4 B5a B5b B3 --seeds 0 1 2
+```
+
+Ghi `ablation_by_seed.csv`, `ablation_mean_sd.csv`, `ablation_tests.csv` và
+`<mô hình>_abl/test_full_seedmean/predictions_test.csv` (tên `<mô hình>-abl`, đưa vào `evaluation.R`).

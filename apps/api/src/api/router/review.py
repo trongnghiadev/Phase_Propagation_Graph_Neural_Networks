@@ -24,7 +24,8 @@ from pydantic import BaseModel, Field
 
 from api.deps import UserContext, require, rate_limit
 from api.permissions import P
-from api.router.common import acquire_guard, clean, guard_check, qc_http_error, to_vn_datetime
+from api.router.common import (acquire_guard, attach_actor_labels, clean, guard_check, qc_http_error,
+                               to_vn_datetime)
 from api.state import state
 
 log = logging.getLogger("api.review")
@@ -63,7 +64,7 @@ async def review_queue(review_status: str | None = Query(None, alias="status"),
     if station:
         flt["station"] = station
     docs = list(state.db[QC_FLAGS].find(flt).sort([("station", 1), ("ts", 1)]).limit(limit))
-    items = [_item(d) for d in docs]
+    items = attach_actor_labels([_item(d) for d in docs], "decided_by")
     return {"count": len(items), "items": items}
 
 
@@ -90,7 +91,7 @@ async def review_approve(review_id: str, body: ReviewDecision,
         guard_check(guard)
         try:
             res = await asyncio.to_thread(
-                qc.decide, db, review_id, body.status, reason=body.reason, decided_by=user.username,
+                qc.decide, db, review_id, body.status, reason=body.reason, decided_by=user.actor,
                 expected_version=int(body.version), corrected_value=body.corrected_value, source="api")
         except (qc.QcError, ValueError) as e:
             raise qc_http_error(e) from None
@@ -100,6 +101,6 @@ async def review_approve(review_id: str, body: ReviewDecision,
         state.cache.bump_version(QC_FLAGS)
     except Exception as e:  # noqa: BLE001
         log.warning("không bump ver:%s: %s", QC_FLAGS, e)
-    out = _item(res)
+    out = attach_actor_labels([_item(res)], "decided_by")[0]
     out["flag"] = clean(res)
     return out

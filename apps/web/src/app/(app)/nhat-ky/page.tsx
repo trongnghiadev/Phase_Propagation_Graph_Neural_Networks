@@ -7,9 +7,11 @@
  * - `GET /api/v1/audit?collection=&actor=&state=` — danh sách bản ghi nhật ký
  *   (cần quyền `VIEW_AUDIT`).
  * - `GET /api/v1/audit/{id}` — chi tiết một bản ghi.
- * - `POST /api/v1/audit/{id}/revert` — hoàn tác: khôi phục giá trị `before` của bản ghi
- *   gốc. Bắt buộc `reason`; 409 nếu đã hoàn tác trước đó hoặc không có `before`;
- *   423 nếu bản ghi gốc đang bị khoá sửa.
+ * - `POST /api/v1/audit/{id}/revert` — hoàn tác (bắt buộc `reason`). Chỉ hai loại:
+ *   `qc_decision` (đưa cờ QC về quyết định trước) và `bulletin_metadata` (khôi phục trường bản tin);
+ *   loại khác → 422. Đã/đang hoàn tác, chưa `applied` hoặc dữ liệu đã bị sửa tiếp → 409.
+ *   Cần `VIEW_AUDIT` và quyền ghi trên collection đích (thiếu → 403).
+ *   Hoàn tác tạo một bản ghi nhật ký MỚI; bản ghi gốc chỉ được gắn `reverted_at`.
  */
 
 import React, { useState } from "react";
@@ -24,14 +26,35 @@ import {
   type Column,
 } from "@/components/ui";
 import { api, toError } from "@/lib/api";
-import { formatDateTime } from "@/lib/format";
+import { formatActor, formatDateTime } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
 import { usePermission } from "@/lib/session";
-import { COLLECTIONS } from "@/lib/permissions";
+import { COLLECTIONS, PERM_FLAGS } from "@/lib/permissions";
 import type { AuditItem } from "@/lib/types";
 
+/**
+ * Loại thay đổi API cho phép hoàn tác và quyền ghi cần có trên collection đích
+ * (`REVERTIBLE` trong `apps/api/src/api/router/audit.py`): `qc_decision` cần APPROVE trên `qc_flags`,
+ * `bulletin_metadata` cần UPDATE trên `hydromet_bulletins`.
+ */
+const REVERTIBLE: Record<string, { collection: string; flag: number }> = {
+  qc_decision: { collection: "qc_flags", flag: PERM_FLAGS.APPROVE },
+  bulletin_metadata: { collection: "hydromet_bulletins", flag: PERM_FLAGS.UPDATE },
+};
+
+/** Bản ghi có thể hoàn tác qua API không (kiểm tra thật vẫn ở API). */
+function canRevertItem(a: AuditItem): boolean {
+  const rule = a.action ? REVERTIBLE[a.action] : undefined;
+  return Boolean(a.id && rule && a.collection === rule.collection && a.state === "applied" && !a.reverted_at);
+}
+
 export default function AuditPage() {
-  const { canViewAudit } = usePermission();
+  const { can, canViewAudit } = usePermission();
+  /** Người dùng có quyền ghi cần thiết trên collection đích của bản ghi (API kiểm tra lại, thiếu → 403). */
+  const hasRevertPermission = (a: AuditItem): boolean => {
+    const rule = a.action ? REVERTIBLE[a.action] : undefined;
+    return Boolean(rule && can(rule.collection, rule.flag));
+  };
   const [collection, setCollection] = useState("");
   const [actor, setActor] = useState("");
   const [state, setState] = useState("");
@@ -58,8 +81,12 @@ export default function AuditPage() {
     setBusy(true);
     setErr(null);
     try {
-      await api.revertAudit(reverting.id ?? "", { reason });
-      setOk(`Đã hoàn tác bản ghi nhật ký ${reverting.id}.`);
+      const res = await api.revertAudit(reverting.id ?? "", { reason: reason.trim() });
+      const newId = typeof res.revert_audit_id === "string" ? res.revert_audit_id : null;
+      setOk(
+        `Đã hoàn tác bản ghi nhật ký ${reverting.id}` +
+          (newId ? ` (bản ghi hoàn tác mới: ${newId}).` : "."),
+      );
       setReverting(null);
       setReason("");
       audit.reload();
@@ -76,7 +103,7 @@ export default function AuditPage() {
       header: "Thời điểm",
       render: (a) => formatDateTime(a.at),
     },
-    { key: "actor", header: "Người thực hiện", render: (a) => a.actor ?? "—" },
+    { key: "actor", header: "Người thực hiện", render: (a) => formatActor(a.actor, a.actor_label) },
     { key: "action", header: "Hành động", render: (a) => a.action ?? "—" },
     { key: "source", header: "Nguồn", render: (a) => a.source ?? "—" },
     { key: "collection", header: "Collection", render: (a) => a.collection ?? "—" },
@@ -86,17 +113,14 @@ export default function AuditPage() {
       key: "state",
       header: "Trạng thái",
       render: (a) => (
-        <Badge
-          color={
-            a.state === "reverted"
-              ? "#6d4c41"
-              : a.state === "applied"
-                ? "#2e7d32"
-                : "#f9a825"
-          }
-        >
-          {a.state ?? "—"}
-        </Badge>
+        <span style={{ display: "inline-flex", gap: 4 }}>
+          <Badge color={a.state === "applied" ? "#2e7d32" : "#f9a825"}>{a.state ?? "—"}</Badge>
+          {a.reverted_at && (
+            <Badge color="#6d4c41" title={`hoàn tác lúc ${formatDateTime(a.reverted_at)}`}>
+              đã hoàn tác
+            </Badge>
+          )}
+        </span>
       ),
     },
     {
@@ -105,8 +129,16 @@ export default function AuditPage() {
       render: (a) => (
         <div style={{ display: "flex", gap: 6 }}>
           <Button onClick={() => setDetail(a)}>Xem</Button>
-          {canViewAudit(COLLECTIONS.audit) && a.state !== "reverted" && a.id && (
-            <Button variant="danger" onClick={() => setReverting(a)}>
+          {canViewAudit(COLLECTIONS.audit) && canRevertItem(a) && hasRevertPermission(a) && (
+            <Button
+              variant="danger"
+              onClick={() => {
+                setOk(null);
+                setErr(null);
+                setReason("");
+                setReverting(a);
+              }}
+            >
               Hoàn tác
             </Button>
           )}
@@ -120,11 +152,12 @@ export default function AuditPage() {
       <h1>Nhật ký thay đổi</h1>
       <p style={{ color: "#607d8b", marginTop: 0 }}>
         Mọi thay đổi dữ liệu (từ API hoặc pipeline) đều được ghi vào{" "}
-        <code>audit_logs</code>. Bản ghi có <code>before</code> thì có thể hoàn tác.
+        <code>audit_logs</code>. Chỉ hoàn tác được quyết định QC (<code>qc_decision</code>) và sửa
+        metadata bản tin (<code>bulletin_metadata</code>) đã áp dụng.
       </p>
 
       {audit.error && <ErrorNotice error={audit.error} onRetry={audit.reload} />}
-      {err && <ErrorNotice error={err} onDismiss={() => setErr(null)} />}
+      {err && !reverting && <ErrorNotice error={err} onDismiss={() => setErr(null)} />}
       {ok && <InfoNotice kind="success">{ok}</InfoNotice>}
       {!canViewAudit(COLLECTIONS.audit) && (
         <InfoNotice kind="warn">
@@ -160,7 +193,7 @@ export default function AuditPage() {
           <input
             value={actor}
             onChange={(e) => setActor(e.target.value)}
-            placeholder="tên đăng nhập"
+            placeholder="tên đăng nhập hoặc user:acc_…"
             style={sel}
           />
         </div>
@@ -170,7 +203,6 @@ export default function AuditPage() {
             <option value="">Tất cả</option>
             <option value="pending">pending</option>
             <option value="applied">applied</option>
-            <option value="reverted">reverted</option>
           </select>
         </div>
         <Button onClick={audit.reload}>Tải lại</Button>
@@ -208,7 +240,8 @@ export default function AuditPage() {
             <table style={{ fontSize: 13, width: "100%", marginBottom: 14 }}>
               <tbody>
                 <Row label="Thời điểm" value={formatDateTime(detail.at)} />
-                <Row label="Người thực hiện" value={detail.actor ?? "—"} />
+                <Row label="Người thực hiện" value={formatActor(detail.actor, detail.actor_label)} />
+                <Row label="Định danh" value={detail.actor ?? "—"} />
                 <Row label="Hành động" value={detail.action ?? "—"} />
                 <Row label="Nguồn" value={detail.source ?? "—"} />
                 <Row label="Collection" value={detail.collection ?? "—"} />
@@ -216,7 +249,12 @@ export default function AuditPage() {
                 <Row label="Lý do" value={detail.reason ?? "—"} />
                 <Row label="Trạng thái" value={detail.state ?? "—"} />
                 {detail.reverted_at && (
-                  <Row label="Hoàn tác lúc" value={formatDateTime(detail.reverted_at)} />
+                  <>
+                    <Row label="Hoàn tác lúc" value={formatDateTime(detail.reverted_at)} />
+                    <Row label="Người hoàn tác" value={formatActor(detail.reverted_by, detail.reverted_by_label)} />
+                    <Row label="Lý do hoàn tác" value={detail.revert_reason ?? "—"} />
+                    <Row label="Bản ghi hoàn tác" value={detail.revert_audit_id ?? "—"} />
+                  </>
                 )}
               </tbody>
             </table>
@@ -232,10 +270,19 @@ export default function AuditPage() {
               </div>
             </div>
 
-            {detail.before == null && (
-              <InfoNotice kind="warn">
-                Bản ghi này không lưu giá trị <code>before</code> nên không thể hoàn tác (API
-                trả 409).
+            {canRevertItem(detail) && !hasRevertPermission(detail) && (
+              <InfoNotice kind="info">
+                Bạn không có quyền hoàn tác bản ghi này (cần{" "}
+                {detail.action === "qc_decision" ? "APPROVE trên qc_flags" : "UPDATE trên hydromet_bulletins"}).
+              </InfoNotice>
+            )}
+            {!canRevertItem(detail) && (
+              <InfoNotice kind="info">
+                {detail.reverted_at
+                  ? "Bản ghi này đã được hoàn tác."
+                  : detail.action && REVERTIBLE[detail.action]
+                    ? "Chỉ hoàn tác được thay đổi đã áp dụng (state = applied)."
+                    : "Loại thay đổi này không hoàn tác được qua API (chỉ qc_decision và bulletin_metadata)."}
               </InfoNotice>
             )}
           </>
@@ -249,10 +296,13 @@ export default function AuditPage() {
       >
         {reverting && (
           <>
+            {err && <ErrorNotice error={err} onDismiss={() => setErr(null)} />}
             <div style={{ fontSize: 13, marginBottom: 10, color: "#607d8b" }}>
-              Sẽ khôi phục giá trị <code>before</code> của bản ghi{" "}
-              <code>{reverting.doc_id}</code> trong collection{" "}
-              <code>{reverting.collection}</code>.
+              {reverting.action === "qc_decision"
+                ? "Sẽ đưa cờ QC về quyết định trước thay đổi này"
+                : "Sẽ khôi phục giá trị trước thay đổi này của bản tin"}{" "}
+              <code>{reverting.doc_id}</code> (collection <code>{reverting.collection}</code>). Nếu
+              dữ liệu đã bị sửa tiếp sau thay đổi này, API sẽ từ chối (409).
             </div>
             <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
               Lý do hoàn tác (bắt buộc)
@@ -261,7 +311,8 @@ export default function AuditPage() {
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               rows={3}
-              placeholder="ví dụ: sửa nhầm tọa độ trạm"
+              maxLength={1000}
+              placeholder="ví dụ: duyệt nhầm cờ QC"
               style={{
                 width: "100%",
                 padding: 8,

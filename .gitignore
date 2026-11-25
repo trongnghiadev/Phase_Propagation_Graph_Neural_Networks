@@ -71,3 +71,9 @@ results/**/predictions*.csv
 results/**/matched_sample*.csv
 results/**/evaluation_matched_sample.csv
 results/E1/astro_residual.csv
+
+# Bí mật cục bộ (mật khẩu tài khoản mẫu…) – không commit
+.secrets/
+
+# Build cache của TypeScript
+*.tsbuildinfo

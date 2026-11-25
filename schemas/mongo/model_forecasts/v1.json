@@ -1,0 +1,183 @@
+{
+  "collection": "model_forecasts",
+  "version": 1,
+  "description": "Dự báo của mô hình PhaseGNN: một document mỗi (run_date, station, lead_day).",
+  "validationLevel": "moderate",
+  "validationAction": "error",
+  "validator": {
+    "$jsonSchema": {
+      "bsonType": "object",
+      "required": [
+        "_id",
+        "run_date",
+        "station",
+        "lead_day",
+        "target_date",
+        "model",
+        "peaks",
+        "source",
+        "fence",
+        "updated_at",
+        "schema_version"
+      ],
+      "properties": {
+        "_id": {
+          "bsonType": "string"
+        },
+        "run_date": {
+          "bsonType": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "station": {
+          "bsonType": "string"
+        },
+        "lead_day": {
+          "bsonType": [
+            "int",
+            "long"
+          ],
+          "minimum": 1
+        },
+        "target_date": {
+          "bsonType": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "model": {
+          "bsonType": "string"
+        },
+        "model_version": {
+          "bsonType": [
+            "string",
+            "null"
+          ]
+        },
+        "checkpoint": {
+          "bsonType": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "enum": [
+            "phasegnn"
+          ]
+        },
+        "peaks": {
+          "bsonType": "array",
+          "minItems": 1,
+          "items": {
+            "bsonType": "object",
+            "required": [
+              "peak_idx",
+              "h_q10",
+              "h_q50",
+              "h_q90"
+            ],
+            "properties": {
+              "peak_idx": {
+                "bsonType": [
+                  "int",
+                  "long"
+                ],
+                "minimum": 0
+              },
+              "h_q10": {
+                "bsonType": [
+                  "double",
+                  "int",
+                  "long",
+                  "decimal"
+                ]
+              },
+              "h_q50": {
+                "bsonType": [
+                  "double",
+                  "int",
+                  "long",
+                  "decimal"
+                ]
+              },
+              "h_q90": {
+                "bsonType": [
+                  "double",
+                  "int",
+                  "long",
+                  "decimal"
+                ]
+              },
+              "t_peak": {
+                "bsonType": [
+                  "date",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "h_max_q50": {
+          "bsonType": [
+            "double",
+            "int",
+            "long",
+            "decimal",
+            "null"
+          ]
+        },
+        "job_id": {
+          "bsonType": [
+            "string",
+            "null"
+          ]
+        },
+        "fence": {
+          "bsonType": [
+            "int",
+            "long"
+          ]
+        },
+        "created_at": {
+          "bsonType": "date"
+        },
+        "updated_at": {
+          "bsonType": "date"
+        },
+        "schema_version": {
+          "bsonType": [
+            "int",
+            "long"
+          ],
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "indexes": [
+    {
+      "name": "run_station_lead_unique",
+      "key": {
+        "run_date": 1,
+        "station": 1,
+        "lead_day": 1
+      },
+      "unique": true
+    },
+    {
+      "name": "station_run_idx",
+      "key": {
+        "station": 1,
+        "run_date": -1
+      }
+    },
+    {
+      "name": "target_station_idx",
+      "key": {
+        "target_date": 1,
+        "station": 1
+      }
+    }
+  ],
+  "notes": [
+    "Bản gốc trong code: apps/worker/src/worker/forecast.py (test kiểm tra khớp).",
+    "_id = '{run_date}:{station}:{lead_day}'; ghi có fence (fence của bản ghi <= fence của lượt), writeConcern majority."
+  ]
+}

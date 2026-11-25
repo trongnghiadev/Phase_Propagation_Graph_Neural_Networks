@@ -1,72 +1,72 @@
 {
  "summary": {
   "model": "phasegnn-v1",
-  "mae_peak_m": 0.6992744186775779,
-  "mae_hour_h": 0.7003338849755297,
+  "mae_peak_m": 0.27011940829992065,
+  "mae_hour_h": 5.072239808764039,
   "n_records": 25740
  },
  "by_station": [
   {
    "model": "phasegnn-v1",
    "station": "BEN_LUC",
-   "mae_peak_m": 0.33875920168038587,
-   "mae_hour_h": 0.5653092847403001,
+   "mae_peak_m": 0.32241954145207197,
+   "mae_hour_h": 5.217717243089128,
    "n_records": 2860
   },
   {
    "model": "phasegnn-v1",
    "station": "BIEN_HOA",
-   "mae_peak_m": 0.6761402767901082,
-   "mae_hour_h": 0.691542750929368,
+   "mae_peak_m": 0.28099178059854046,
+   "mae_hour_h": 5.091610904584883,
    "n_records": 2860
   },
   {
    "model": "phasegnn-v1",
    "station": "DAU_TIENG",
-   "mae_peak_m": 0.5653302437923999,
-   "mae_hour_h": 0.5858025435073627,
+   "mae_peak_m": 0.2740933896312355,
+   "mae_hour_h": 5.1782235609103076,
    "n_records": 2860
   },
   {
    "model": "phasegnn-v1",
    "station": "GO_DAU_HA",
-   "mae_peak_m": 0.18431933950696675,
-   "mae_hour_h": 0.3238952380952382,
+   "mae_peak_m": 0.20904167011351593,
+   "mae_hour_h": 5.421738095238096,
    "n_records": 2860
   },
   {
    "model": "phasegnn-v1",
    "station": "NHA_BE",
-   "mae_peak_m": 0.3795310277157817,
-   "mae_hour_h": 0.5707827336331834,
+   "mae_peak_m": 0.27574127953174116,
+   "mae_hour_h": 5.212789230384808,
    "n_records": 2860
   },
   {
    "model": "phasegnn-v1",
    "station": "PHU_AN",
-   "mae_peak_m": 0.3783318221506648,
-   "mae_hour_h": 0.5492271254051359,
+   "mae_peak_m": 0.24797621122621571,
+   "mae_hour_h": 5.233208676140614,
    "n_records": 2860
   },
   {
    "model": "phasegnn-v1",
    "station": "TAN_AN",
-   "mae_peak_m": 0.383000466038898,
-   "mae_hour_h": 0.5670162389983885,
+   "mae_peak_m": 0.2967732754452671,
+   "mae_hour_h": 5.212734597743895,
    "n_records": 2860
   },
   {
    "model": "phasegnn-v1",
    "station": "THU_DAU_MOT",
-   "mae_peak_m": 0.5227180265137885,
-   "mae_hour_h": 0.6358818308609103,
+   "mae_peak_m": 0.26145424872332546,
+   "mae_hour_h": 5.150088753645239,
    "n_records": 2860
   },
   {
    "model": "phasegnn-v1",
    "station": "VUNG_TAU",
-   "mae_peak_m": 2.884322924072972,
-   "mae_hour_h": 1.810432289653395,
+   "mae_peak_m": 0.2566612396930086,
+   "mae_hour_h": 3.9314051024352534,
    "n_records": 2860
   }
  ],
@@ -74,36 +74,36 @@
   {
    "model": "phasegnn-v1",
    "lead_day": 1,
-   "mae_peak_m": 0.713898840076658,
-   "mae_hour_h": 0.6995029736618522,
+   "mae_peak_m": 0.26968973415680975,
+   "mae_hour_h": 5.078208014726706,
    "n_records": 5148
   },
   {
    "model": "phasegnn-v1",
    "lead_day": 2,
-   "mae_peak_m": 0.7004629808804702,
-   "mae_hour_h": 0.6985235872409646,
+   "mae_peak_m": 0.2702754442986891,
+   "mae_hour_h": 5.073300799207865,
    "n_records": 5148
   },
   {
    "model": "phasegnn-v1",
    "lead_day": 3,
-   "mae_peak_m": 0.6956051481897971,
-   "mae_hour_h": 0.699675788431622,
+   "mae_peak_m": 0.27013138516913415,
+   "mae_hour_h": 5.071445693678405,
    "n_records": 5148
   },
   {
    "model": "phasegnn-v1",
    "lead_day": 4,
-   "mae_peak_m": 0.693651636950411,
-   "mae_hour_h": 0.7013623188405796,
+   "mae_peak_m": 0.27015192096295815,
+   "mae_hour_h": 5.06976882290562,
    "n_records": 5148
   },
   {
    "model": "phasegnn-v1",
    "lead_day": 5,
-   "mae_peak_m": 0.6927763031800993,
-   "mae_hour_h": 0.7026021345773253,
+   "mae_peak_m": 0.2703479392659674,
+   "mae_hour_h": 5.0684856516822165,
    "n_records": 5148
   }
  ]

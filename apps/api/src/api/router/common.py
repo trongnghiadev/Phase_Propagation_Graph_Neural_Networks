@@ -18,7 +18,7 @@ from vngis.admin import BEFORE, ERAS, FROM, VN_TZ, era_of
 
 __all__ = ["VN_TZ", "BEFORE", "FROM", "ERAS", "era_of", "clean", "to_vn_date", "to_vn_datetime",
            "parse_day", "parse_dt", "check_era", "HttpError", "obj_id", "page", "acquire_guard",
-           "guard_check", "qc_http_error"]
+           "guard_check", "qc_http_error", "actor_labels", "attach_actor_labels"]
 
 #: Lỗi HTTP kèm mã trạng thái nghiệp vụ.
 HttpError = HTTPException
@@ -182,3 +182,28 @@ def qc_http_error(e: Exception) -> HTTPException:
     if isinstance(e, qc.AuditStateError):
         return HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     raise e
+
+
+def actor_labels(actors: list[Any]) -> dict[str, dict]:
+    """Nhãn hiển thị cho actor (``user:<account_code>:<role>`` hoặc tên cũ), tra `users` khi đọc.
+
+    Không lưu nhãn vào dữ liệu. Lỗi tra cứu → rỗng (không làm hỏng request).
+    """
+    import logging
+
+    from api.state import state
+    try:
+        return state.repo.actor_labels([a for a in actors if a])
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("api.common").warning("không tra được nhãn actor: %s", e)
+        return {}
+
+
+def attach_actor_labels(items: list[dict], *fields: str) -> list[dict]:
+    """Gắn ``<field>_label`` cho từng mục (một lượt tra `users` cho cả danh sách)."""
+    labels = actor_labels([it.get(f) for it in items for f in fields])
+    for it in items:
+        for f in fields:
+            v = it.get(f)
+            it[f"{f}_label"] = labels.get(v) if v else None
+    return items

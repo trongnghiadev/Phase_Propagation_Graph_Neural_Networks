@@ -26,7 +26,7 @@ MongoDB: `mongodb://localhost:27017`, db `vietnam_gis`.
 | `descriptive.R` | 4.2 thống kê mô tả + 4.6 ngoại lệ → `results/E8/` |
 | `harmonic.R` | 4.3 điều hòa thủy triều → `results/E1/` + `data/processed/features/astro_tide.csv` + `astro_tide_meta.json`; **chỉ fit trên `harmonic_fit_splits` của `config/splits.json` (mặc định: train)** |
 | `phase_lag.R` | 4.4 độ trễ pha, H5–H7 → `results/E1/` |
-| `evaluation.R` | 4.5 chạy đánh giá (B0 / B_harm / B_KTTV) → `results/E5/` |
+| `evaluation.R` | 4.5 chạy đánh giá (B0 / B_harm / B_KTTV + mọi file dự báo `--pred`) → `results/evaluation/` |
 | `tests/test_evaluation.R` | unit test đánh giá (chạy bằng `Rscript`, dùng `stopifnot`; mục 13–14 thêm 24/11/2026: khóa ghép cặp kiểm định, chống rò rỉ khi fit điều hòa) |
 
 **Biên chia tập** đọc từ `config/splits.json` (`R/io.R::load_splits`) — cùng file với
@@ -98,148 +98,38 @@ Bảng: `e8_peak_summary_by_station.csv`, `e8_peak_by_{year,month,mday,hour}.csv
 Theo bậc: bậc 1 = 538 đoan (4 505 km), bậc 2 = 252 (2 234 km), bậc 3 = 103 (1 040 km),
 bậc 4 = 149 (1 306 km), bậc 5 = 29 (220 km), bậc 6 = 1 (5 km).
 
-> **CẢNH BÁO (24/11/2026) — số liệu mục 4.2 và 4.4 dưới đây là của bản cũ, fit trên cả tập test, cần chạy lại.**
-> Bản cũ của `harmonic.R` fit hệ số điều hòa trên `FIT_YEARS <- 2017:2026` (gồm tập test từ 2024-07-01), nên
-> `astro_tide*.csv`, B_harm, B1 và mọi chỉ số dùng chúng bị rò rỉ dữ liệu test. B0 (climatology) trong
-> `evaluation.R` cũng lấy trung bình trên mọi năm, kể cả năm test. Kiểm định Wilcoxon/DM cũ ghép cặp thiếu
-> `issued_date`/`lead_day` và kiểm định sai đại lượng (xem 5.4). Thứ tự chạy lại: `harmonic.R` → `phase_lag.R` →
-> (Spark G5) → `scripts/run_baselines.py` → `evaluation.R --pred results/baselines/predictions_all_test.csv`.
-> Ước lượng bằng bản port Python khớp R tới 1e-5 m: B_harm test MAE 0.198 → **0.245 m**, B1 0.187 → **0.216 m**.
+> **CẬP NHẬT (24/11/2026) — đã chạy lại không rò rỉ:** `harmonic.R` (fit chỉ train) → `phase_lag.R` → Spark G5 →
+> `scripts/run_baselines.py` → PhaseGNN/B3/B4/B5 → `evaluation.R --split test`. Số liệu chính thức mới nằm ở
+> `results/E1/README.md`, `results/baselines/README.md`, `results/E2/README.md`, `results/evaluation/README.md`;
+> các mục 4.2–4.4 dưới đây chỉ còn con trỏ tới các README đó (bảng số cũ — fit 2017–2026, đánh giá toàn giai đoạn — đã bỏ; xem lịch sử git).
+> `evaluation.R` đổi tên mô hình ngoài trùng tên mô hình nội bộ (vd. B0 persistence của Python → `B0_py`).
 
 ### 4.2 Điều hòa thủy triều — `results/E1/`
 
-| Kết quả | Số liệu thật |
-|---|---|
-| Phương pháp | **Bình phương nhỏ nhất tự viết** (không dùng `oce`/`TideHarmonics` — cần GDAL/PROJ). Xem mục 6. |
-| Thành phần | 11 thành phần: M2, S2, N2, K1, O1, P1, Q1, M4, MS4, M6, Mf (+ xu hướng tuyến tính) |
-| Số quan sát dùng để fit | 13 002 – 13 747 mẫu / trạm (đỉnh **không đều** theo thời gian) |
-| Biến độ M2 (m) | Vũng Tàu 0.828; Biên Hòa 1.073; Nhà Bè 1.022; Phú An 0.990; Thủ Dầu Một 0.787; Bến Lức 0.728; Tân An 0.639; Dầu Tiếng 0.563; Gò Dầu Hạ 0.253 |
-| Biến độ K1 (m) | 0.132 – 0.638; O1 0.071 – 0.419 |
-| Phần phương sai giải thích | 0.443 (Gò Dầu Hạ) – 0.960 (Nhà Bè); Vũng Tàu 0.949 |
-| **Kiểm định (bản cũ: train ≤ 2023, val 2024–2026 — chạm tập test; bản mới: fit train, kiểm tra trên val)** | MAE độ cao **0.213 – 0.416 m**; MAE giờ đỉnh **0.71 – 1.51 h** (chi tiết `harmonic_validation.csv`) |
-| `data/processed/features/astro_tide.csv` | **3 607 dòng dữ liệu** (+1 dòng header), cột `day,h1,h2,t1_h,t2_h`, từ **2016-12-31** đến **2026-11-15** (toàn giai đoạn + 5 ngày tương lai) |
-| `results/E1/astro_tide_by_station.csv` | **32 463 dòng** — triêu thiên van DU TINH THEO TUNG TRAM (moi tram co moc datum rieng) |
-| Phần dư phi thiên văn | `results/E1/astro_residual.csv` — 60 573 dòng (trạm–ngày) |
-
-> **Lưu ý quan trọng về mốc datum:** `data/processed/features/astro_tide.csv` theo hợp đồng dữ liệu với
-> Spark G5 chỉ chứa triều thiên văn tại **Vũng Tàu** (hằng số `a0` = 2.58 m). Nếu áp file này cho mọi trạm
-> thì sai số hệ thống do lệch mốc datum lớn tới **~2.8 m** (Vũng Tàu 2.58 m vs Bến Lức −0.22 m) → MAE
-> của B_harm tăng vọt lên 2.33 m. Vì vậy `evaluation.R` **ưu tiên** `astro_tide_by_station.csv`
-> (triều thiên văn tính riêng cho từng trạm) và chỉ fallback về `astro_tide.csv` khi thiếu file đó.
+Số chính thức (fit **chỉ trên train** 2017–2022, kiểm tra trên val): xem `results/E1/README.md`
+(`harmonic_validation.csv`, `astro_tide_by_station.csv`, `astro_tide_meta.json`). Phương pháp: mục 5.1.
+Lưu ý mốc datum: `evaluation.R` ưu tiên `results/E1/astro_tide_by_station.csv` (triều thiên văn theo
+từng trạm); `data/processed/features/astro_tide.csv` chỉ là Vũng Tàu (áp cho mọi trạm sẽ lệch ~2,8 m).
 
 ### 4.3 Độ trễ pha — `results/E1/`
 
-Độ trễ so với Vũng Tàu (giờ), uốc lượng **chính** bằng **chênh lệch pha tròn** (trung vị von Mises
-trên chu kỳ 24 h — xem mục 5.3); khoảng tin cậy bootstrap **2 000 lần** theo ngày:
+Độ trễ so với Vũng Tàu và H5–H7, tương quan chéo xả hồ: xem `results/E1/README.md`
+(`phase_lag_by_station.csv`, `h5_lag_vs_distance.csv`, `h6_lag_vs_discharge.csv`,
+`h7_amplitude_ratio*.csv`, `crosscorr_release_residual*.csv`). Phương pháp: mục 5.3.
 
-| Trạm | Khoảng cách dọc sông (km) | Trung vị (đỉnh 1) | IQR | CI 95% bootstrap | Phương pháp điều hòa |
-|---|---|---|---|---|---|
-| Nhà Bè | 40.1 | **1.73 h** | 0.026 | [1.695, 1.769] | 1.37 h |
-| Phú An | 68.1 | **2.69 h** | 0.031 | [2.646, 2.734] | 2.26 h |
-| Bến Lức | 74.7 | **2.71 h** | 0.033 | [2.668, 2.760] | 2.32 h |
-| Tân An | 87.3 | **2.90 h** | 0.035 | [2.854, 2.955] | 2.61 h |
-| Biên Hòa | 110.4 | **3.64 h** | 0.041 | [3.575, 3.700] | 2.92 h |
-| Thủ Dầu Một | 105.5 | **4.14 h** | 0.040 | [4.080, 4.198] | 3.63 h |
-| Gò Dầu Hạ | 157.6 | **6.61 h** | 0.079 | [6.493, 6.722] | 5.05 h |
-| Dầu Tiếng | 200.3 | **10.36 h** | 1.574 | [−11.85, 11.87] | −5.10 h |
+### 4.4 Đánh giá mô hình — `results/evaluation/`
 
-**H5 — độ trễ theo khoảng cách dọc sông** (`lag_median_h ~ dist_to_root_km`, n = 8):
-
-- slope = **0.0532 h/km** (SE 0.0054), CI 95% [0.0400, 0.0664], **R² = 0.942**, Pearson r = 0.970 (p = 6.3e-05), Spearman ρ = 0.976 (p = 4.0e-04)
-- Phương pháp điều hòa: slope = −0.0267 h/km, R² = 0.208 (p = 0.256) → **kém phù hợp hơn**, nên lấy kết quả pha tròn làm chính.
-
-> **Ngoại lệ địa hình:** Dầu Tiếng nằm trên nhánh phụ của lưu vụ Bến Lức (lưu vụ nhỏ 2 674 km²) —
-> độ trễ đỉnh 1 là **+10.36 h** nhưng đỉnh 2 lại là **−7.02 h** (đảo chiều pha), nên CI bootstrap
-> rộng ([−11.85, 11.87]) và điểm này kéo R² của H5 xuống. Bỏ Dầu Tiếng thì slope = **0.0407 h/km** (R² = 0.940, p = 3.1e-04, n = 7) — cùng kết luận về chiều và độ lớn.
-
-**H6 — độ trễ theo mùa và lưu lượng xả hồ** (`lag_day_h ~ q_release + season`, n = 12 933):
-
-| Mô hình | R² | Hệ số | p |
-|---|---|---|---|
-| `lag ~ q_release + season` | 0.0062 | `q_release` = 4.57e-05 (p = 0.613); `Mùa mưa` = **+0.594 h** (p = 6.3e-12) | |
-| `lag ~ q_release` | 0.0025 | `q_release` = 4.16e-04 (p = 1.1e-08) | |
-| `lag ~ season` | 0.0061 | `Mùa mưa` = **+0.620 h** (p = 4.5e-19) | |
-| `lag ~ q_release + season + dist_to_root_km` | **0.0124** | `dist_to_root_km` = 0.0089 h/km (p = 1.5e-19) | |
-
-→ **Mùa mưa làm độ trễ dài thêm ~0.6 h**; lưu lượng xả hồ **không** có tác dụng rõ rệt khi đã có `season` và khoảng cách.
-
-**H7 — tỉ số biên độ theo khoảng cách** (`log(amp_ratio) ~ log(dist_to_root_km)`, M2, n = 8):
-slope = **−0.591** (SE 0.297, p = 0.094), R² = 0.397 → biên độ giảm theo khoảng cách
-( ví dụ: Nhà Bè 1.234, Phú An 1.196, Thủ Dầu Một 0.951, Bến Lức 0.879, Tân An 0.772,
-Dầu Tiếng 0.680, Gò Dầu Hạ 0.305 so với Vũng Tàu).
-
-**Tương quan chéo xả hồ ↔ phần dư phi thiên văn** (độ trễ 0–5 ngày):
-
-| Hồ | Trạm | Độ trễ tốt nhất (ngày) | r | n |
-|---|---|---|---|---|
-| Sr. P. Miêng | Biên Hòa | **5** | **0.230** | 3 567 |
-| Trị An | Biên Hòa | 5 | 0.187 | 3 553 |
-| Thác Mơ | Biên Hòa | 5 | 0.160 | 3 574 |
-| Sr. P. Miêng | Nhà Bè | 5 | 0.068 | 3 553 |
-| Thác Mơ | Nhà Bè | 5 | 0.041 | 3 560 |
-| Trị An | Nhà Bè | 5 | 0.020 | 3 538 |
-
-→ Tương quan thuận yếu, đỉnh ở **độ trễ 5 ngày** (giới hạn trên của cửa sổ) — dấu hiệu giả định giới hạn cửa sổ;
-nên kết luận "xả hồ ảnh hưởng yếu đến phần dư phi thiên văn trong ≤5 ngày", không đủ cơ sở để khẳng định quan hệ nhân quả.
-
-### 4.4 Danh gia mo hinh - `results/E5/`
-
-Ham danh gia chay tren 3 baseline, ghep du bao - thuc do trong +-6 gio
-(86 760 cap ghep duoc / 203 592 ban ghi du bao; bang thuc do 32 352 dong tram x ngay,
-2016-12-31 den 2026-11-10):
-
-| Mo hinh | n | MAE (m) | RMSE (m) | bias (m) | MAE dt (h) | bias dt (h) | NSE | KGE |
-|---|---|---|---|---|---|---|---|---|
-| B_KTTV (du bao chinh thuc) | 14 287 | **0.1271** | 0.1952 | -0.0073 | 5.192 | +4.427 | 0.628 | 0.800 |
-| B0 (climatology) | 60 573 | 0.1776 | 0.2380 | +0.0039 | NA | NA | **0.925** | **0.949** |
-| B_harm (trieu thien van theo tram) | 11 900 | 0.2285 | 0.2935 | +0.0607 | 4.802 | -2.102 | 0.896 | 0.923 |
-
-> `B0` khong co `t_peak` -> ghep theo ngay, khong co chi so dt.
-> `B_harm` dung trieu thien van **theo tung tram** (`results/E1/astro_tide_by_station.csv`);
-> neu chi dung `astro_tide.csv` (Vung Tau) thi bias se la +2.31 m do khac muc datum.
-> `B_harm` co `t_peak` (thoi gian dinh du tinh) -> `MAE dt` 4.802 h, `bias dt` -2.102 h:
-> thuy trieu du tinh **den som** ~2 gio so quan sat. Do pha thu trieu he thu khong
-> truyen tin cuc bo, dung chung cho 9 tram, nen MAE dt van lon hon mong doi.
-> `B_KTTV` co MAE do cao tot nhung **MAE gio lon** (5.19 h) vi KTTV chi dua muc nuoc
-> dinh trong ngay ma khong gan thoi diem cu the.
-
-Chi so bao dong (theo nguong bao dong theo thoi gian, `evaluation_contingency.csv`):
-
-| Mo hinh | Muc | n | POD | FAR | CSI |
-|---|---|---|---|---|---|
-| B_KTTV | I | 3 687 | **0.624** | 0.176 | **0.550** |
-| B_KTTV | II | 3 687 | 0.572 | 0.236 | 0.486 |
-| B_KTTV | III | 3 651 | 0.489 | 0.327 | 0.395 |
-| B0 | I | 6 462 | 0.364 | 0.263 | 0.322 |
-| B0 | II | 6 462 | 0.176 | 0.280 | 0.165 |
-| B0 | III | 6 400 | 0.021 | 0.471 | 0.021 |
-| B_harm | I | 2 070 | 0.203 | 0.711 | 0.135 |
-| B_harm | II | 2 070 | 0.145 | 0.765 | 0.099 |
-| B_harm | III | 2 050 | 0.034 | 0.889 | 0.027 |
-
-Kiem dinh (Wilcoxon theo cap + Diebold-Mariano HAC, hieu chinh Holm) --
-`evaluation_tests.csv`:
-
-| Cap doi | Wilcoxon (n, p, p_Holm) | Diebold-Mariano (n, t, p_Holm) |
-|---|---|---|
-| B_harm vs B_KTTV | 827, p < 1e-300, p_Holm < 1e-300 | 827, t = 30.08, p_Holm = 8.47e-199 |
-| B_harm vs B0 | 10 157, p = 4.07e-09, p_Holm = 4.07e-09 | 10 157, t = 69.62, p_Holm < 1e-300 |
-| B_KTTV vs B0 | 5 123, p = 3.64e-51, p_Holm = 7.29e-51 | 5 123, t = 80.68, p_Holm < 1e-300 |
-
-Ca 3 cap doi deu **khac biet co y nghia thong ke** o muc 5 % (sau hieu chinh Holm).
-Ve do cao: B_KTTV tot nhat. Ve **skill canh bao**: B_KTTV vuot troi (CSI_I = 0.550).
-
-Chi so theo chan troi (`evaluation_by_lead.csv`): MAE cua B_KTTV tang nhe tu
-0.0985 m (lead 1) len 0.1228 m (lead 5), NSE giam tu 0.738 xuong 0.647.
-
-Xem them `evaluation_by_station.csv`, `evaluation_by_peak.csv`,
-`evaluation_wilcoxon.csv`, `evaluation_diebold_mariano.csv`,
-`evaluation_matched_sample.csv`.
+Đầu ra của `evaluation.R --split test` (ghép ±6 h, Wilcoxon trên |e|, DM trên |e_a| − |e_b|, Holm) nằm ở
+`results/evaluation/` (trước 25/11/2026 là `results/E5/`; `results/E5/` nay dành cho E5 "Tổng quát hóa").
+Bảng chỉ số, kiểm định và kết luận: `results/evaluation/README.md`. Tóm tắt (tập test 2024-07-01 → 2026-11-23):
+B_KTTV vẫn tốt nhất (mọi p_Holm < 1e-9); PhaseGNN tốt nhất trong các mô hình học máy nhưng không tốt hơn
+persistence (B0_py). Ablation 3 seed (phasegnn, B3, B4, B5a, B5b): `results/E2/README.md` và
+`results/E2/ablation_*.csv`.
 
 ### 4.5 Unit test — `pipelines/r/tests/test_evaluation.R`
 ```
 === Unit test ham danh gia (pipelines/r/R/evaluation.R) ===
-PASS:  58    FAIL:  0
+PASS:  114    FAIL:  0   (chạy lại 25/11/2026)
 => TAT CA TEST DUNG.
 ```
 
@@ -351,4 +241,4 @@ Ngôn ngữ: `LANGUAGE = "en"` (mặc định), locale hệ thống `English (Un
 - **Mô hình H7** hiện mới có thành phần M2; nên mở rộng sang K1/O1 khi có thêm dữ liệu.
 - **Tương quan chéo xả hồ** chỉ đạt r ≤ 0.23 và đỉnh ở biên cửa sổ 5 ngày → cần mở rộng cửa sổ
   (0–30 ngày) và kiểm tra thêm vùng trũng bán tháng để kết luận chắc chắn hơn.
-- Chưa có mô hình dự báo nào trong `results/E5/` ngoài 3 baseline trên.
+- `results/evaluation/` đã gộp B0_py/B1/B2, PhaseGNN và các biến thể (xem `results/evaluation/README.md`).

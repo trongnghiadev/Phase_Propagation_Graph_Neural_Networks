@@ -94,11 +94,17 @@ def _c(db: Database, name: str) -> Collection:
     return db.get_collection(name, write_concern=WC)
 
 
+#: Mức kiểm tra validator — khớp `schemas/mongo/{qc_flags,audit_logs}/v1.json` và migration 0004/0005:
+#: ``moderate`` = kiểm tra mọi lệnh chèn và mọi lệnh sửa document đang hợp lệ, không chặn sửa document cũ
+#: (trước khi có validator) không hợp lệ. Dữ liệu hiện có đều hợp lệ nên thực tế chặt như ``strict``.
+VALIDATION_LEVEL = "moderate"
+
+
 def _ensure(db: Database, name: str, validator: dict, indexes: list[dict]) -> Collection:
     try:
-        db.create_collection(name, validator=validator, validationLevel="strict", validationAction="error")
+        db.create_collection(name, validator=validator, validationLevel=VALIDATION_LEVEL, validationAction="error")
     except CollectionInvalid:
-        db.command({"collMod": name, "validator": validator, "validationLevel": "strict",
+        db.command({"collMod": name, "validator": validator, "validationLevel": VALIDATION_LEVEL,
                     "validationAction": "error"})
     except OperationFailure as e:  # NamespaceExists khi tạo song song
         if e.code != 48:

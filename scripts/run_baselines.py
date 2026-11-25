@@ -241,8 +241,11 @@ def main(argv: list[str] | None = None) -> int:
         log("[baselines] B_KTTV (du bao chinh thuc tu MongoDB) ...")
         try:
             from pymongo import MongoClient
-            client = MongoClient("mongodb://localhost:27017")
-            coll = client["vietnam_gis"]["official_forecasts"]
+            # Trong container: dat MONGO_URI (vd mongodb://mongo:27017 tren mang gis-net) va MONGO_DB
+            # (cung bien voi vngis.config va kttv_load_mongo.py; mac dinh vietnam_gis).
+            import os
+            client = MongoClient(os.environ.get("MONGO_URI", "mongodb://localhost:27017"))
+            coll = client[os.environ.get("MONGO_DB") or "vietnam_gis"]["official_forecasts"]
             bktv = kttv_forecast_many_from_collection(coll, test_days, t_out=5)
             client.close()
         except Exception as exc:  # noqa: BLE001

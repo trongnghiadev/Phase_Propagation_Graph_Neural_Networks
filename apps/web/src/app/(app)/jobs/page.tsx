@@ -25,7 +25,7 @@ import {
   type Column,
 } from "@/components/ui";
 import { api, toError } from "@/lib/api";
-import { formatDateTime } from "@/lib/format";
+import { formatActor, formatDateTime } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
 import { usePermission } from "@/lib/session";
 import { COLLECTIONS } from "@/lib/permissions";
@@ -102,7 +102,7 @@ export default function JobsPage() {
       header: "Trạng thái",
       render: (j) => <JobStateBadge state={j.state} />,
     },
-    { key: "requested_by", header: "Người giao", render: (j) => j.requested_by ?? "—" },
+    { key: "requested_by", header: "Người giao", render: (j) => formatActor(j.requested_by, j.requested_by_label) },
     { key: "worker", header: "Worker", render: (j) => j.worker ?? "—" },
     { key: "fence", header: "Fence", align: "right", render: (j) => j.fence ?? "—" },
     {
@@ -259,7 +259,7 @@ export default function JobsPage() {
               <Row label="Mã" value={detail.id ?? "—"} />
               <Row label="Loại" value={detail.type ?? "—"} />
               <Row label="Trạng thái" value={<JobStateBadge state={detail.state} />} />
-              <Row label="Người giao" value={detail.requested_by ?? "—"} />
+              <Row label="Người giao" value={formatActor(detail.requested_by, detail.requested_by_label)} />
               <Row label="Worker" value={detail.worker ?? "—"} />
               <Row label="Fencing token" value={detail.fence ?? "—"} />
               <Row label="Heartbeat" value={formatDateTime(detail.heartbeat)} />

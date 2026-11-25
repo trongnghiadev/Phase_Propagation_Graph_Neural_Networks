@@ -2,35 +2,41 @@
 
 Sinh bởi `scripts/run_baselines.py` (B0, B_harm, B1, B2, B_KTTV), chấm bằng `phasegnn.evaluate`.
 
-> **TRẠNG THÁI (24/11/2026): B_harm và B1 – fit trên cả test – cần chạy lại.**
-> `summary*.csv` hiện có dùng `results/E1/astro_tide_by_station.csv` của bản cũ `harmonic.R` (fit 2017–2026,
-> gồm tập test). Ngoài ra `mae_dt` trong `summary*.csv` cũ tính với giờ đỉnh thực đo sai (luôn lấy giờ đỉnh 1
-> kể cả khi đỉnh 2 cao hơn) và B2 có `t_peak` sai định dạng (`T41:04:00Z`, giờ VN < 7) do hàm `_hours_to_iso`
-> chép lỗi trong `scripts/run_baselines.py`. Cả ba lỗi đã sửa trong code.
+> **TRẠNG THÁI (24/11/2026): đã chạy lại** (15:15 – 15:20, 4,5 phút CPU; log `results/baselines_run.log`, không commit).
+> Đầu vào: G5 chạy lại 24/11 (`astro_merged = true`, `astro_fit` = train 2017-01-01 → 2022-12-31) và
+> `results/E1/astro_tide_by_station.csv` của `harmonic.R` mới (fit chỉ trên train). `summary*.csv`,
+> `b1_coefficients.json` là của lần chạy này. Các lỗi `mae_dt` (giờ đỉnh thực đo) và `t_peak` của B2 đã sửa trong code
+> trước lần chạy.
 
-## Trước / sau (tập test 2024-07-01 → 2026-11-23)
+## Trước / sau (tập test 2024-07-01 → 2026-11-23, 863 ngày phát bản tin)
 
-Nguồn: `leak_fix_estimate_20261124.csv` (`scripts/estimate_harmonic_leak.py`). "Trước" = `summary.csv` hiện có.
-"Sau – chấm lại" = cùng file dự báo, chấm bằng `phasegnn.evaluate` đã sửa (MAE độ cao không đổi; chỉ `mae_dt`
-đổi). "Sau – fit train" = B_harm/B1 dựng lại với triều thiên văn fit **chỉ trên train** bằng bản port Python
-của `harmonic.R` (bản port tái lập bảng R hiện có tới ~1e-5 m) — **ước lượng**, số chính thức cần chạy lại R.
+"Trước" = `summary.csv` ở commit 76ceb4c (triều thiên văn fit 2017–2026, gồm test; `mae_dt` tính sai).
 
-| Mô hình | MAE trước (m) | MAE sau – fit train (m) | RMSE trước → sau | bias trước → sau | NSE trước → sau | MAE Δt trước → chấm lại (h) |
-|---|---|---|---|---|---|---|
-| B_harm | 0.1975 | **0.2451** | 0.244 → 0.311 | +0.061 → +0.149 | 0.919 → 0.868 | 5.136 → 3.708 (fit train: 3.780) |
-| B1 | 0.1875 | **0.2165** | 0.238 → 0.272 | −0.024 → +0.047 | 0.923 → 0.899 | 1.195 → 4.764 (fit train: 4.872) |
-| B0 (persistence) | 0.1635 | 0.1635 (không dùng điều hòa) | — | — | — | 5.271 → 3.942 |
-| B2 (LSTM) | 0.1806 | 0.1806 (cần chạy lại vì `t_peak` sai) | — | — | — | 5.595 → 5.902 |
-| B_KTTV | 0.0806 | 0.0806 (không đổi) | — | — | — | 4.511 → 2.590 |
+| Mô hình | n cặp | MAE (m) trước → **sau** | RMSE | bias | NSE | MAE Δt (h) | Phủ 10–90 % |
+|---|---:|---|---|---|---|---|---|
+| B0 (persistence + biến thiên thiên văn) | 38 565 | 0.1635 → **0.1661** | 0.229 → 0.231 | +0.041 → +0.043 | 0.928 → 0.927 | 5.271 → 4.011 | 0.602 → 0.592 |
+| B_harm (thiên văn) | 38 745 | 0.1975 → **0.2452** | 0.244 → 0.311 | +0.061 → +0.149 | 0.919 → 0.868 | 5.136 → 3.780 | 0.432 → 0.380 |
+| B1 (điều hòa + hồi quy phần dư) | 38 745 | 0.1875 → **0.2165** | 0.238 → 0.272 | −0.024 → +0.047 | 0.923 → 0.899 | 1.195 → 4.872 | 0.465 → 0.424 |
+| B2 (LSTM, 3 trạm, 5 seed) | 12 675 | 0.1806 → **0.1509** | 0.219 → 0.186 | −0.144 → −0.114 | 0.173 → 0.403 | 5.595 → 5.867 | 0.187 → 0.221 |
+| **B_KTTV** (dự báo chính thức) | 11 050 | 0.0806 → **0.0806** | 0.117 | +0.002 | 0.769 | 4.511 → **2.590** | 0.862 |
 
-`mae_dt` cũ của B1 (1.195 h) thấp giả tạo: so với giờ đỉnh 1 thay vì giờ đỉnh cao hơn.
-B2 "chấm lại" gồm 6 169 cặp có `t_pred` = NaN (chuỗi giờ sai) — số đúng chỉ có sau khi chạy lại.
+- **B_harm, B1 tệ đi** đúng như dự kiến khi bỏ rò rỉ: mực trung bình + xu hướng fit trên 2017–2022 ngoại suy
+  sang 2024–2026 bị lệch dương (bias B_harm +0.149 m). Ước lượng bằng bản port Python trước đó (B_harm 0.2451,
+  B1 0.2165 m) khớp số chính thức tới 1e-4 m → đã xóa `leak_fix_estimate_20261124.csv` và
+  `scripts/estimate_harmonic_leak.py`.
+- B0 đổi nhẹ vì dùng biến thiên thiên văn mới. B2 đổi do G5 mới (có `astro_*`) và mẫu theo lưới ngày lịch.
+- `mae_dt` cũ của B1 (1.195 h) thấp giả tạo (so với giờ đỉnh 1 thay vì giờ đỉnh cao hơn); B_KTTV/B0/B_harm
+  đổi `mae_dt` cũng vì lỗi này, không phải vì dự báo đổi.
+- **B_KTTV vẫn tốt nhất về MAE độ cao (0.081 m) và giờ đỉnh (2.59 h)**; mọi mô hình cơ sở khác kém hơn rõ.
+  NSE của B_KTTV/B2 thấp hơn B0 vì chúng chỉ có ở 3 trạm (phương sai nhỏ hơn) — không so NSE giữa các tập khác nhau.
+- Kiểm định trên cặp ghép chung: xem `results/evaluation/README.md`.
 
-## Chạy lại (sau khi chạy lại `pipelines/r/harmonic.R`)
+## Chạy lại
 
 ```bash
-docker run --rm -v "$PWD:/work" -w /work --network spark-mongodb-gis_gis-net phasegnn:local \
+MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD:/work" -w /work --network spark-mongodb-gis_gis-net \
+    -e PYTHONPATH=/work/packages/phasegnn/src -e MONGO_URI=mongodb://mongo:27017 phasegnn:local \
     python -X utf8 scripts/run_baselines.py --seeds 0 1 2 3 4 --out-dir results/baselines
 ```
 
-(B_KTTV đọc `mongodb://localhost:27017` trong script; trong container cần sửa URI hoặc dùng `--no-kttv`.)
+`MONGO_URI` (mới, mặc định `mongodb://localhost:27017`) dùng cho B_KTTV khi chạy trong container.

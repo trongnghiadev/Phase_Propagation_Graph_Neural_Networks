@@ -47,8 +47,10 @@ ENV_VARS: dict[str, tuple[str, ...]] = {
     "REDIS_LOCK_NODES": ("redis", "lock", "nodes"),
     "LOCK_BACKEND": ("redis", "lock", "backend"),
     "TRUSTED_PROXIES": ("rate_limit", "trusted_proxies"),
+    "AUTH_COOKIE_SECURE": ("auth", "cookie_secure"),
+    "CORS_ORIGINS": ("auth", "cors_origins"),
 }
-_LIST_VARS = {"REDIS_SENTINELS", "REDIS_LOCK_NODES", "TRUSTED_PROXIES"}
+_LIST_VARS = {"REDIS_SENTINELS", "REDIS_LOCK_NODES", "TRUSTED_PROXIES", "CORS_ORIGINS"}
 _ENV_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -282,6 +284,41 @@ class AuthConfig(_Model):
     lockout_minutes: PositiveInt = 15
     # Bật/tắt yêu cầu xác thực (chỉ dùng cho test tự động; KHÔNG bật trong production).
     required: bool = True
+    # Refresh token cho trình duyệt nằm trong cookie httpOnly (JavaScript không đọc được).
+    cookie_name: str = Field("pgnn_refresh", pattern=r"^[A-Za-z0-9_-]+$")
+    # `Secure`: chỉ gửi qua HTTPS. Dev chạy http://localhost thì tắt (AUTH_COOKIE_SECURE=false).
+    cookie_secure: bool = True
+    cookie_samesite: Literal["strict", "lax"] = "strict"
+    # Cookie chỉ gửi kèm tới endpoint refresh/logout (mỗi đường dẫn một cookie cùng tên).
+    cookie_paths: list[str] = ["/api/v1/auth/refresh", "/api/v1/auth/logout"]
+    # Origin được phép gọi API kèm cookie (CORS `allow_credentials`, kiểm tra `Origin` chống CSRF).
+    # Rỗng = không bật CORS (web cùng origin qua Nginx/proxy dev). Biến môi trường: CORS_ORIGINS=a,b
+    cors_origins: list[str] = []
+    # Header tuỳ biến bắt buộc khi dùng cookie (trình duyệt không tự gửi chéo site nếu không có preflight).
+    csrf_header: str = "X-Requested-With"
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _split_origins(cls, v: Any) -> Any:
+        return _split_nodes(v)
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _check_origins(cls, v: list[str]) -> list[str]:
+        out = []
+        for item in v:
+            o = item.rstrip("/")
+            if o == "*" or not re.match(r"^https?://[^/\s]+$", o):
+                raise ValueError(f"cors_origins: '{item}' phải là origin cụ thể dạng http(s)://host[:port]")
+            out.append(o)
+        return out
+
+    @field_validator("cookie_paths")
+    @classmethod
+    def _check_paths(cls, v: list[str]) -> list[str]:
+        if not v or any(not p.startswith("/") for p in v):
+            raise ValueError("cookie_paths phải là danh sách đường dẫn bắt đầu bằng '/'")
+        return v
 
 
 class RateLimitConfig(_Model):

@@ -21,7 +21,7 @@ import {
   type Column,
 } from "@/components/ui";
 import { api, toError } from "@/lib/api";
-import { formatDateTime, severityLabel, statusColor, statusLabel } from "@/lib/format";
+import { formatActor, formatDateTime, severityLabel, statusColor, statusLabel } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
 import { usePermission } from "@/lib/session";
 import { COLLECTIONS } from "@/lib/permissions";
@@ -105,7 +105,7 @@ export default function AlertsPage() {
       header: "Trạng thái",
       render: (r) => <Badge color={statusColor(r.status)}>{statusLabel(r.status)}</Badge>,
     },
-    { key: "ack_by", header: "Người xác nhận", render: (r) => r.ack_by ?? "—" },
+    { key: "ack_by", header: "Người xác nhận", render: (r) => formatActor(r.ack_by, r.ack_by_label) },
     { key: "era", header: "Thời kỳ", render: (r) => r.era ?? "—" },
     ...(canAck
       ? [
@@ -228,7 +228,7 @@ export default function AlertsPage() {
                 <Row label="Hiệu lực đến" value={formatDateTime(detail.valid_to)} />
                 <Row label="Thời kỳ địa giới" value={detail.era ?? "—"} />
                 <Row label="Trạng thái" value={statusLabel(detail.status)} />
-                <Row label="Người xác nhận" value={detail.ack_by ?? "—"} />
+                <Row label="Người xác nhận" value={formatActor(detail.ack_by, detail.ack_by_label)} />
               </tbody>
             </table>
 

@@ -19,6 +19,11 @@ id audit gốc). Bản ghi gốc chỉ được gắn thêm `reverted_at` / `rev
 (`update_one` có điều kiện chưa có `reverted_at` và `revert_claim`) trước khi ghi → lần thứ hai 409.
 
 Quyền: `VIEW_AUDIT` trên `audit_logs` để xem/hoàn tác, CỘNG quyền ghi trên collection đích như trên.
+
+Người thực hiện (`actor`, `reverted_by`): bản ghi mới là ``user:<account_code>:<role>`` (không chứa tên);
+bản ghi cũ có thể còn tên đăng nhập. Khi đọc, API gắn thêm `actor_label` (tra `users`, không lưu vào
+nhật ký). Lọc `?actor=` nhận ``user:<account_code>`` (mọi vai trò), id đầy đủ, hoặc tên đăng nhập (khớp cả
+bản ghi cũ ghi tên lẫn bản ghi mới của tài khoản đó).
 """
 from __future__ import annotations
 
@@ -30,6 +35,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from bson import ObjectId
 
+from api.auth.users import ACTOR_PREFIX, parse_actor
 from api.deps import UserContext, require, rate_limit
 from api.permissions import P, has
 from api.router.common import clean, qc_http_error, to_vn_datetime
@@ -76,7 +82,7 @@ async def list_audit(collection: str | None = None, actor: str | None = None,
     if collection:
         flt["collection"] = collection
     if actor:
-        flt["actor"] = actor
+        flt.update(actor_filter("actor", actor))
     if audit_state:
         flt["state"] = audit_state
     if from_ or to:
@@ -84,6 +90,7 @@ async def list_audit(collection: str | None = None, actor: str | None = None,
         d_from = parse_day(from_, field="from") or d_to
         flt["at"] = {"$gte": d_from, "$lte": d_to}
     docs = list(db[AUDIT_LOGS].find(flt).sort([("at", -1)]).limit(limit))
+    labels = _labels([d.get(f) for d in docs for f in ("actor", "reverted_by")])
     items = []
     for d in docs:
         out = clean(d)
@@ -92,8 +99,34 @@ async def list_audit(collection: str | None = None, actor: str | None = None,
         out.pop("_id", None)
         out["at"] = to_vn_datetime(out.get("at"))
         out["reverted_at"] = to_vn_datetime(out.get("reverted_at"))
+        out["actor_label"] = labels.get(out.get("actor"))
+        out["reverted_by_label"] = labels.get(out.get("reverted_by"))
         items.append(out)
     return {"count": len(items), "items": items}
+
+
+def actor_filter(field: str, actor: str) -> dict[str, Any]:
+    """Điều kiện lọc theo người thực hiện, đọc được cả bản ghi cũ (tên) lẫn mới (``user:<code>:<role>``)."""
+    import re as _re
+
+    actor = actor.strip()
+    parsed = parse_actor(actor)
+    if parsed is not None:
+        code, role = parsed
+        if role:
+            return {field: actor}
+        return {field: {"$regex": f"^{_re.escape(ACTOR_PREFIX + code)}(:|$)"}}
+    user = state.repo.get_user_by_username(actor)
+    if user is None or not user.get("account_code"):
+        return {field: actor}       # tên cũ / actor hệ thống (`cli`, `g0`, …): khớp đúng
+    pattern = f"^{_re.escape(ACTOR_PREFIX + str(user['account_code']))}(:|$)"
+    return {"$or": [{field: actor}, {field: {"$regex": pattern}}]}
+
+
+def _labels(actors: list[Any]) -> dict[str, dict]:
+    """Nhãn hiển thị của actor (`api.router.common.actor_labels`); chỉ khi đọc."""
+    from api.router.common import actor_labels
+    return actor_labels(actors)
 
 
 @router.get("/audit/{audit_id}", dependencies=[Depends(require(P.VIEW_AUDIT, AUDIT_LOGS))])
@@ -107,6 +140,9 @@ async def get_audit(audit_id: str):
     out["id"] = str(doc.get("_id"))
     out.pop("_id", None)
     out["at"] = to_vn_datetime(out.get("at"))
+    labels = _labels([doc.get("actor"), doc.get("reverted_by")])
+    out["actor_label"] = labels.get(out.get("actor"))
+    out["reverted_by_label"] = labels.get(out.get("reverted_by"))
     return out
 
 
@@ -189,13 +225,13 @@ def revert_audit(audit_id: str, body: RevertRequest,
     now = datetime.now(timezone.utc).replace(microsecond=0)
     reason = f"hoàn tác audit {audit_id}: {body.reason.strip()}"
     # Đánh dấu nguyên tử: chỉ một request được hoàn tác bản ghi này.
-    claim = {"by": user.username, "at": now}
+    claim = {"by": user.actor, "at": now}
     got = db[AUDIT_LOGS].update_one({"_id": doc["_id"], "state": "applied", "reverted_at": None,
                                      "revert_claim": None}, {"$set": {"revert_claim": claim}})
     if got.matched_count != 1:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="bản ghi này đã hoặc đang được hoàn tác")
     try:
-        result = _REVERTERS[action](db, doc, reason, user.username, now)
+        result = _REVERTERS[action](db, doc, reason, user.actor, now)
     except HTTPException:
         db[AUDIT_LOGS].update_one({"_id": doc["_id"], "revert_claim": claim}, {"$unset": {"revert_claim": ""}})
         raise
@@ -204,9 +240,9 @@ def revert_audit(audit_id: str, body: RevertRequest,
         db[AUDIT_LOGS].update_one({"_id": doc["_id"], "revert_claim": claim}, {"$unset": {"revert_claim": ""}})
         raise qc_http_error(e) from None
     # Lỗi khác (mạng, AuditStateError…): GIỮ `revert_claim` để không hoàn tác hai lần; cần kiểm tra tay.
-    new_id = _find_new_audit(db, action, str(doc["doc_id"]), now, user.username)
+    new_id = _find_new_audit(db, action, str(doc["doc_id"]), now, user.actor)
     db[AUDIT_LOGS].update_one({"_id": doc["_id"], "revert_claim": claim},
-                              {"$set": {"reverted_at": now, "reverted_by": user.username,
+                              {"$set": {"reverted_at": now, "reverted_by": user.actor,
                                         "revert_reason": body.reason.strip(), "revert_audit_id": new_id},
                                "$unset": {"revert_claim": ""}})
     try:

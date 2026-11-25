@@ -317,6 +317,18 @@ class TrainConfig:
     patience: int = 10
     max_train_samples: int | None = None
     max_val_samples: int | None = None
+    #: Cách lấy `max_*_samples` mẫu: `head` = N mẫu đầu (mặc định cũ; mẫu xếp theo
+    #: trạm → ngày nên với N nhỏ chỉ lấy được trạm đầu tiên theo bảng chữ cái), `spread` =
+    #: N mẫu cách đều trên toàn tập (phủ mọi trạm và mọi giai đoạn). Xem `select_samples`.
+    subsample: str = "head"
+    #: Trạm giữ riêng (E5): **bỏ mọi mẫu của các trạm này khỏi train và val**, nên mô hình
+    #: không bao giờ thấy nhãn của trạm đó. Thống kê dùng để chuẩn hoá cũng không lấy từ
+    #: nhãn train của trạm đó (`data.build_datasets(holdout_stations=...)`): μ/σ độ cao
+    #: (`HeightScale`) lấy từ quan trắc của trạm trong giai đoạn `val` (trước mốc test),
+    #: bộ chuẩn hoá đặc trưng gộp bỏ qua trạm. Trước 25/11/2026 μ/σ fit trên toàn bộ train
+    #: kể cả trạm giữ riêng (rò thống kê nhãn). Khi dự báo, trạm vẫn có quan trắc quá khứ
+    #: của chính nó làm đầu vào (như mọi trạm khác).
+    holdout_stations: tuple[str, ...] = ()
     aux_weight: float = 0.3
     device: str = "cpu"
     #: So luong CPU cho torch. Mac dinh 1: khoi luong nho (do thi con) bi da luong
@@ -367,6 +379,29 @@ def _make_model_cfg(tcfg: TrainConfig) -> ModelConfig:
     )
 
 
+SUBSAMPLE_MODES = ("head", "spread")
+
+
+def select_samples(samples: Sequence[WindowSample], max_n: int | None = None,
+                   mode: str = "head",
+                   holdout_stations: Sequence[str] = ()) -> list[WindowSample]:
+    """Lọc trạm giữ riêng rồi lấy tối đa `max_n` mẫu (giữ thứ tự gốc).
+
+    * `head`: `max_n` mẫu đầu (hành vi trước 24/11/2026; vẫn là mặc định để chạy lại số cũ).
+    * `spread`: `max_n` mẫu cách đều chỉ số (`np.linspace`), xác định, không phụ thuộc seed.
+    """
+    if mode not in SUBSAMPLE_MODES:
+        raise ValueError(f"subsample phải là một trong {SUBSAMPLE_MODES}, nhận {mode!r}")
+    drop = set(holdout_stations or ())
+    out = [s for s in samples if s.station not in drop]
+    if not max_n or max_n >= len(out):
+        return out
+    if mode == "head":
+        return out[:max_n]
+    idx = np.unique(np.linspace(0, len(out) - 1, int(max_n)).round().astype(np.int64))
+    return [out[i] for i in idx]
+
+
 def train_model(datasets: dict[str, SampleSet], graph: GraphData, tcfg: TrainConfig,
                 log=print) -> tuple[PhaseGNN, TrainResult]:
     """Huấn luyện một biến thể trên `train`, dừng sớm theo MAE đỉnh ngày trên `val`."""
@@ -398,12 +433,17 @@ def train_model(datasets: dict[str, SampleSet], graph: GraphData, tcfg: TrainCon
     edge_dim = graph.edge_attr.shape[1]
     model = PhaseGNN(cfg, in_dim=in_dim, static_dim=static_dim, edge_dim=edge_dim).to(device)
 
-    train_samples = [s for s in train_set.samples if s.station in subgraphs]
-    if tcfg.max_train_samples:
-        train_samples = train_samples[:tcfg.max_train_samples]
-    val_samples = [s for s in (val_set.samples if val_set else []) if s.station in subgraphs]
-    if tcfg.max_val_samples:
-        val_samples = val_samples[:tcfg.max_val_samples]
+    train_samples = select_samples([s for s in train_set.samples if s.station in subgraphs],
+                                   tcfg.max_train_samples, tcfg.subsample,
+                                   tcfg.holdout_stations)
+    val_samples = select_samples([s for s in (val_set.samples if val_set else [])
+                                  if s.station in subgraphs],
+                                 tcfg.max_val_samples, tcfg.subsample, tcfg.holdout_stations)
+    if not train_samples:
+        raise ValueError("tập huấn luyện rỗng sau khi bỏ trạm giữ riêng")
+    log(f"[{tcfg.variant}] mẫu train {len(train_samples)} "
+        f"({len({s.station for s in train_samples})} trạm), val {len(val_samples)}; "
+        f"subsample={tcfg.subsample}, giữ riêng={list(tcfg.holdout_stations)}")
 
     opt = torch.optim.AdamW(model.parameters(), lr=tcfg.lr, weight_decay=tcfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(tcfg.epochs, 1))
@@ -705,6 +745,13 @@ def evaluate(model, samples: Sequence[WindowSample], subgraphs, cfg: ModelConfig
     **Đơn vị.** Nếu mô hình dự báo trên thang chuẩn hoá (`data.HeightScale`), ta chuyển
     **cả** dự báo và nhãn về **mét** trước khi tính sai số ⇒ chỉ số luôn có đơn vị m
     và **so sánh được** với baseline và với `evaluation.R`.
+
+    **Ngoại lệ — `pinball`.** Pinball được tính **trên thang của mô hình** (thang chuẩn hoá
+    `HeightScale` khi có nhãn chuẩn hoá; mét nếu không) **trước** khi đổi về mét, nên
+    *không* có đơn vị m và không so trực tiếp với pinball tính bằng mét của baseline. Pinball
+    tính **theo từng mẫu** rồi lấy trung bình; mẫu mà mọi nhãn đỉnh đều NaN (không quan trắc)
+    **không** được tính vào trung bình (trước đây `pinball_loss` trả 0 cho mẫu đó ⇒ kéo trung
+    bình xuống).
     """
     import torch
 
@@ -762,8 +809,12 @@ def evaluate(model, samples: Sequence[WindowSample], subgraphs, cfg: ModelConfig
                                             dtype=torch.float32, device=device)
                 p_peak_s = _sort_slots_by_hour(p_peak, p_hours)      # [B, t_out, 2, Q]
                 tgt_s = _sort_slots_by_hour(tgt_all, tgt_h_all)       # [B, t_out, 2]
-                # pinball cho cả lô một lệnh (`p_peak` = [B, t_out, 2, Q])
-                pin_all = pinball_loss(p_peak_s, tgt_s)
+                # pinball THEO TỪNG MẪU (`p_peak` = [B, t_out, 2, Q]), trên thang của mô hình
+                # (chuẩn hoá nếu có). `pinball_loss` trả về trung bình vô hướng → không đánh chỉ số
+                # `[bi]` được; tính từng mẫu trong lô. Mẫu toàn NaN → None (bỏ khỏi trung bình).
+                pin_all = [pinball_loss(p_peak_s[bi:bi + 1], tgt_s[bi:bi + 1])
+                           if bool(torch.isfinite(tgt_s[bi]).any()) else None
+                           for bi in range(p_peak_s.shape[0])]
                 # **Chuyển về mét** để chỉ số có đơn vị m (so sánh được với baseline).
                 if height_scale is not None and sts[0].peak_target_scaled is not None:
                     sd = float(height_scale.std.get(f"{st_name}::both", 1.0))
@@ -775,7 +826,8 @@ def evaluate(model, samples: Sequence[WindowSample], subgraphs, cfg: ModelConfig
                 else:
                     p_peak_m, tgt_m, p_pd_m, ph_m = p_peak_s, tgt_s, p_pd, ph_all
                 for bi, s in enumerate(chunk):
-                    pin.append(float(pin_all[bi]))
+                    if pin_all[bi] is not None:
+                        pin.append(float(pin_all[bi]))
                     for d in range(p_pd.shape[1]):
                         if (np.isfinite(s.peak_heights[d])
                                 and np.isfinite(float(p_pd_m[bi, d]))):
@@ -820,6 +872,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--patience", type=int, default=10)
     ap.add_argument("--max-train-samples", type=int, default=None)
     ap.add_argument("--max-val-samples", type=int, default=None)
+    ap.add_argument("--subsample", default="head", choices=list(SUBSAMPLE_MODES),
+                    help="cách lấy --max-*-samples mẫu: head (N mẫu đầu, mặc định) | "
+                         "spread (cách đều trên mọi trạm/ngày)")
+    ap.add_argument("--holdout-stations", default="",
+                    help="trạm giữ riêng, cách nhau dấu phẩy (bỏ khỏi train/val; E5)")
     ap.add_argument("--out-dir", default=None, help="thư mục ghi checkpoint và log")
     ap.add_argument("--data-root", default=None, help="gốc repo (mặc định suy ra tự động)")
     ap.add_argument("--no-mlflow", action="store_true", help="không ghi MLflow")
@@ -845,7 +902,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[train] G5: {len(df)} dòng; đồ thị: {graph.num_nodes} nút, {graph.num_edges} cạnh",
           flush=True)
 
-    datasets = build_datasets(df, t_in=args.t_in, t_out=args.t_out)
+    holdout = tuple(x.strip() for x in args.holdout_stations.split(",") if x.strip())
+    datasets = build_datasets(df, t_in=args.t_in, t_out=args.t_out, holdout_stations=holdout)
     for name, ds in datasets.items():
         leaks = check_leakage(ds.samples)
         print(f"[train] tập {name}: {len(ds)} mẫu; rò rỉ: {len(leaks)}", flush=True)
@@ -893,6 +951,8 @@ def main(argv: list[str] | None = None) -> int:
         hidden_dim=args.hidden_dim, num_gnn_layers=args.num_gnn_layers,
         delta_h=args.delta_h, patience=args.patience,
         max_train_samples=args.max_train_samples, max_val_samples=args.max_val_samples,
+        subsample=args.subsample,
+        holdout_stations=holdout,
         num_threads=args.num_threads,
         use_mlflow=not args.no_mlflow,
         register_to_db=not args.no_register,

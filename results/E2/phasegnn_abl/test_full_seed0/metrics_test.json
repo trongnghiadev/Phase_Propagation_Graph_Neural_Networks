@@ -1,0 +1,110 @@
+{
+ "summary": {
+  "model": "phasegnn-abl-s0",
+  "mae_peak_m": 0.1878797103607102,
+  "mae_hour_h": 1.6098874120666185,
+  "n_records": 76050
+ },
+ "by_station": [
+  {
+   "model": "phasegnn-abl-s0",
+   "station": "BEN_LUC",
+   "mae_peak_m": 0.16506515192894908,
+   "mae_hour_h": 2.572417496952117,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-abl-s0",
+   "station": "BIEN_HOA",
+   "mae_peak_m": 0.21004258633572365,
+   "mae_hour_h": 1.31612138246929,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-abl-s0",
+   "station": "DAU_TIENG",
+   "mae_peak_m": 0.21387898916211037,
+   "mae_hour_h": 0.9240922004705464,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-abl-s0",
+   "station": "GO_DAU_HA",
+   "mae_peak_m": 0.15912331900025087,
+   "mae_hour_h": 1.4412963212202783,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-abl-s0",
+   "station": "NHA_BE",
+   "mae_peak_m": 0.17255137368198054,
+   "mae_hour_h": 2.618128411858571,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-abl-s0",
+   "station": "PHU_AN",
+   "mae_peak_m": 0.17179100079189902,
+   "mae_hour_h": 1.8676567345570363,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-abl-s0",
+   "station": "TAN_AN",
+   "mae_peak_m": 0.17624314092222815,
+   "mae_hour_h": 1.1297536925142664,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-abl-s0",
+   "station": "THU_DAU_MOT",
+   "mae_peak_m": 0.15805346232200743,
+   "mae_hour_h": 1.1731534331134787,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-abl-s0",
+   "station": "VUNG_TAU",
+   "mae_peak_m": 0.2659145103784836,
+   "mae_hour_h": 1.3918153599027525,
+   "n_records": 8450
+  }
+ ],
+ "by_lead": [
+  {
+   "model": "phasegnn-abl-s0",
+   "lead_day": 1,
+   "mae_peak_m": 0.18435217916568997,
+   "mae_hour_h": 1.7102265717674972,
+   "n_records": 15210
+  },
+  {
+   "model": "phasegnn-abl-s0",
+   "lead_day": 2,
+   "mae_peak_m": 0.1839546010384198,
+   "mae_hour_h": 1.6858901380389923,
+   "n_records": 15210
+  },
+  {
+   "model": "phasegnn-abl-s0",
+   "lead_day": 3,
+   "mae_peak_m": 0.1861511179356497,
+   "mae_hour_h": 1.619063441242737,
+   "n_records": 15210
+  },
+  {
+   "model": "phasegnn-abl-s0",
+   "lead_day": 4,
+   "mae_peak_m": 0.1901724927476845,
+   "mae_hour_h": 1.5496665718080063,
+   "n_records": 15210
+  },
+  {
+   "model": "phasegnn-abl-s0",
+   "lead_day": 5,
+   "mae_peak_m": 0.1947659736652362,
+   "mae_hour_h": 1.4846446357427434,
+   "n_records": 15210
+  }
+ ]
+}

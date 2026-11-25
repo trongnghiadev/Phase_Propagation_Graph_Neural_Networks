@@ -407,7 +407,9 @@ def test_perm_dung_perm_ver_va_ghi_audit(client, requires_bit):
     assert r.status_code == 200, r.text
     doc = db["users"].find_one({"_id": "u_t2"})
     assert doc["perm"] == {"*": 17, "tide_extremes": 5} and doc["perm_ver"] == 2
-    a = db["audit_logs"].find_one({"action": "user_perm", "doc_id": "u_t2"})
+    code = db["users"].find_one({"_id": "u_t2"})["account_code"]
+    a = db["audit_logs"].find_one({"action": "user_perm", "doc_id": code})
+    assert a["target"] == {"account_code": code} and "u_t2" not in str(a)
     assert a["state"] == "applied" and a["reason"] == "cấp quyền sửa triều"
     assert a["before"]["perm_ver"] == 1 and a["after"]["perm"]["tide_extremes"] == 5
     r = client.put("/api/v1/users/u_t2/perm", json={"grant": ["EXPORT"]}, headers=h)

@@ -258,3 +258,62 @@ def test_load_astro_tide_checks_provenance(tmp_path):
     with pytest.raises(AstroLeakError):
         load_astro_tide(path=csv)
     assert len(load_astro_tide(path=csv, check_leak=False)) == 1
+
+
+_SMALL_SPLITS = {"train": ("2020-01-01", "2020-03-31"), "val": ("2020-04-01", "2020-05-31"),
+                 "test": ("2020-06-01", "2020-07-31")}
+
+
+def _g5_with_train_offset(offset: float = 5.0) -> pd.DataFrame:
+    """PHU_AN có mực nước train lệch +`offset` m — nếu rò nhãn train, μ sẽ lệch theo."""
+    df = _fake_g5(n_days=213)
+    m = (df["station"] == "PHU_AN") & (df["day"] <= _SMALL_SPLITS["train"][1])
+    df.loc[m, ["h_peak1", "h_peak2"]] += offset
+    return df
+
+
+def test_holdout_height_scale_khong_dung_nhan_train_cua_tram():
+    """E5: μ/σ của trạm giữ riêng lấy từ quan trắc giai đoạn val, không từ nhãn train."""
+    df = _g5_with_train_offset()
+    out = build_datasets(df, t_in=14, t_out=5, splits=_SMALL_SPLITS, holdout_stations=("PHU_AN",))
+    hs = out["train"].height_scale
+    lo, hi = _SMALL_SPLITS["val"]
+    val = df[(df["station"] == "PHU_AN") & (df["day"] >= lo) & (df["day"] <= hi)]
+    assert hs.mean["PHU_AN::both"] == pytest.approx(float(val["h_peak2"].mean()), abs=1e-5)
+    assert hs.mean["PHU_AN::both"] < 2.0      # không bị kéo lên bởi offset +5 m của train
+    # trạm không giữ riêng vẫn fit trên train như cũ
+    tr = df[(df["station"] == "NHA_BE") & (df["day"] <= _SMALL_SPLITS["train"][1])]
+    assert hs.mean["NHA_BE::both"] == pytest.approx(float(tr["h_peak2"].mean()), abs=1e-5)
+    # val/test dùng lại đúng thang này
+    assert out["test"].height_scale is hs
+    # thứ tự trạm trả về không đổi
+    assert out["train"].stations == ["NHA_BE", "PHU_AN"]
+
+
+def test_holdout_scaler_dac_trung_bo_qua_tram_giu_rieng():
+    """Bộ chuẩn hoá đặc trưng gộp chỉ dùng các trạm không giữ riêng."""
+    df = _g5_with_train_offset()
+    with_h = build_datasets(df, t_in=14, t_out=5, splits=_SMALL_SPLITS,
+                            holdout_stations=("PHU_AN",))
+    only = build_datasets(df[df["station"] == "NHA_BE"], t_in=14, t_out=5, splits=_SMALL_SPLITS)
+    assert np.allclose(with_h["train"].scaler.mean, only["train"].scaler.mean, equal_nan=True)
+    assert np.allclose(with_h["train"].scaler.std, only["train"].scaler.std, equal_nan=True)
+
+
+def test_holdout_height_scale_du_phong_khi_khong_co_quan_trac_val():
+    """Không có quan trắc val ⇒ μ/σ = trung bình các trạm còn lại (không dùng train của trạm)."""
+    df = _g5_with_train_offset()
+    lo, hi = _SMALL_SPLITS["val"]
+    df = df[~((df["station"] == "PHU_AN") & (df["day"] >= lo) & (df["day"] <= hi))]
+    out = build_datasets(df, t_in=14, t_out=5, splits=_SMALL_SPLITS, holdout_stations=("PHU_AN",))
+    hs = out["train"].height_scale
+    assert hs.mean["PHU_AN::both"] == pytest.approx(hs.mean["NHA_BE::both"])
+    assert hs.std["PHU_AN::both"] == pytest.approx(hs.std["NHA_BE::both"])
+
+
+def test_khong_holdout_giu_nguyen_hanh_vi_cu():
+    df = _g5_with_train_offset()
+    out = build_datasets(df, t_in=14, t_out=5, splits=_SMALL_SPLITS)
+    tr = df[(df["station"] == "PHU_AN") & (df["day"] <= _SMALL_SPLITS["train"][1])]
+    assert out["train"].height_scale.mean["PHU_AN::both"] == pytest.approx(
+        float(tr["h_peak2"].mean()), abs=1e-5)

@@ -49,12 +49,12 @@
   }
  },
  "metrics": {
-  "val_mae_peak": 0.3080918457508087,
-  "val_mae_hour": 5.7600176410079005,
-  "best_epoch": 2
+  "val_mae_peak": 0.2992901122570038,
+  "val_mae_hour": 6.223471389770507,
+  "best_epoch": 0
  },
  "data_snapshot": {
-  "run_date": "2026-11-23",
+  "run_date": "2026-11-24",
   "job_version": "g5-v1",
   "collections": {
    "tide_extremes": 129420,
@@ -101,7 +101,15 @@
    "THU_DAU_MOT": 3594,
    "VUNG_TAU": 3595
   },
-  "astro_merged": false,
+  "astro_merged": true,
+  "astro_fit": {
+   "fit_from": "2017-01-01",
+   "fit_to": "2022-12-31",
+   "fit_splits": [
+    "train"
+   ],
+   "generated_at": "2026-11-24T11:34:47+0700"
+  },
   "leak_check": {
    "rows_with_input_obs": 32343,
    "violations": 0
@@ -135,5 +143,5 @@
   "mlflow_experiment": "phasegnn"
  },
  "seed": 0,
- "created_at": 1795479282.6719677
+ "created_at": 1795508335.621668
 }

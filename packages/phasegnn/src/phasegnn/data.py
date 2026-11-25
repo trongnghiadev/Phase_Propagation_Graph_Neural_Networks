@@ -776,7 +776,9 @@ def build_dataset(df: pd.DataFrame, split: str, t_in: int = DEFAULT_T_IN,
                   splits: dict[str, tuple[str, str]] = SPLITS,
                   scaler: FeatureScaler | None = None,
                   fit_scaler: bool = False,
-                  height_scale: "HeightScale | None" = None) -> SampleSet:
+                  height_scale: "HeightScale | None" = None,
+                  holdout_stations: Sequence[str] = (),
+                  holdout_height_split: str = "val") -> SampleSet:
     """Dựng tập mẫu cho một tập chia.
 
     Tham số
@@ -787,6 +789,12 @@ def build_dataset(df: pd.DataFrame, split: str, t_in: int = DEFAULT_T_IN,
         `train`; các tập khác phải dùng lại scaler của train).
     height_scale : thang chuyển đổi mét ↔ chuẩn hoá cho độ cao đỉnh (xem `HeightScale`).
         Khi `fit_scaler=True` ta tự tính thang này từ tập `train` (thống kê **theo trạm**).
+    holdout_stations : trạm giữ riêng (E5). Khi `fit_scaler=True`, **không** dùng dữ liệu
+        `train` của các trạm này cho bất kỳ thống kê nào: (i) μ/σ của `HeightScale` lấy từ
+        quan trắc đỉnh của trạm trong tập `holdout_height_split` (mặc định `val`, tức chuỗi
+        quan trắc **trước mốc test** mà mô hình không dùng làm nhãn — trạm giữ riêng đã bị
+        loại khỏi train và val), nếu không có thì dùng trung bình μ/σ của các trạm còn lại;
+        (ii) bộ chuẩn hoá đặc trưng gộp (`_merge_scalers`) bỏ qua trạm giữ riêng.
     """
     if split not in splits:
         raise ValueError(f"split phải là một trong {list(splits)}, nhận {split!r}")
@@ -798,6 +806,13 @@ def build_dataset(df: pd.DataFrame, split: str, t_in: int = DEFAULT_T_IN,
     per_station: list[list[WindowSample]] = []
     per_station_scalers: list[FeatureScaler] = []
     out_hscale = height_scale
+    drop = set(holdout_stations or ())
+    st_out = list(st_list)
+    if fit_scaler and drop:
+        # Thống kê độ cao của trạm giữ riêng phải có **trước** khi dựng mẫu (nếu không,
+        # `HeightScale._stats` sẽ tự điền giá trị dự phòng). Tính sau vòng lặp chính để
+        # phương án dự phòng (trung bình các trạm còn lại) dùng được thống kê của chúng.
+        st_list = [st for st in st_list if st not in drop] + [st for st in st_list if st in drop]
     for st in st_list:
         # QUAN TRỌNG: lọc trên `sub` (đã giới hạn theo tập chia), **không** trên `df` —
         # nếu lọc trên `df` thì cả 3 tập đều chứa toàn bộ ngày ⇒ rò rỉ dữ liệu.
@@ -813,7 +828,8 @@ def build_dataset(df: pd.DataFrame, split: str, t_in: int = DEFAULT_T_IN,
         if fit_scaler:
             raw = sdf.set_index("day").reindex(days)[feat_cols].to_numpy(dtype=np.float32)
             s = FeatureScaler().fit(raw)
-            per_station_scalers.append(s)
+            if st not in drop:
+                per_station_scalers.append(s)
         else:
             s = scaler
         # **Thang độ cao (mét ↔ chuẩn hoá)**: fit trên tập train, thống kê **theo trạm**.
@@ -824,19 +840,21 @@ def build_dataset(df: pd.DataFrame, split: str, t_in: int = DEFAULT_T_IN,
             hs = HeightScale()
             out_hscale = hs
         if fit_scaler:
-            for col in ("h_peak1", "h_peak2"):
-                if col not in sdf.columns:
-                    continue
-                vals = sdf[col].to_numpy(dtype=np.float32)
-                vals = vals[np.isfinite(vals)]
-                if vals.size:
-                    hs.mean[f"{st}::{col}"] = float(vals.mean())
-                    hs.std[f"{st}::{col}"] = float(max(vals.std(), 1e-6))
-            for col in ("h_peak1", "h_peak2"):
-                key = f"{st}::{col}"
-                if key in hs.mean:
-                    hs.mean[f"{st}::both"] = hs.mean[key]
-                    hs.std[f"{st}::both"] = hs.std[key]
+            if st in drop:
+                # Trạm giữ riêng: KHÔNG dùng nhãn train của chính trạm (xem docstring).
+                src = df.iloc[0:0]
+                if holdout_height_split in splits:
+                    hlo, hhi = splits[holdout_height_split]
+                    src = df[(df["station"] == st) & (df["day"] >= hlo) & (df["day"] <= hhi)]
+                if not _fit_station_height(hs, st, src):
+                    mus = [v for k, v in hs.mean.items()
+                           if k.endswith("::both") and k.split("::")[0] not in drop]
+                    sds = [v for k, v in hs.std.items()
+                           if k.endswith("::both") and k.split("::")[0] not in drop]
+                    hs.mean[f"{st}::both"] = float(np.mean(mus)) if mus else 0.0
+                    hs.std[f"{st}::both"] = float(np.mean(sds)) if sds else 1.0
+            else:
+                _fit_station_height(hs, st, sdf)
         per_station.append(build_samples(sdf, st, days, t_in=t_in, t_out=t_out,
                                          feature_names=feat_cols, scaler=s,
                                          height_scale=hs))
@@ -847,7 +865,31 @@ def build_dataset(df: pd.DataFrame, split: str, t_in: int = DEFAULT_T_IN,
     if fit_scaler and per_station_scalers:
         out_scaler = _merge_scalers(per_station_scalers)
     return SampleSet(samples=samples, split=split, feature_names=list(feat_cols),
-                     stations=st_list, scaler=out_scaler, height_scale=out_hscale)
+                     stations=st_out, scaler=out_scaler, height_scale=out_hscale)
+
+
+def _fit_station_height(hs: "HeightScale", st: str, sdf: pd.DataFrame) -> bool:
+    """Ghi μ/σ độ cao đỉnh của trạm `st` từ bảng `sdf` vào `hs`; trả về True nếu có số liệu.
+
+    Giữ nguyên quy ước cũ: thống kê riêng cho `h_peak1`, `h_peak2`; thang chung `::both`
+    lấy theo cột có mặt sau cùng (`h_peak2` nếu có).
+    """
+    ok = False
+    for col in ("h_peak1", "h_peak2"):
+        if col not in sdf.columns:
+            continue
+        vals = sdf[col].to_numpy(dtype=np.float32)
+        vals = vals[np.isfinite(vals)]
+        if vals.size:
+            hs.mean[f"{st}::{col}"] = float(vals.mean())
+            hs.std[f"{st}::{col}"] = float(max(vals.std(), 1e-6))
+    for col in ("h_peak1", "h_peak2"):
+        key = f"{st}::{col}"
+        if key in hs.mean:
+            hs.mean[f"{st}::both"] = hs.mean[key]
+            hs.std[f"{st}::both"] = hs.std[key]
+            ok = True
+    return ok
 
 
 def _merge_scalers(scalers: Sequence["FeatureScaler"]) -> "FeatureScaler":
@@ -870,14 +912,21 @@ def _merge_scalers(scalers: Sequence["FeatureScaler"]) -> "FeatureScaler":
 def build_datasets(df: pd.DataFrame, t_in: int = DEFAULT_T_IN, t_out: int = DEFAULT_T_OUT,
                    feature_names: Sequence[str] = DYNAMIC_FEATURES,
                    stations: Sequence[str] | None = None,
-                   splits: dict[str, tuple[str, str]] = SPLITS) -> dict[str, SampleSet]:
+                   splits: dict[str, tuple[str, str]] = SPLITS,
+                   holdout_stations: Sequence[str] = ()) -> dict[str, SampleSet]:
     """Dựng cả 3 tập, dùng chung một bộ chuẩn hoá (fit trên `train`).
 
     **Thang độ cao** (`HeightScale`) cũng được fit trên `train` và dùng lại cho
     `val`/`test` ⇒ không rò rỉ thống kê.
+
+    **Trạm giữ riêng** (`holdout_stations`, E5): μ/σ độ cao của trạm đó **không** lấy từ
+    nhãn train của chính trạm mà từ quan trắc của trạm trong tập `val` (trước mốc test;
+    không dùng làm nhãn vì trạm đã bị loại khỏi train/val), dự phòng = trung bình các trạm
+    còn lại; bộ chuẩn hoá đặc trưng gộp cũng bỏ qua trạm đó. Xem `build_dataset`.
     """
     train = build_dataset(df, "train", t_in=t_in, t_out=t_out, feature_names=feature_names,
-                          stations=stations, splits=splits, scaler=None, fit_scaler=True)
+                          stations=stations, splits=splits, scaler=None, fit_scaler=True,
+                          holdout_stations=holdout_stations)
     scaler = train.scaler
     hscale = train.height_scale
     out = {"train": train}

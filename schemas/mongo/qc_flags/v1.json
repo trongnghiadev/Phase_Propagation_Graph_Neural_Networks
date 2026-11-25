@@ -1,0 +1,283 @@
+{
+  "collection": "qc_flags",
+  "version": 1,
+  "description": "Cờ QC của từng phần tử tide_extremes (GĐ2.3, ADR 0008).",
+  "validationLevel": "moderate",
+  "validationAction": "error",
+  "validator": {
+    "$jsonSchema": {
+      "bsonType": "object",
+      "required": [
+        "_id",
+        "collection",
+        "station",
+        "kind",
+        "ts",
+        "value",
+        "origin",
+        "rules",
+        "status",
+        "version",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "_id": {
+          "bsonType": "string"
+        },
+        "collection": {
+          "enum": [
+            "tide_extremes"
+          ]
+        },
+        "station": {
+          "bsonType": "string"
+        },
+        "kind": {
+          "enum": [
+            "high",
+            "low"
+          ]
+        },
+        "ts": {
+          "bsonType": "date"
+        },
+        "ts_placeholder": {
+          "bsonType": "bool"
+        },
+        "value": {
+          "bsonType": [
+            "double",
+            "int",
+            "long",
+            "null"
+          ]
+        },
+        "source_file": {
+          "bsonType": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "enum": [
+            "auto",
+            "manual"
+          ]
+        },
+        "rules": {
+          "bsonType": "array",
+          "items": {
+            "bsonType": "object",
+            "required": [
+              "rule",
+              "detail"
+            ],
+            "properties": {
+              "rule": {
+                "enum": [
+                  "R1",
+                  "R2",
+                  "R3"
+                ]
+              },
+              "detail": {
+                "bsonType": "string"
+              },
+              "metric": {
+                "bsonType": [
+                  "object",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "rules_version": {
+          "bsonType": [
+            "int",
+            "long",
+            "null"
+          ]
+        },
+        "auto_cleared": {
+          "bsonType": "bool"
+        },
+        "status": {
+          "enum": [
+            "suspect",
+            "confirmed_ok",
+            "rejected",
+            "corrected"
+          ]
+        },
+        "corrected_value": {
+          "bsonType": [
+            "double",
+            "int",
+            "long",
+            "null"
+          ]
+        },
+        "reason": {
+          "bsonType": [
+            "string",
+            "null"
+          ]
+        },
+        "decided_by": {
+          "bsonType": [
+            "string",
+            "null"
+          ]
+        },
+        "decided_at": {
+          "bsonType": [
+            "date",
+            "null"
+          ]
+        },
+        "first_flagged_run": {
+          "bsonType": [
+            "string",
+            "null"
+          ]
+        },
+        "last_seen_run": {
+          "bsonType": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "bsonType": [
+            "int",
+            "long"
+          ],
+          "minimum": 1
+        },
+        "retired": {
+          "bsonType": "bool"
+        },
+        "retired_at": {
+          "bsonType": [
+            "date",
+            "null"
+          ]
+        },
+        "retired_by": {
+          "bsonType": [
+            "string",
+            "null"
+          ]
+        },
+        "retired_reason": {
+          "bsonType": [
+            "string",
+            "null"
+          ]
+        },
+        "unretired_at": {
+          "bsonType": [
+            "date",
+            "null"
+          ]
+        },
+        "unretired_by": {
+          "bsonType": [
+            "string",
+            "null"
+          ]
+        },
+        "unretired_reason": {
+          "bsonType": [
+            "string",
+            "null"
+          ]
+        },
+        "value_mismatch": {
+          "bsonType": "bool"
+        },
+        "current_value": {
+          "bsonType": [
+            "double",
+            "int",
+            "long",
+            "null"
+          ]
+        },
+        "decided_value": {
+          "bsonType": [
+            "double",
+            "int",
+            "long",
+            "null"
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "corrected_value"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "corrected"
+              ]
+            },
+            "corrected_value": {
+              "bsonType": [
+                "double",
+                "int",
+                "long"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "status": {
+              "enum": [
+                "suspect",
+                "confirmed_ok",
+                "rejected"
+              ]
+            },
+            "corrected_value": {
+              "bsonType": "null"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "indexes": [
+    {
+      "key": {
+        "collection": 1,
+        "station": 1,
+        "kind": 1,
+        "ts": 1
+      },
+      "name": "target_unique",
+      "unique": true
+    },
+    {
+      "key": {
+        "status": 1,
+        "station": 1
+      },
+      "name": "status_station_idx"
+    },
+    {
+      "key": {
+        "rules.rule": 1
+      },
+      "name": "rule_idx"
+    }
+  ],
+  "notes": [
+    "Bản gốc trong code: vngis.qc_rules.QC_FLAGS_VALIDATOR / QC_FLAGS_INDEXES (test kiểm tra khớp)."
+  ]
+}

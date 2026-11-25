@@ -383,157 +383,147 @@ ok("Quy uoc hieu gio ngay: (BIEN - TRAM) se la dau nguoc",
 # 12. GAN NHOM DINH THEO CHU KY TRIEU (sua loi GĐ4 - Bug 2)
 # ---------------------------------------------------------------------------
 cat("\n-- 12. Gan nhom dinh theo chu ky trieu --\n")
-# Dung du lieu gia lap: 2 dinh/ngay lech ~12.42 h (mot chu ky M2).
-# M2 = 12.4206 h. Cho 4 ngay lien tiep, moi ngay 2 dinh:
-#   dinh chinh (gia tri cao) va dinh phu (gia tri thap) cach nhau 12.42 h.
-mk_fake_tide <- function(station, n_days = 4L, start = "2024-01-01",
-                         period_h = 12.4206012) {
-  base <- as.POSIXct(paste0(start, " 00:00:00"), tz = "Asia/Ho_Chi_Minh")
-  rows <- list()
-  for (i in seq_len(n_days)) {
-    for (k in 0:1) {
-      ts <- base + (i - 1) * 86400 + k * period_h * 3600
-      rows[[length(rows) + 1L]] <- data.frame(
-        station = station, kind = "high", ts = ts,
-        ts_hour = as.numeric(format(ts, "%H", tz = "Asia/Ho_Chi_Minh")) +
-          as.numeric(format(ts, "%M", tz = "Asia/Ho_Chi_Minh")) / 60,
-        value = if (k == 0L) 2.0 else 1.0,
-        obs_day = format(base + (i - 1) * 86400, "%Y-%m-%d"),
-        day_offset = 0L,
-        stringsAsFactors = FALSE)
-    }
-  }
-  do.call(rbind, rows)
+# API that (R/rules.R):
+#   assign_peak_generation(tide, phase_ref, period_h, n_per_gen, ref_tide, lag0)
+#   - co `ref_tide`: t0 = dinh tham chieu DAU TIEN + lag0,
+#     the he = floor((t - t0) / (2 * period_h))  (2 chu ky M2 ~ 24.84 h);
+#   - TRONG mot the he, dinh thu N = dinh thu N theo THOI GIAN (khong theo gia
+#     tri muc nuoc), giu toi da `n_per_gen` dinh cho MOI tram.
+#   phase_lag.R goi qua peak_series_by_generation(..., lag0 = 0 mac dinh).
+#
+# Du lieu gia: dinh cach deu dung 1 chu ky M2 (trieu that troi ~50 phut/ngay,
+# khong "reset" moi ngay). Dinh chinh (k chan) = 2.0 m, dinh phu (k le) = 1.0 m.
+# Dinh DAU TIEN cua moi chuoi som 0.1 h -> cac dinh con lai khong nam dung bien
+# the he (tranh sai so dau phay dong khi (t - t0) / (2P) ra so nguyen).
+VN_TZ <- "Asia/Ho_Chi_Minh"
+mk_tide_m2 <- function(station, base, lag_h = 0, n_peak = 8L,
+                       values = rep(c(2.0, 1.0), length.out = n_peak),
+                       first_shift_h = 0.1, period_h = per_m2) {
+  k <- seq_len(n_peak) - 1L
+  off_h <- k * period_h + lag_h
+  off_h[1] <- off_h[1] - first_shift_h
+  ts <- base + off_h * 3600
+  lt <- as.POSIXlt(ts, tz = VN_TZ)
+  data.frame(station = station, kind = "high", ts = ts,
+             ts_hour = lt$hour + lt$min / 60 + lt$sec / 3600,
+             value = values, obs_day = format(ts, "%Y-%m-%d", tz = VN_TZ),
+             day_offset = 0L, stringsAsFactors = FALSE)
 }
-fake_tide <- rbind(mk_fake_tide("VUNG_TAU"), mk_fake_tide("STATION_A"))
-# `pivot_extremes()` can cot `rn` (sinh tu `build_peak_table()`).
-fake_tide <- fake_tide[order(fake_tide$station, fake_tide$obs_day, fake_tide$ts), ]
-fake_tide$rn <- ave(seq_len(nrow(fake_tide)),
-                    list(fake_tide$station, fake_tide$kind, fake_tide$obs_day),
-                    FUN = seq_along)
+add_rn <- function(d) {
+  d <- d[order(d$station, d$obs_day, d$ts), , drop = FALSE]
+  d$rn <- ave(seq_len(nrow(d)), list(d$station, d$kind, d$obs_day), FUN = seq_along)
+  rownames(d) <- NULL
+  d
+}
+circ_lag <- function(m) ((m$t_h - m$t_ref_h + 12) %% 24) - 12
+# Hai dinh cung the he: (dinh som, dinh muon) + khoang cach (gio)
+gen_pairs <- function(g) {
+  g1 <- g[g$gen_rn == 1, c("tide_gen", "ts", "value")]
+  g2 <- g[g$gen_rn == 2, c("tide_gen", "ts", "value")]
+  m <- merge(g1, g2, by = "tide_gen", suffixes = c("_1", "_2"))
+  m$dt_h <- as.numeric(difftime(m$ts_2, m$ts_1, units = "hours"))
+  m
+}
+# Khoang cach ky vong: 1 chu ky M2; rieng the he dau dai hon 0.1 h vi dinh
+# dau tien cua chuoi duoc day som 0.1 h (xem `first_shift_h`).
+exp_dt <- function(m) per_m2 + ifelse(m$tide_gen == min(m$tide_gen), 0.1, 0)
 
-# Quy tac CU (pivot_extremes): dinh 1 = gio nho nhat trong ngay quan sat
-fake_pk <- pivot_extremes(fake_tide, "peak")
-ok("pivot_extremes: giu nguyen quy tac thu tu gio trong ngay (R-Spark parity)",
-   fake_pk$t1_h[1] <= fake_pk$t2_h[1])
-ok("pivot_extremes: 2 dinh -> 1 dong cho moi (tram, ngay)",
-   nrow(fake_pk) == 8 && all(!is.na(fake_pk$h1)) && all(!is.na(fake_pk$h2)))
+# --- 12a. Truong hop thuong: STATION_A tre 2 h, khong co dinh qua nua dem ---
+LAG_A <- 2
+base_a <- as.POSIXct("2024-01-01 02:00:00", tz = VN_TZ)
+vt_a <- mk_tide_m2("VUNG_TAU", base_a)
+st_a <- mk_tide_m2("STATION_A", base_a, lag_h = LAG_A)
+tide_a <- add_rn(rbind(vt_a, st_a))
 
-# Quy tac MOI (the he chu ky trieu) - gan cho TUNG TRAM
-anchor_ts <- select_cycle_anchors(fake_tide[fake_tide$station == "VUNG_TAU", ])
-gen <- assign_peak_generation(fake_tide[fake_tide$station == "STATION_A", ],
-                               phase_ref = 180, period_h = per_m2,
-                               n_per_gen = 2L, gen_anchor = anchor_ts)
-ok("assign_peak_generation: moi the he chu ky co <= 2 dinh",
+# Quy tac CU (pivot_extremes, khop Spark) giu nguyen: dinh 1 = gio som nhat trong ngay
+fake_pk <- pivot_extremes(tide_a, "peak")
+ok("pivot_extremes: giu quy tac thu tu gio trong ngay quan sat (R-Spark parity)",
+   all(is.na(fake_pk$t2_h) | fake_pk$t1_h <= fake_pk$t2_h))
+
+gen <- assign_peak_generation(st_a, phase_ref = 180, period_h = per_m2,
+                              n_per_gen = 2L, ref_tide = vt_a, lag0 = 0)
+ok("assign_peak_generation: moi the he co <= 2 dinh",
    all(table(gen$tide_gen) <= 2))
-ok("assign_peak_generation: dinh thu 1 la dinh co gia tri CAO NHAT",
-   all(gen$value[gen$gen_rn == 1] == 2.0))
-ok("assign_peak_generation: dinh thu 2 la dinh gia tri THAP",
-   all(gen$value[gen$gen_rn == 2] == 1.0))
-ok("assign_peak_generation: so the he = 4 (4 ngay x 1 the he/ngay)",
-   length(unique(gen$tide_gen)) == 4)
+ok("assign_peak_generation: 8 dinh -> 4 the he, moi the he du 2 dinh",
+   length(unique(gen$tide_gen)) == 4 && all(table(gen$tide_gen) == 2))
+pa <- gen_pairs(gen)
+ok("assign_peak_generation: trong the he, dinh 1 SOM hon dinh 2 (xep theo thoi gian)",
+   nrow(pa) == 4 && all(pa$dt_h > 0))
+ok("assign_peak_generation: 2 dinh cung the he cach nhau ~1 chu ky M2 (12.42 h)",
+   nrow(pa) == 4 && all(abs(pa$dt_h - exp_dt(pa)) < 0.01))
+gen_ref <- assign_peak_generation(vt_a, phase_ref = 180, period_h = per_m2,
+                                  n_per_gen = 2L, ref_tide = vt_a, lag0 = 0)
+ok("assign_peak_generation: tram va tram tham chieu co CUNG tap the he",
+   identical(sort(unique(gen$tide_gen)), sort(unique(gen_ref$tide_gen))))
+# Nhieu tram trong cung bang: moi tram duoc gioi han n_per_gen RIENG
+gen_both <- assign_peak_generation(tide_a, phase_ref = 180, period_h = per_m2,
+                                   n_per_gen = 2L, ref_tide = vt_a, lag0 = 0)
+ok("assign_peak_generation: gom theo tung tram (2 tram x 8 dinh -> giu du 16)",
+   nrow(gen_both) == 16 &&
+   all(table(gen_both$station, gen_both$tide_gen) == 2))
 
-# Kiem tra dinh 1/2 CUNG THE HE (nghia la 2 dinh cach nhau ~1 chu ky M2)
-g1 <- gen[gen$gen_rn == 1, ]
-g2 <- gen[gen$gen_rn == 2, ]
-ok("assign_peak_generation: dinh 1 va dinh 2 thuoc CUNG the he chu ky",
-   nrow(g1) == 4 && nrow(g2) == 4 && all(g1$tide_gen == g2$tide_gen))
-# Do lech thoi gian tuong doi (dung `ts`, khong dung `ts_hour` de tranh wrap
-# qua 24h) -> phai bang 1 chu ky M2.
-m_g <- merge(g1[, c("station", "ts", "tide_gen")],
-             g2[, c("station", "ts", "tide_gen")],
-             by = c("station", "tide_gen"))
-dt_h <- abs(as.numeric(difftime(m_g$ts.x, m_g$ts.y, units = "hours")))
-ok("assign_peak_generation: 2 dinh cach nhau ~1 chu ky M2 (12.42 h)",
-   nrow(m_g) == 4 && all(abs(dt_h - per_m2) < 0.01))
+gs_a <- peak_series_by_generation(tide_a, "STATION_A", vt_a, phase_ref = 180,
+                                  period_h = per_m2, n_per_gen = 2L)
+ok("peak_series_by_generation: tra ve 2 chuoi (peak1, peak2), moi chuoi 4 the he",
+   length(gs_a) == 2 && !is.null(gs_a[[1]]) && !is.null(gs_a[[2]]) &&
+   nrow(gs_a[[1]]) == 4 && nrow(gs_a[[2]]) == 4)
+ok("peak_series_by_generation: do tre = +2 h cho ca dinh 1 va dinh 2",
+   near(circ_lag(gs_a[[1]]), LAG_A, 1e-6) && near(circ_lag(gs_a[[2]]), LAG_A, 1e-6))
+mc_a <- match_cycle_peaks(gs_a[[1]], lag_sign = 1)
+ok("match_cycle_peaks: giu du 4 cap, d_h = +2 h",
+   nrow(mc_a) == 4 && near(mc_a$d_h, LAG_A, 1e-6))
 
-# Kiem tra tinh hop ly: ghep 2 tram theo the he -> do tre = 0 khi cung pha
-gen_ser <- peak_series_by_generation(fake_tide, "STATION_A",
-                                      fake_tide[fake_tide$station == "VUNG_TAU", ],
-                                      phase_ref = 180, period_h = per_m2,
-                                      n_per_gen = 2L)
-ok("peak_series_by_generation: tra ve 2 chuoi (peak1, peak2)",
-   length(gen_ser) == 2 && !is.null(gen_ser[[1]]) && !is.null(gen_ser[[2]]))
-ok("peak_series_by_generation: moi cap co 1 dong the he chu ky",
-   nrow(gen_ser[[1]]) == 4 && nrow(gen_ser[[2]]) == 4)
-ok("peak_series_by_generation: do tre ~ 0 khi 2 tram cung pha",
-   abs(stats::median(((gen_ser[[1]]$t_h - gen_ser[[1]]$t_ref_h + 12) %% 24) - 12)) < 1e-9)
+# --- 12b. Dinh "roi" qua nua dem + bien do bien doi -----------------------
+# STATION_B tre 3 h. Chon moc sao cho dinh k = 2 cua tram roi vao 23:30 ngay
+# 2024-01-01, dinh cung the he (k = 3) vao 11:55 ngay 2024-01-02. Dinh k = 3
+# CAO hon dinh k = 2 (2.5 m vs 1.8 m) -> neu xep theo gia tri se dao thu tu.
+LAG_B <- 3
+target_b <- as.POSIXct("2024-01-01 23:30:00", tz = VN_TZ)
+base_b <- target_b - (2 * per_m2 + LAG_B) * 3600
+val_b <- rep(c(2.0, 1.0), length.out = 8L); val_b[3] <- 1.8; val_b[4] <- 2.5
+vt_b <- mk_tide_m2("VUNG_TAU", base_b)
+st_b <- mk_tide_m2("STATION_B", base_b, lag_h = LAG_B, values = val_b)
+tide_b <- add_rn(rbind(vt_b, st_b))
+i_late <- which(abs(st_b$ts_hour - 23.5) < 1e-6)
+ok("(du lieu gia) dinh k=2 cua STATION_B luc 23:30 ngay 2024-01-01",
+   length(i_late) == 1 && st_b$obs_day[i_late] == "2024-01-01" &&
+   st_b$obs_day[i_late + 1L] == "2024-01-02")
 
-# CAU HOI THEN CUOT: bien do lon lam dinh CHINH "roi" sang khung 23-24h.
-#
-# Mo phong: tren tram STATION_A, dinh chinh (gia tri 2.0) thuong xay ra luc
-# ~00:00. Do bien do bien doi, dinh chinh cua chu ky 2024-01-02 xay ra luc
-# 23:30 cua ngay 2024-01-01 (dinh bien do lon 3.0). Cac dinh con lai giu
-# nguyen.
-#
-# VOI QUY TAC CU (theo gio trong ngay quan sat): ngay 2024-01-01 se chua 2
-# dinh {00:00 (2.0), 23:30 (3.0)} -> "dinh 1" = 00:00, "dinh 2" = 23:30 ->
-# cap dinh cach nhau 23.5 h (SAI CHU KY, phai la ~12.42 h) -> do tre bi am.
-# Ngoai ra con: ngay 2024-01-02 chi con 1 dinh (12:25) -> mat cap dinh.
-# MO PHONG DAI TIENG: ca chu ky 2024-01-02 bi "roi" 0.5 h -> dinh CHINH
-# (2.0) chuyen tu 00:00 cua 01-02 sang 23:30 cua 01-01, va dinh PHU (1.0)
-# chuyen tu 12:25 cua 01-02 sang 12:25 cua 01-01. Voi bien do lon, dinh
-# chinh co the "roi" nhu vay (bien do khong bat bien).
-rolled_ts <- as.POSIXct("2024-01-01 23:30:00", tz = "Asia/Ho_Chi_Minh")
-rolled <- fake_tide
-# Xoa CAP dinh cua ngay 2024-01-02 (00:00 va 12:25) cua STATION_A
-rolled <- rolled[!(rolled$station == "STATION_A" &
-                     rolled$obs_day == "2024-01-02"), , drop = FALSE]
-# Them 2 dinh "roi" vao ngay 2024-01-01
-rolled <- rbind(rolled, data.frame(
-  station = "STATION_A", kind = "high", ts = rolled_ts,
-  ts_hour = 23.5, value = 3.0, obs_day = "2024-01-01",
-  day_offset = 0L, rn = NA_integer_, stringsAsFactors = FALSE))
-rolled <- rbind(rolled, data.frame(
-  station = "STATION_A", kind = "high",
-  ts = as.POSIXct("2024-01-01 12:25:14", tz = "Asia/Ho_Chi_Minh"),
-  ts_hour = 12.41667, value = 1.0, obs_day = "2024-01-01",
-  day_offset = 0L, rn = NA_integer_, stringsAsFactors = FALSE))
-rolled <- rolled[order(rolled$station, rolled$obs_day, rolled$ts), ]
-rolled$rn <- ave(seq_len(nrow(rolled)),
-                 list(rolled$station, rolled$kind, rolled$obs_day),
-                 FUN = seq_along)
-pk_shift <- pivot_extremes(rolled[rolled$station == "STATION_A", ], "peak")
-# Quy tac CU: ngay 2024-01-01 bay gio co 3 dinh (00:00, 12:25, 23:30).
-# "dinh 1" = 00:00, "dinh 2" = 12:25 -> cap dinh van dung, NHUNG dinh bien do
-# lon 23:30 bi BO (rn=3) -> mat dinh chinh thuc te cua chu ky.
-# Ngay 2024-01-02 mat het dinh -> khong co cap dinh nao.
-d01 <- pk_shift[pk_shift$day == "2024-01-01", ]
-ok("Quy tac CU: dinh bien do lon 23:30 bi BO (rn=3) trong ngay 01-01",
-   nrow(d01) == 1 && abs(d01$t1_h - 0) < 1e-9 && abs(d01$t2_h - 12.41667) < 1e-3)
-ok("Quy tac CU: ngay 01-02 mat het cap dinh (khong con dinh nao)",
-   nrow(pk_shift[pk_shift$day == "2024-01-02", ]) == 0)
+gen_b <- assign_peak_generation(st_b, phase_ref = 180, period_h = per_m2,
+                                n_per_gen = 2L, ref_tide = vt_b, lag0 = 0)
+same_ts <- function(a, b) abs(as.numeric(difftime(a, b, units = "secs"))) < 1
+g_late <- gen_b[same_ts(gen_b$ts, st_b$ts[i_late]), ]
+g_next <- gen_b[same_ts(gen_b$ts, st_b$ts[i_late + 1L]), ]
+ok("Quy tac MOI: dinh 23:30 va dinh 11:55 hom sau CUNG the he",
+   nrow(g_late) == 1 && nrow(g_next) == 1 && g_late$tide_gen == g_next$tide_gen)
+ok("Quy tac MOI: dinh 23:30 la dinh 1 (som hon) du thap hon dinh 2 (1.8 < 2.5 m)",
+   nrow(g_late) == 1 && nrow(g_next) == 1 &&
+   g_late$gen_rn == 1 && g_next$gen_rn == 2 && g_late$value < g_next$value)
+pb <- gen_pairs(gen_b)
+ok("Quy tac MOI: moi the he <= 2 dinh, 2 dinh cach nhau ~1 chu ky M2",
+   all(table(gen_b$tide_gen) <= 2) &&
+   nrow(pb) == 4 && all(abs(pb$dt_h - exp_dt(pb)) < 0.01))
 
-# Quy tac MOI (the he chu ky): moi dinh van thuoc DUNG the he chu ky cua
-# tram tham chieu. Dinh "roi" 23:30 thuoc the he CUA CHINH NO (khong bi "gop"
-# sai vao the he khac) -> cap dinh van cach nhau ~12.42 h.
-anchor_rolled <- select_cycle_anchors(fake_tide[fake_tide$station == "VUNG_TAU", ])
-gen_shift <- assign_peak_generation(rolled[rolled$station == "STATION_A", ],
-                                     phase_ref = 180, period_h = per_m2,
-                                     n_per_gen = 2L,
-                                     gen_anchor = anchor_rolled)
-ok("Quy tac MOI: moi dinh thuoc mot the he cua tram tham chieu",
-   all(gen_shift$tide_gen >= 1) && length(unique(gen_shift$tide_gen)) == 4)
-ok("Quy tac MOI: moi the he chu ky van co <= 2 dinh",
-   all(table(gen_shift$tide_gen) <= 2))
-# Do tre giua 2 dinh cua cung the he van la ~1 chu ky M2 (12.42 h)
-g1s <- gen_shift[gen_shift$gen_rn == 1, ]
-g2s <- gen_shift[gen_shift$gen_rn == 2, ]
-m_s <- merge(g1s[, c("station", "ts", "tide_gen")],
-             g2s[, c("station", "ts", "tide_gen")],
-             by = c("station", "tide_gen"))
-dt_s <- abs(as.numeric(difftime(m_s$ts.x, m_s$ts.y, units = "hours")))
-ok("Quy tac MOI: 2 dinh cung the he cach nhau ~1 chu ky M2 (12.42 h)",
-   nrow(m_s) == 4 && all(abs(dt_s - per_m2) < 0.01))
-# DINH "ROI" (23:30) va dinh PHU (12:25) cua cung chu ky phai cung the he,
-# va dinh CHINH cua chu ky do (gia tri 3.0) la dinh thu 1.
-g_roll <- gen_shift[abs(gen_shift$ts_hour - 23.5) < 1e-9, ]
-g_sec <- gen_shift[abs(gen_shift$ts_hour - 12.41667) < 1e-3, ]
-ok("Quy tac MOI: dinh 'roi' 23:30 va dinh phu 12:25 cung the he",
-   nrow(g_roll) == 1 && nrow(g_sec) == 1 &&
-   g_roll$tide_gen == g_sec$tide_gen)
-ok("Quy tac MOI: dinh bien do lon 23:30 la dinh thu 1 cua the he",
-   nrow(g_roll) == 1 && g_roll$gen_rn == 1 && g_roll$value == 3.0)
+# Quy tac CU (theo ngay quan sat) ghep dinh 11:05 va 23:30 cua ngay 01-01:
+# hai dinh nay thuoc HAI the he khac nhau -> sai chu ky.
+pk_b <- pivot_extremes(tide_b[tide_b$station == "STATION_B", ], "peak")
+d01 <- pk_b[pk_b$day == "2024-01-01", ]
+gen_of_hour <- function(h) gen_b$tide_gen[gen_b$obs_day == "2024-01-01" &
+                                           abs(gen_b$ts_hour - h) < 1e-6]
+ok("(doi chung) Quy tac CU: ngay 01-01 ghep 2 dinh thuoc 2 the he KHAC nhau",
+   nrow(d01) == 1 && abs(d01$t2_h - 23.5) < 1e-6 &&
+   length(gen_of_hour(d01$t1_h)) == 1 && length(gen_of_hour(d01$t2_h)) == 1 &&
+   gen_of_hour(d01$t1_h) != gen_of_hour(d01$t2_h))
+
+gs_b <- peak_series_by_generation(tide_b, "STATION_B", vt_b, phase_ref = 180,
+                                  period_h = per_m2, n_per_gen = 2L)
+ok("peak_series_by_generation: dinh qua nua dem van cho do tre = +3 h (ca 2 chuoi)",
+   !is.null(gs_b[[1]]) && !is.null(gs_b[[2]]) &&
+   nrow(gs_b[[1]]) == 4 && nrow(gs_b[[2]]) == 4 &&
+   near(circ_lag(gs_b[[1]]), LAG_B, 1e-6) && near(circ_lag(gs_b[[2]]), LAG_B, 1e-6))
+mb_ <- match_cycle_peaks(gs_b[[1]], lag_sign = 1, lag0 = LAG_B)
+ok("match_cycle_peaks: dinh qua nua dem -> d_h = +3 h, khong cap nao bi am",
+   nrow(mb_) == 4 && near(mb_$d_h, LAG_B, 1e-6))
 
 # ---------------------------------------------------------------------------
 # 13. KHOA GHEP CAP KIEM DINH: cung issued_date + lead_day (sua loi 24/11/2026)

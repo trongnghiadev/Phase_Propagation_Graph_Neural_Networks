@@ -99,10 +99,10 @@ def load_flags(adm: MongoAdmin) -> dict[str, dict]:
 
 def ensure_flags_collection(adm: MongoAdmin) -> None:
     if adm.exists(R.FLAGS):
-        adm.command({"collMod": R.FLAGS, "validator": R.QC_FLAGS_VALIDATOR, "validationLevel": "strict",
+        adm.command({"collMod": R.FLAGS, "validator": R.QC_FLAGS_VALIDATOR, "validationLevel": "moderate",
                      "validationAction": "error"})
     else:
-        adm.create(R.FLAGS, validator=R.QC_FLAGS_VALIDATOR, validationLevel="strict", validationAction="error")
+        adm.create(R.FLAGS, validator=R.QC_FLAGS_VALIDATOR, validationLevel="moderate", validationAction="error")
     adm.create_indexes(R.FLAGS, R.QC_FLAGS_INDEXES)
 
 

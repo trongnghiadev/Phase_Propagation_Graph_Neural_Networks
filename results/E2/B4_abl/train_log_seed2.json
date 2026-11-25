@@ -1,0 +1,210 @@
+{
+ "variant": "B4",
+ "best_val_mae": 0.2310367931788032,
+ "best_epoch": 4,
+ "history": [
+  {
+   "epoch": 0,
+   "train_loss": 1.0278080423672995,
+   "val": {
+    "mae_peak": 0.27908899075276145,
+    "mae_slot": 0.27641781007015653,
+    "mae_hour": 4.164507159671268,
+    "pinball": 0.29891865608592827,
+    "n_samples": 300
+   },
+   "seconds": 33.67895174026489
+  },
+  {
+   "epoch": 1,
+   "train_loss": 0.7355912526448568,
+   "val": {
+    "mae_peak": 0.23721551975688418,
+    "mae_slot": 0.23480800416677636,
+    "mae_hour": 4.185597465811549,
+    "pinball": 0.27298585084577404,
+    "n_samples": 300
+   },
+   "seconds": 19126.35281729698
+  },
+  {
+   "epoch": 2,
+   "train_loss": 0.6343567125002543,
+   "val": {
+    "mae_peak": 0.24220175779349096,
+    "mae_slot": 0.24604959005705787,
+    "mae_hour": 3.696894717860866,
+    "pinball": 0.281644369289279,
+    "n_samples": 300
+   },
+   "seconds": 44.977630615234375
+  },
+  {
+   "epoch": 3,
+   "train_loss": 0.5669867197672526,
+   "val": {
+    "mae_peak": 0.2461157071832064,
+    "mae_slot": 0.24909009546766295,
+    "mae_hour": 3.699539424922015,
+    "pinball": 0.29063397015134496,
+    "n_samples": 300
+   },
+   "seconds": 42.794979095458984
+  },
+  {
+   "epoch": 4,
+   "train_loss": 0.5660446564356486,
+   "val": {
+    "mae_peak": 0.2310367931788032,
+    "mae_slot": 0.22987058215131065,
+    "mae_hour": 3.648413556330913,
+    "pinball": 0.26846975478033225,
+    "n_samples": 300
+   },
+   "seconds": 39.85377311706543
+  },
+  {
+   "epoch": 5,
+   "train_loss": 0.5580812605222066,
+   "val": {
+    "mae_peak": 0.23489793571265968,
+    "mae_slot": 0.22792475812339646,
+    "mae_hour": 3.4991959894025646,
+    "pinball": 0.27428113264342147,
+    "n_samples": 300
+   },
+   "seconds": 40.4945068359375
+  },
+  {
+   "epoch": 6,
+   "train_loss": 0.5377215214570363,
+   "val": {
+    "mae_peak": 0.27204164326996416,
+    "mae_slot": 0.25254962210662035,
+    "mae_hour": 3.5734842535611744,
+    "pinball": 0.3104083025207122,
+    "n_samples": 300
+   },
+   "seconds": 38.69724893569946
+  },
+  {
+   "epoch": 7,
+   "train_loss": 0.527846956650416,
+   "val": {
+    "mae_peak": 0.2462564043096594,
+    "mae_slot": 0.23262854702824004,
+    "mae_hour": 3.386134051632237,
+    "pinball": 0.2931046717365583,
+    "n_samples": 300
+   },
+   "seconds": 37.29840612411499
+  },
+  {
+   "epoch": 8,
+   "train_loss": 0.515255887111028,
+   "val": {
+    "mae_peak": 0.24345314361759135,
+    "mae_slot": 0.22839240138239103,
+    "mae_hour": 3.397914232112266,
+    "pinball": 0.28375411106894416,
+    "n_samples": 300
+   },
+   "seconds": 39.47136878967285
+  }
+ ],
+ "data_snapshot": {
+  "run_date": "2026-11-24",
+  "job_version": "g5-v1",
+  "collections": {
+   "tide_extremes": 129420,
+   "official_forecasts": 38410,
+   "reservoir_daily": 15313,
+   "rainfall_daily": 13127,
+   "hydromet_bulletins": 3636,
+   "stations": 26,
+   "merit_river_reaches": 21508,
+   "qc_flags": 380
+  },
+  "max_timestamps": {
+   "tide_extremes_ts": "2026-11-10T16:00:00Z",
+   "reservoir_daily_date": "2026-11-09T17:00:00Z",
+   "rainfall_daily_date": "2026-11-09T17:00:00Z",
+   "official_forecasts_target_date": "2026-11-15"
+  },
+  "day_range": [
+   "2016-12-31",
+   "2026-11-10"
+  ],
+  "rows": 32352,
+  "rows_per_year": {
+   "2016": 9,
+   "2017": 3265,
+   "2018": 3276,
+   "2019": 3285,
+   "2020": 3294,
+   "2021": 3276,
+   "2022": 3275,
+   "2023": 3267,
+   "2024": 3294,
+   "2025": 3285,
+   "2026": 2826
+  },
+  "rows_per_station": {
+   "BEN_LUC": 3595,
+   "BIEN_HOA": 3595,
+   "DAU_TIENG": 3593,
+   "GO_DAU_HA": 3595,
+   "NHA_BE": 3595,
+   "PHU_AN": 3595,
+   "TAN_AN": 3595,
+   "THU_DAU_MOT": 3594,
+   "VUNG_TAU": 3595
+  },
+  "astro_merged": true,
+  "astro_fit": {
+   "fit_from": "2017-01-01",
+   "fit_to": "2022-12-31",
+   "fit_splits": [
+    "train"
+   ],
+   "generated_at": "2026-11-24T11:34:47+0700"
+  },
+  "leak_check": {
+   "rows_with_input_obs": 32343,
+   "violations": 0
+  }
+ },
+ "config": {
+  "variant": "B4",
+  "epochs": 12,
+  "batch_size": 16,
+  "lr": 0.001,
+  "weight_decay": 0.0001,
+  "seed": 2,
+  "t_in": 14,
+  "t_out": 5,
+  "hidden_dim": 64,
+  "num_gnn_layers": 2,
+  "delta_h": 12.0,
+  "lam1": 1.0,
+  "lam2": 0.5,
+  "lam3": 0.1,
+  "lam4": 0.1,
+  "patience": 4,
+  "max_train_samples": 1200,
+  "max_val_samples": 300,
+  "subsample": "head",
+  "holdout_stations": [],
+  "aux_weight": 0.3,
+  "device": "cpu",
+  "num_threads": 1,
+  "use_mlflow": false,
+  "register_to_db": false,
+  "mlflow_experiment": "phasegnn"
+ },
+ "dims": {
+  "in_dim": 20,
+  "static_dim": 9,
+  "edge_dim": 6
+ }
+}

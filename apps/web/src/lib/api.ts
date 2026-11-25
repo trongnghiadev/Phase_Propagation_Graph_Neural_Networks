@@ -3,17 +3,24 @@
  *
  * Nguyên tắc:
  * - Chỉ gọi API qua HTTP (`/api/v1/...`), KHÔNG import từ `packages/` (luật phụ thuộc).
- * - Access token 15 phút, refresh token 7 ngày (xem `apps/api/src/api/auth/jwt.py`).
+ * - Access token 15 phút chỉ giữ trong BỘ NHỚ của trang (không localStorage/sessionStorage).
+ * - Refresh token 7 ngày nằm trong cookie `httpOnly; SameSite=Strict; Path=/api/v1/auth/{refresh,logout}`
+ *   do API đặt — JavaScript không đọc được. Mọi request gửi `credentials: "include"` và header
+ *   `X-Requested-With: XMLHttpRequest` (API dùng header này để chọn chế độ cookie và chống CSRF).
+ * - Tải trang → gọi `POST /auth/refresh` (cookie) để lấy access token mới (`restoreSession`).
  * - Khi API trả **401** → thử refresh một lần rồi phát lại yêu cầu; nếu refresh hỏng
  *   thì xoá phiên đăng nhập và báo người dùng.
  * - Khi API trả **409** (xung đột phiên bản) hoặc **423** (đang bị khoá) → ném lỗi
  *   `ApiRequestError` với `status` để giao diện hiện thông báo rõ ràng.
  */
 
-import type { ApiErrorBody, TokenResponse } from "./types";
+import type { ActorLabel, ApiErrorBody, TokenResponse } from "./types";
 
 /** Gốc API. Rỗng = dùng đường dẫn tương đối (cùng origin, qua Nginx). */
-export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/+$/, "");
+export const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_PROXY === "1"
+    ? "" // proxy dev của Next.js (next.config.ts → rewrites) → gọi cùng origin
+    : (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/+$/, "");
 
 /** Tiền tố chung của mọi đường dẫn nghiệp vụ. */
 export const API_PREFIX = "/api/v1";
@@ -24,15 +31,38 @@ export class ApiRequestError extends Error {
   readonly detail: unknown;
   readonly requestId: string | null;
   readonly instance: string | null;
+  /** Số giây nên chờ trước khi thử lại (header `Retry-After` của 429/503). */
+  readonly retryAfter: number | null;
 
   constructor(status: number, message: string, detail?: unknown, requestId?: string | null,
-              instance?: string | null) {
+              instance?: string | null, retryAfter?: number | null) {
     super(message);
     this.name = "ApiRequestError";
     this.status = status;
     this.detail = detail;
     this.requestId = requestId ?? null;
     this.instance = instance ?? null;
+    this.retryAfter = retryAfter ?? null;
+  }
+
+  /** Dữ liệu không hợp lệ hoặc thao tác không hỗ trợ (422). */
+  get isInvalid(): boolean {
+    return this.status === 422;
+  }
+
+  /** Thiếu điều kiện tiên quyết (428) — ví dụ chưa gửi `version` khi cờ QC đã tồn tại. */
+  get isPreconditionRequired(): boolean {
+    return this.status === 428;
+  }
+
+  /** Phiên bản hiện tại mà API báo trong `detail.current` (409/428). */
+  get currentVersion(): number | null {
+    const d = this.detail;
+    if (d && typeof d === "object" && !Array.isArray(d)) {
+      const cur = (d as Record<string, unknown>).current;
+      if (typeof cur === "number") return cur;
+    }
+    return null;
   }
 
   /** Người khác đang sửa bản ghi (423) — cần thông báo riêng. */
@@ -92,63 +122,59 @@ export function toError(err: unknown): Error {
 // Quản lý token
 // ---------------------------------------------------------------------------
 
-const ACCESS_KEY = "gisdist.access_token";
-const REFRESH_KEY = "gisdist.refresh_token";
-const USER_KEY = "gisdist.user";
+/** Header tuỳ biến bắt buộc (chống CSRF, khớp `auth.csrf_header` của API). */
+const CSRF_HEADER = { "X-Requested-With": "XMLHttpRequest" } as const;
+
+export interface SessionUser {
+  user_id: string;
+  username: string;
+  role: string;
+  perm_ver: number;
+}
+
+let accessToken: string | null = null;
+let sessionUser: SessionUser | null = null;
 
 /**
- * Lưu token ở `localStorage`.
- *
- * **Hạn chế bảo mật đã biết:** `localStorage` đọc được bằng JavaScript, nên nếu có
- * XSS thì token bị lấy. Backend hiện **không** đặt cookie httpOnly cho API
- * (`POST /api/v1/auth/login` trả JSON), nên frontend không thể dùng cookie httpOnly.
- * Hệ thống đã giảm rủi ro ở server: access token 15 phút, refresh token 7 ngày,
- * đổi quyền → `perm_ver` tăng → token cũ mất hiệu lực ngay, logout chặn `jti`.
- *
- * Nếu sau này backend hỗ trợ cookie httpOnly (SameSite=Strict) thì nên chuyển sang
- * `credentials: "include"` và bỏ hoàn toàn phần token trong `localStorage`.
+ * Access token chỉ nằm trong biến của module (mất khi tải lại trang → lấy lại bằng refresh cookie).
+ * Không dùng `localStorage`: XSS không đọc được token lưu lâu dài; refresh token là cookie httpOnly.
  */
 export const tokenStore = {
   getAccess(): string | null {
-    if (typeof window === "undefined") return null;
-    return window.localStorage.getItem(ACCESS_KEY);
-  },
-  getRefresh(): string | null {
-    if (typeof window === "undefined") return null;
-    return window.localStorage.getItem(REFRESH_KEY);
+    return accessToken;
   },
   set(tokens: TokenResponse): void {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(ACCESS_KEY, tokens.access_token);
-    window.localStorage.setItem(REFRESH_KEY, tokens.refresh_token);
-    window.localStorage.setItem(USER_KEY, JSON.stringify({
+    accessToken = tokens.access_token;
+    sessionUser = {
       user_id: tokens.user_id,
       username: tokens.username,
       role: tokens.role,
       perm_ver: tokens.perm_ver,
-    }));
+    };
+    authChannel();
   },
-  setUser(user: unknown): void {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(USER_KEY, JSON.stringify(user));
-  },
-  getUser<T = { user_id: string; username: string; role: string; perm_ver: number }>(): T | null {
-    if (typeof window === "undefined") return null;
-    const raw = window.localStorage.getItem(USER_KEY);
-    if (!raw) return null;
-    try {
-      return JSON.parse(raw) as T;
-    } catch {
-      return null;
-    }
+  getUser(): SessionUser | null {
+    return sessionUser;
   },
   clear(): void {
-    if (typeof window === "undefined") return;
-    window.localStorage.removeItem(ACCESS_KEY);
-    window.localStorage.removeItem(REFRESH_KEY);
-    window.localStorage.removeItem(USER_KEY);
+    accessToken = null;
+    sessionUser = null;
   },
 };
+
+/** Báo các tab khác khi đăng xuất (mỗi tab giữ access token riêng trong bộ nhớ). */
+const AUTH_CHANNEL = "gisdist-auth";
+let channel: BroadcastChannel | null = null;
+function authChannel(): BroadcastChannel | null {
+  if (typeof window === "undefined" || typeof BroadcastChannel === "undefined") return null;
+  if (!channel) {
+    channel = new BroadcastChannel(AUTH_CHANNEL);
+    channel.onmessage = (ev: MessageEvent) => {
+      if (ev.data === "logout") notifySessionExpired();
+    };
+  }
+  return channel;
+}
 
 /** Gọi khi refresh token hỏng → báo cho các component biết cần đăng nhập lại. */
 type SessionListener = () => void;
@@ -157,6 +183,15 @@ const sessionListeners = new Set<SessionListener>();
 export function onSessionExpired(fn: SessionListener): () => void {
   sessionListeners.add(fn);
   return () => sessionListeners.delete(fn);
+}
+
+/** Báo các tab khác đã đăng xuất (chúng xoá access token trong bộ nhớ). */
+export function broadcastLogout(): void {
+  try {
+    authChannel()?.postMessage("logout");
+  } catch {
+    /* bỏ qua */
+  }
 }
 
 function notifySessionExpired(): void {
@@ -175,14 +210,16 @@ function notifySessionExpired(): void {
 // ---------------------------------------------------------------------------
 
 /** Rút thông điệp tiếng Việt từ `detail` của backend (có thể là chuỗi hoặc object). */
-export function extractDetail(detail: unknown): string {  if (detail == null) return "";
+export function extractDetail(detail: unknown): string {
+  if (detail == null) return "";
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) {
+    // Lỗi kiểm tra dữ liệu của FastAPI: [{loc, msg, type}]
     return detail
       .map((d) => {
         if (d && typeof d === "object") {
           const rec = d as Record<string, unknown>;
-          const loc = Array.isArray(rec.loc) ? rec.loc.join(".") : "";
+          const loc = Array.isArray(rec.loc) ? rec.loc.filter((x) => x !== "body").join(".") : "";
           return `${loc ? `${loc}: ` : ""}${String(rec.msg ?? "")}`;
         }
         return String(d);
@@ -191,40 +228,65 @@ export function extractDetail(detail: unknown): string {  if (detail == null) re
   }
   if (typeof detail === "object") {
     const rec = detail as Record<string, unknown>;
-    if (typeof rec.error === "string" && typeof rec.reason === "string") {
-      return `${rec.error}: ${rec.reason}`;
-    }
-    if (typeof rec.reason === "string") return rec.reason;
-    if (typeof rec.error === "string") return rec.error;
+    const parts: string[] = [];
+    if (typeof rec.error === "string") parts.push(rec.error);
+    if (typeof rec.message === "string") parts.push(rec.message);
+    if (typeof rec.reason === "string") parts.push(rec.reason);
     if (typeof rec.expected === "number" || typeof rec.current === "number") {
-      return `xung đột phiên bản (mong đợi ${String(rec.expected)}, hiện tại ${String(rec.current)})`;
+      const fmt = (v: unknown) => (v === undefined || v === null ? "—" : String(v));
+      parts.push(`phiên bản bạn gửi ${fmt(rec.expected)}, hiện tại ${fmt(rec.current)}`);
     }
+    if (typeof rec.action === "string") parts.push(`loại: ${rec.action}`);
+    if (parts.length) return parts.join(" — ");
     return JSON.stringify(rec);
   }
   return String(detail);
 }
 
-/** Thông điệp thân thiện cho các mã lỗi hay gặp. */
-export function friendlyError(status: number, detail: unknown): string {
+/** Thông điệp tiếng Việt cho các mã lỗi hay gặp, kèm chi tiết của API nếu có. */
+export function friendlyError(status: number, detail: unknown, retryAfter?: number | null): string {
   const raw = extractDetail(detail);
+  const withRaw = (base: string) => (raw ? `${base} Chi tiết: ${raw}.` : base);
+  const wait = retryAfter ? ` Thử lại sau khoảng ${retryAfter} giây.` : " Vui lòng thử lại sau ít giây.";
   switch (status) {
+    case 400:
+      return withRaw("Yêu cầu không hợp lệ.");
     case 401:
       return raw || "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.";
     case 403:
-      return raw || "Bạn không có quyền thực hiện thao tác này.";
+      return withRaw("Bạn không có quyền thực hiện thao tác này.");
     case 404:
-      return raw || "Không tìm thấy dữ liệu yêu cầu.";
+      return withRaw("Không tìm thấy dữ liệu yêu cầu.");
     case 409:
-      return raw || "Dữ liệu đã bị người khác thay đổi. Hãy tải lại trang rồi thử lại.";
+      return withRaw(
+        "Xung đột dữ liệu: bản ghi đã bị người khác thay đổi hoặc thao tác đã được thực hiện trước đó. " +
+          "Hãy tải lại để xem dữ liệu mới nhất rồi quyết định lại.",
+      );
+    case 422:
+      return withRaw("Dữ liệu gửi lên không hợp lệ hoặc thao tác không được hỗ trợ.");
     case 423:
-      return raw || "Bản ghi đang được người khác sửa. Vui lòng thử lại sau.";
+      return withRaw("Bản ghi đang được người khác xử lý (đang bị khoá). Vui lòng thử lại sau ít phút.");
+    case 428:
+      return withRaw(
+        "Thiếu phiên bản (version) của bản ghi: dữ liệu đã có quyết định trước đó, hãy xem lại rồi gửi lại.",
+      );
     case 429:
-      return raw || "Vượt giới hạn tần suất. Vui lòng thử lại sau ít phút.";
+      return withRaw(`Bạn thao tác quá nhanh (vượt giới hạn tần suất).${wait}`);
     case 503:
-      return raw || "Dịch vụ chưa sẵn sàng (503). Thường là chưa có mô hình đã huấn luyện.";
+      return withRaw(`Dịch vụ tạm thời không sẵn sàng (Redis, khoá phân tán hoặc dữ liệu chưa sẵn sàng).${wait}`);
     default:
-      return raw || `Lỗi ${status} từ máy chủ.`;
+      return withRaw(`Lỗi ${status} từ máy chủ.`);
   }
+}
+
+/** Đọc header `Retry-After` (giây hoặc ngày giờ HTTP). */
+function parseRetryAfter(res: Response): number | null {
+  const v = res.headers.get("retry-after");
+  if (!v) return null;
+  const n = Number(v);
+  if (Number.isFinite(n) && n >= 0) return Math.ceil(n);
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? null : Math.max(0, Math.ceil((t - Date.now()) / 1000));
 }
 
 // ---------------------------------------------------------------------------
@@ -243,14 +305,29 @@ export interface ApiOptions {
 /** Đang chạy refresh → các request 401 khác chờ luôn (tránh refresh song song). */
 let refreshInFlight: Promise<boolean> | null = null;
 
+/**
+ * Refresh token chỉ dùng được MỘT lần; API coi việc dùng lại là dấu hiệu bị đánh cắp và thu hồi
+ * mọi phiên. Các tab cùng chia sẻ MỘT cookie refresh nên phải tuần tự hoá refresh giữa các tab
+ * (Web Locks API): tab vào sau gửi cookie MỚI mà trình duyệt vừa nhận từ tab trước.
+ * Trong cùng tab: nếu access token đã đổi trong lúc chờ khoá (lời gọi khác vừa làm mới) thì dùng luôn.
+ */
 async function doRefresh(): Promise<boolean> {
-  const refresh = tokenStore.getRefresh();
-  if (!refresh) return false;
+  const before = tokenStore.getAccess();
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  if (!locks) return doRefreshUnlocked();
+  return locks.request("gisdist-refresh", async () => {
+    const now = tokenStore.getAccess();
+    if (now && now !== before) return true;
+    return doRefreshUnlocked();
+  });
+}
+
+async function doRefreshUnlocked(): Promise<boolean> {
   try {
     const res = await fetch(`${API_BASE_URL}${API_PREFIX}/auth/refresh`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: refresh }),
+      credentials: "include",
+      headers: { ...CSRF_HEADER },
     });
     if (!res.ok) return false;
     const data = (await res.json()) as TokenResponse;
@@ -259,6 +336,15 @@ async function doRefresh(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Khôi phục phiên khi tải trang: đổi cookie refresh lấy access token (giữ trong bộ nhớ).
+ * `false` = chưa đăng nhập / cookie hết hạn.
+ */
+export function restoreSession(): Promise<boolean> {
+  if (tokenStore.getAccess()) return Promise.resolve(true);
+  return refreshSession();
 }
 
 /** Refresh token (dùng chung cho nhiều request đồng thời). */
@@ -288,7 +374,7 @@ export async function apiFetch<T>(path: string, options: ApiOptions = {}): Promi
   const { method = "GET", body, anonymous = false, query, signal } = options;
 
   const send = async (): Promise<Response> => {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...CSRF_HEADER };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     if (!anonymous) {
       const token = tokenStore.getAccess();
@@ -299,6 +385,8 @@ export async function apiFetch<T>(path: string, options: ApiOptions = {}): Promi
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
+        // Cookie refresh chỉ có Path=/api/v1/auth/{refresh,logout}: các endpoint khác không nhận cookie.
+        credentials: "include",
         signal,
       });
     } catch (err) {
@@ -339,12 +427,14 @@ export async function apiFetch<T>(path: string, options: ApiOptions = {}): Promi
     const body = (payload ?? {}) as ApiErrorBody;
     const err = body.error ?? {};
     const detail = err.detail !== undefined ? err.detail : body.detail;
+    const retryAfter = parseRetryAfter(res);
     throw new ApiRequestError(
       res.status,
-      friendlyError(res.status, detail),
+      friendlyError(res.status, detail, retryAfter),
       detail,
       err.request_id,
       err.instance,
+      retryAfter,
     );
   }
 
@@ -357,13 +447,13 @@ export async function apiFetchBlob(
   options: ApiOptions = {},
 ): Promise<{ blob: Blob; etag: string | null; sha256: string | null }> {
   const { method = "GET", query, signal } = options;
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...CSRF_HEADER };
   const token = tokenStore.getAccess();
   if (token) headers.Authorization = `Bearer ${token}`;
 
   let res: Response;
   try {
-    res = await fetch(buildUrl(path, query), { method, headers, signal });
+    res = await fetch(buildUrl(path, query), { method, headers, credentials: "include", signal });
   } catch (err) {
     throw new ApiOfflineError(
       err instanceof Error ? `Không kết nối được API (${err.message}).` : "Không kết nối được API.",
@@ -377,11 +467,18 @@ export async function apiFetchBlob(
       throw new ApiRequestError(401, "Phiên đăng nhập đã hết hạn.");
     }
     const token2 = tokenStore.getAccess();
-    res = await fetch(buildUrl(path, query), {
-      method,
-      headers: token2 ? { ...headers, Authorization: `Bearer ${token2}` } : headers,
-      signal,
-    });
+    try {
+      res = await fetch(buildUrl(path, query), {
+        method,
+        headers: token2 ? { ...headers, Authorization: `Bearer ${token2}` } : headers,
+        credentials: "include",
+        signal,
+      });
+    } catch (err) {
+      throw new ApiOfflineError(
+        err instanceof Error ? `Không kết nối được API (${err.message}).` : "Không kết nối được API.",
+      );
+    }
   }
 
   if (!res.ok) {
@@ -394,7 +491,9 @@ export async function apiFetchBlob(
     const body = (detail ?? {}) as ApiErrorBody;
     const err = body.error ?? {};
     const d = err.detail !== undefined ? err.detail : body.detail;
-    throw new ApiRequestError(res.status, friendlyError(res.status, d), d, err.request_id, err.instance);
+    const retryAfter = parseRetryAfter(res);
+    throw new ApiRequestError(res.status, friendlyError(res.status, d, retryAfter), d, err.request_id,
+      err.instance, retryAfter);
   }
 
   return {
@@ -416,10 +515,10 @@ export const api = {
       anonymous: true,
       body: { username, password },
     }),
-  logout: (refreshToken: string | null) =>
+  /** Thu hồi access token (nếu còn) + refresh token trong cookie; API xoá cookie. */
+  logout: () =>
     apiFetch<{ ok: boolean; revoked: number }>("/auth/logout", {
       method: "POST",
-      body: { refresh_token: refreshToken },
     }),
   me: () => apiFetch<import("./types").MeResponse>("/auth/me"),
   roles: () => apiFetch<import("./types").RoleInfo[]>("/auth/roles"),
@@ -444,9 +543,14 @@ export const api = {
       from: string | null;
       to: string | null;
       items: import("./types").TideItem[];
-    }>(`/stations/${encodeURIComponent(code)}/tides`, { query }),  /** `PATCH /tides/{station}/{ts}` — sửa giá trị / đặt cờ QC (bắt buộc `reason`). */
-  patchTide: (station: string, ts: string, body: Record<string, unknown>) =>
-    apiFetch<import("./types").TideItem>(
+    }>(`/stations/${encodeURIComponent(code)}/tides`, { query }),
+  /**
+   * `PATCH /tides/{station}/{ts}` — quyết định QC cho một đỉnh/chân triều (ghi vào `qc_flags`;
+   * G0 áp vào `tide_extremes` ở lần chạy sau). `reason` bắt buộc; `version` bắt buộc khi cờ đã
+   * tồn tại (thiếu → 428, lệch → 409).
+   */
+  patchTide: (station: string, ts: string, body: import("./types").TideDecision) =>
+    apiFetch<import("./types").TidePatchResult>(
       `/tides/${encodeURIComponent(station)}/${encodeURIComponent(ts)}`,
       { method: "PATCH", body },
     ),
@@ -506,7 +610,14 @@ export const api = {
       body,
     }),
   promoteModel: (version: string) =>
-    apiFetch<{ model_version: string; state: string; promoted_at: string }>(
+    apiFetch<{
+      model_version: number | string;
+      status: string;
+      state: string;
+      promoted_at: string;
+      promoted_by?: string | null;
+      promoted_by_label?: ActorLabel | null;
+    }>(
       `/models/${encodeURIComponent(version)}/promote`,
       { method: "POST" },
     ),
@@ -559,28 +670,18 @@ export const api = {
 
   // ---- QC / review --------------------------------------------------------
   /**
-   * Danh sách cờ QC đang nghi ngờ.
-   *
-   * API **không** có endpoint riêng `/tides/suspect`; nguồn chính thức là
-   * `GET /api/v1/review?status=pending` (cờ QC trong `qc_flags` chưa duyệt).
+   * `GET /review?status=` — cờ QC trong `qc_flags` theo `status`
+   * (`suspect` mặc định | `confirmed_ok` | `rejected` | `corrected`), bỏ cờ `retired`.
    */
-  qcFlags: (query?: { status?: string; limit?: number }) =>
+  reviewQueue: (query?: { status?: import("./types").QcStatus; station?: string; limit?: number }) =>
     apiFetch<{ count: number; items: import("./types").ReviewItem[] }>("/review", { query }),
-  /** `GET /review` — hàng đợi duyệt (cờ QC đang `pending`). */
-  reviewQueue: (query?: { status?: string; limit?: number }) =>
-    apiFetch<{ count: number; items: import("./types").ReviewItem[] }>("/review", { query }),
-  /** `POST /review/{id}/approve` — duyệt/từ chối một cờ QC. */
-  approveReview: (
-    id: string,
-    body: {
-      decision?: "approve" | "reject";
-      reason?: string;
-      collection?: string;
-      new_value?: number;
-      version?: number;
-    },
-  ) =>
-    apiFetch<import("./types").ReviewItem & { applied?: unknown }>(
+  /**
+   * `POST /review/{id}/approve` — ghi quyết định cho một cờ QC.
+   * `version` = phiên bản cờ người duyệt đã xem (409 nếu lệch); `reason` bắt buộc;
+   * `corrected_value` chỉ gửi khi `status = "corrected"`.
+   */
+  approveReview: (id: string, body: import("./types").ReviewDecision) =>
+    apiFetch<import("./types").ReviewItem & { flag?: Record<string, unknown> }>(
       `/review/${encodeURIComponent(id)}/approve`,
       { method: "POST", body },
     ),
@@ -654,7 +755,8 @@ export const api = {
   // ---- audit --------------------------------------------------------------
   audit: (query?: { collection?: string; actor?: string; state?: string; limit?: number }) =>
     apiFetch<{ count: number; items: import("./types").AuditItem[] }>("/audit", { query }),
-  revertAudit: (id: string, body: { reason: string; version?: number }) =>
+  /** `POST /audit/{id}/revert` — chỉ `qc_decision` và `bulletin_metadata`; loại khác 422, lặp lại 409. */
+  revertAudit: (id: string, body: { reason: string }) =>
     apiFetch<Record<string, unknown>>(`/audit/${encodeURIComponent(id)}/revert`, {
       method: "POST",
       body,
@@ -669,8 +771,10 @@ export const api = {
       grant?: string[];
       revoke?: string[];
       collections?: Record<string, string[]>;
-      version?: number;
-      reason?: string;
+      /** `perm_ver` đã xem (khoá lạc quan, 409 nếu lệch). */
+      perm_ver: number;
+      /** Bắt buộc (ghi vào `audit_logs`). */
+      reason: string;
     },
   ) => apiFetch<import("./types").UserItem>(`/users/${encodeURIComponent(id)}/perm`, {
     method: "PUT",

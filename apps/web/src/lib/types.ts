@@ -21,7 +21,8 @@ export interface ApiErrorBody {
 /** Cặp token trả về từ `POST /api/v1/auth/login`. */
 export interface TokenResponse {
   access_token: string;
-  refresh_token: string;
+  /** `null` với trình duyệt: refresh token nằm trong cookie httpOnly (JavaScript không đọc được). */
+  refresh_token: string | null;
   token_type: string;
   expires_in: number;
   user_id: string;
@@ -34,6 +35,8 @@ export interface TokenResponse {
 export interface MeResponse {
   user_id: string;
   username: string;
+  /** Mã tài khoản ổn định (dùng trong `audit_logs.actor`). */
+  account_code?: string | null;
   display_name: string;
   role: string;
   roles: string[];
@@ -89,9 +92,19 @@ export interface TideItem {
   ts: string | null;
   kind: "high" | "low" | string;
   value: number | null;
-  /** Cờ QC: `suspect`, `corrected`, `rejected`, `manual`, ... */
+  /** Cờ QC đã áp bởi G0: `ok`, `suspect`, `corrected`, `rejected`, ... */
   qc?: string | null;
   source_file?: string | null;
+  /** Cờ QC (`qc_flags`) của điểm này nếu có — `null` khi chưa có cờ. */
+  flag_id?: string | null;
+  /** `version` hiện tại của cờ: gửi kèm `PATCH /tides/...` (không cần chờ 428). */
+  flag_version?: number | null;
+  flag_status?: QcStatus | string | null;
+  flag_retired?: boolean | null;
+  /** Người quyết định cờ (`user:<account_code>:<role>`) và nhãn hiển thị (API tra `users` khi đọc). */
+  flag_decided_by?: string | null;
+  flag_decided_by_label?: ActorLabel | null;
+  flag_decided_at?: string | null;
 }
 
 /** Bản tin KTTV (phần tử của `hydromet_bulletins`). */
@@ -149,9 +162,13 @@ export interface AlertItem {
   message?: string | null;
   status?: string | null;
   ack_by?: string | null;
+  ack_by_label?: ActorLabel | null;
   acked_at?: string | null;
   era?: string | null;
 }
+
+/** Trạng thái của cờ QC trong `qc_flags` (`vngis.qc_rules.STATUSES`). */
+export type QcStatus = "suspect" | "confirmed_ok" | "rejected" | "corrected";
 
 /** Mục duyệt QC (`qc_flags`) — trả về từ `GET /api/v1/review`. */
 export interface ReviewItem {
@@ -159,21 +176,79 @@ export interface ReviewItem {
   id: string;
   collection?: string | null;
   station?: string | null;
+  /** `high` | `low`. */
+  kind?: string | null;
+  ts?: string | null;
+  /** Giá trị gốc lúc tạo cờ. */
+  value?: number | null;
+  status: QcStatus;
+  corrected_value?: number | null;
+  /** Các luật QC đã kích hoạt cờ (R1/R2/R3...). */
+  rules?: string[];
+  /** `auto` (job QC) | `manual` (người kiểm tra). */
+  origin?: string | null;
   reason?: string | null;
-  severity?: string | null;
-  /** `pending` | `approved` | `rejected`. */
-  state?: string | null;
+  /** Phiên bản cờ — gửi lại khi quyết định (khoá lạc quan). */
   version: number;
+  /** Giá trị hiện tại trong `tide_extremes` đã khác giá trị lúc tạo cờ. */
+  value_mismatch?: boolean;
+  decided_by?: string | null;
+  decided_by_label?: ActorLabel | null;
+  decided_at?: string | null;
   created_at?: string | null;
-  reviewed_by?: string | null;
-  reviewed_at?: string | null;
+}
+
+/** Thân `POST /api/v1/review/{id}/approve`. */
+export interface ReviewDecision {
+  status: QcStatus;
+  /** Bắt buộc, không rỗng (ghi vào `audit_logs`). */
+  reason: string;
+  /** Chỉ khi `status = "corrected"`. */
+  corrected_value?: number;
+  version: number;
+}
+
+/** Thân `PATCH /api/v1/tides/{station}/{ts}`. */
+export interface TideDecision {
+  status: "rejected" | "corrected" | "confirmed_ok";
+  corrected_value?: number;
+  kind?: "high" | "low";
+  reason: string;
+  /** Bắt buộc khi cờ đã tồn tại (thiếu → 428, lệch → 409). */
+  version?: number;
+}
+
+/** Kết quả `PATCH /api/v1/tides/{station}/{ts}` (cờ QC sau quyết định). */
+export interface TidePatchResult {
+  flag_id: string;
+  flag_created: boolean;
+  status?: QcStatus;
+  version?: number;
+  decided_by?: string | null;
+  decided_by_label?: ActorLabel | null;
+  note?: string;
+  [k: string]: unknown;
 }
 
 /** Bản ghi nhật ký (`audit_logs`). */
+/** Nhãn hiển thị của người thực hiện (API tra `users` khi đọc; không lưu trong nhật ký). */
+export interface ActorLabel {
+  actor_id?: string | null;
+  user_id?: string | null;
+  username?: string | null;
+  display_name?: string | null;
+  role?: string | null;
+  /** Bản ghi cũ lưu tên đăng nhập thay vì định danh ổn định. */
+  legacy?: boolean;
+}
+
 export interface AuditItem {
   id: string | null;
   at?: string | null;
+  /** `user:<account_code>:<role>` (bản ghi mới) hoặc tên đăng nhập (bản ghi cũ). */
   actor?: string | null;
+  actor_label?: ActorLabel | null;
+  reverted_by_label?: ActorLabel | null;
   action?: string | null;
   source?: string | null;
   collection?: string | null;
@@ -184,7 +259,9 @@ export interface AuditItem {
   reason?: string | null;
   state?: string | null;
   reverted_at?: string | null;
-  version?: number;
+  reverted_by?: string | null;
+  revert_reason?: string | null;
+  revert_audit_id?: string | null;
 }
 
 /** Tác vụ nền (`jobs`). */
@@ -195,6 +272,7 @@ export interface JobItem {
   params?: Record<string, unknown> | null;
   priority?: number | null;
   requested_by?: string | null;
+  requested_by_label?: ActorLabel | null;
   worker?: string | null;
   fence?: number | null;
   heartbeat?: string | null;

@@ -66,10 +66,13 @@ export function ErrorNotice({
   error,
   onRetry,
   onDismiss,
+  title: titleOverride,
 }: {
   error: unknown;
   onRetry?: () => void;
   onDismiss?: () => void;
+  /** Tiêu đề riêng; khi có thì bỏ gợi ý mặc định theo mã lỗi (thông điệp đã đủ rõ). */
+  title?: string;
 }) {
   if (!error) return null;
 
@@ -92,12 +95,22 @@ export function ErrorNotice({
     hint = "Bản ghi này đang bị khoá. Vui lòng chờ hoặc tải lại trang rồi thử lại.";
   } else if (status === 409) {
     title = "Xung đột phiên bản";
-    hint = "Dữ liệu đã bị thay đổi kể từ lúc bạn mở. Hãy tải lại để có dữ liệu mới.";
-  } else if (status === 503) {
-    title = "Dịch vụ chưa sẵn sàng";
     hint =
-      "Chưa có mô hình PhaseGNN đã huấn luyện, hoặc collection chưa được nạp. " +
-      "Đây là trạng thái đúng của backend (không bịa số liệu).";
+      "Dữ liệu đã bị thay đổi (hoặc thao tác đã được thực hiện) kể từ lúc bạn mở. " +
+      "Hãy tải lại để có dữ liệu mới rồi quyết định lại.";
+  } else if (status === 422) {
+    title = "Dữ liệu không hợp lệ";
+    hint = "Kiểm tra lại các trường đã nhập; thao tác này có thể không được hỗ trợ cho loại bản ghi này.";
+  } else if (status === 428) {
+    title = "Cần phiên bản của bản ghi";
+    hint = "Bản ghi đã có quyết định trước đó. Xem lại trạng thái hiện tại rồi gửi lại kèm phiên bản.";
+  } else if (status === 503) {
+    title = "Dịch vụ tạm thời không sẵn sàng";
+    const ra = error instanceof ApiRequestError ? error.retryAfter : null;
+    hint =
+      "Máy chủ chưa xử lý được yêu cầu (Redis/khoá phân tán gián đoạn, mất khoá trước khi ghi, " +
+      "hoặc dữ liệu/mô hình chưa sẵn sàng). Không có thay đổi nào được ghi." +
+      (ra ? ` Thử lại sau khoảng ${ra} giây.` : " Vui lòng thử lại sau ít giây.");
   } else if (status === 403) {
     title = "Không đủ quyền";
     hint = "Tài khoản của bạn không có quyền thao tác này. Liên hệ quản trị viên.";
@@ -107,6 +120,11 @@ export function ErrorNotice({
   } else if (status === 401) {
     title = "Phiên đăng nhập hết hạn";
     hint = "Vui lòng đăng nhập lại.";
+  }
+
+  if (titleOverride) {
+    title = titleOverride;
+    hint = "";
   }
 
   const message = error instanceof Error ? error.message : String(error);

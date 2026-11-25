@@ -18,12 +18,12 @@ import React, {
   useState,
 } from "react";
 
-import { api, onSessionExpired, tokenStore, ApiRequestError } from "./api";
+import { api, broadcastLogout, onSessionExpired, restoreSession, tokenStore, ApiRequestError } from "./api";
 import { PERM_FLAGS, can, maskOf, type PermTable } from "./permissions";
 import type { MeResponse } from "./types";
 
 export interface SessionState {
-  /** Đang khôi phục phiên từ localStorage lúc khởi động. */
+  /** Đang khôi phục phiên lúc khởi động (đổi cookie refresh httpOnly lấy access token). */
   loading: boolean;
   /** Đã đăng nhập (có access token hợp lệ). */
   authenticated: boolean;
@@ -88,11 +88,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const reload = useCallback(async () => {
-    if (!tokenStore.getAccess()) {
+    setState((s) => ({ ...s, loading: true }));
+    // Access token chỉ ở bộ nhớ: tải lại trang thì lấy lại bằng cookie refresh (httpOnly).
+    if (!(await restoreSession())) {
       setState({ ...initial, loading: false });
       return;
     }
-    setState((s) => ({ ...s, loading: true }));
     try {
       const me = await api.me();
       applyMe(me);
@@ -141,14 +142,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   );
 
   const logout = useCallback(async () => {
-    const refresh = tokenStore.getRefresh();
     try {
-      await api.logout(refresh);
+      await api.logout();
     } catch {
       // Đăng xuất ở phía server có thể thất bại (token hết hạn / API chết) —
-      // vẫn xoá phiên cục bộ để không giữ token trên trình duyệt.
+      // vẫn xoá phiên trong bộ nhớ.
     }
     tokenStore.clear();
+    broadcastLogout();
     setState({ ...initial, loading: false });
   }, []);
 

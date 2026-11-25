@@ -44,14 +44,23 @@ def configure_logging(instance: str = "worker", level: str = "INFO") -> None:
         h.addFilter(_InstanceFilter())
 
 
+def _job_resources() -> dict[str, str]:
+    """Loại việc → tài nguyên khoá. Mọi tác vụ ghi `hydromet_bulletins` dùng chung khoá của API."""
+    from vngis.atomic_reload import LOCK_RESOURCE
+
+    return {"ingest_bulletins": LOCK_RESOURCE, "reload_bulletins": LOCK_RESOURCE,
+            "forecast_run": "forecast_run", "cache_warm": "cache_warm"}
+
+
 def build_scheduler(instance: str) -> Any:
     """Dựng scheduler + đăng ký các job nền."""
     from vngis.config import get_config
     from vngis.db import get_db, redlock
 
-    from worker.jobs import forecast_run, ingest_bulletins, warm_cache
+    from worker.jobs import forecast_run, ingest_bulletins, reload_bulletins, warm_cache
     from worker.scheduler import Scheduler
 
+    resources = _job_resources()
     cfg = get_config()
     db = get_db(cfg)
     lock = redlock(cfg)
@@ -63,15 +72,22 @@ def build_scheduler(instance: str) -> Any:
     except Exception as e:  # noqa: BLE001 - worker vẫn chạy được nếu Redis lỗi
         log.warning("không khởi tạo được cache: %s", e)
 
-    sched = Scheduler(db, lock, instance=instance,
-                      ttl_ms=int(getattr(cfg.scheduler, "lock_ttl_s", 600)) * 1000)
-
-    # Nạp bản tin mới hằng ngày (06:00 giờ Việt Nam) — khoá `lock:ingest:{date}`.
-    sched.cron("ingest_bulletins", "0 6 * * *", ingest_bulletins, db=db, cache=cache)
-    # Dự báo hằng ngày (07:00) — khoá `lock:forecast:{basin}:{date}`.
-    sched.cron("forecast_run", "0 7 * * *", forecast_run, db=db, cache=cache)
-    # Làm nóng cache mỗi 10 phút.
-    sched.interval("cache_warm", 600, warm_cache, db=db, cache=cache)
+    sc = cfg.scheduler
+    sched = Scheduler(db, lock, instance=instance, ttl_ms=int(sc.lock_ttl_s) * 1000,
+                      heartbeat_s=float(sc.heartbeat_s), resources=resources)
+    if not sc.enabled:
+        log.warning("scheduler.enabled=false: chỉ xử lý hàng đợi `jobs`, không chạy job theo lịch")
+    else:
+        # Giờ chạy lấy từ cấu hình `scheduler` (giờ Việt Nam), không viết cứng.
+        sched.cron("ingest_bulletins", f"0 {int(sc.ingest_hour)} * * *", ingest_bulletins, db=db, cache=cache)
+        sched.cron("forecast_run", f"{int(sc.forecast_minute)} {int(sc.forecast_hour)} * * *", forecast_run,
+                   db=db, cache=cache)
+        # Làm nóng cache mỗi 10 phút (một bản ghi `jobs` cố định, khoá cố định).
+        sched.interval("cache_warm", 600, warm_cache, db=db, cache=cache)
+    # Việc do API giao (`state="queued"`): khoá theo tài nguyên (`_job_resources`), tham số theo danh sách
+    # trắng `vngis.job_params`.
+    sched.queue({"ingest_bulletins": ingest_bulletins, "reload_bulletins": reload_bulletins,
+                 "forecast_run": forecast_run, "cache_warm": warm_cache}, seconds=15, db=db, cache=cache)
     return sched
 
 

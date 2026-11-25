@@ -368,7 +368,8 @@ def test_hang_doi_kiem_duyet(client, fake_db):
                     json={"status": "rejected", "reason": "PDF in sai", "version": 1}, headers=headers)
     assert r.status_code == 200, r.text
     flag = fake_db["qc_flags"].find_one({"_id": "Q1"})
-    assert (flag["status"], flag["version"], flag["decided_by"]) == ("rejected", 2, "u_rev")
+    code = fake_db["users"].find_one({"_id": "u_rev"})["account_code"]
+    assert (flag["status"], flag["version"], flag["decided_by"]) == ("rejected", 2, f"user:{code}:admin")
     assert flag["value"] == 1.85, "không được ghi đè `value` của cờ"
     a = fake_db["audit_logs"].find_one({"action": "qc_decision", "doc_id": "Q1"})
     assert a is not None and a["state"] == "applied" and a["source"] == "api"
@@ -417,7 +418,11 @@ def test_khoi_dong_job(client, fake_db):
     job_id = body.get("id") or body.get("job_id")
     assert job_id
     assert body["state"] == "queued"
-    assert body["requested_by"] == "u_job"
+    # Người giao lưu bằng định danh ổn định (không phải tên đăng nhập); tên chỉ có trong nhãn khi đọc.
+    code = fake_db["users"].find_one({"_id": "u_job"})["account_code"]
+    assert body["requested_by"] == f"user:{code}:admin"
+    assert "u_job" not in body["requested_by"]
+    assert body["requested_by_label"]["username"] == "u_job"
 
     r2 = client.get(f"/api/v1/jobs/{job_id}", headers=headers)
     assert r2.status_code == 200, r2.text
@@ -431,6 +436,97 @@ def test_loai_job_khong_cho_phep_bi_400(client, fake_db):
     r = client.post("/api/v1/jobs/rm_minus_rf", json={"params": {}},
                     headers=_auth(data["access_token"]))
     assert r.status_code == 400, f"phải là 400, thực tế {r.status_code}: {r.text}"
+
+
+@pytest.mark.parametrize("job_type,params", [
+    ("reload_bulletins", {"documents": [{"source_file": "x"}], "actor": "admin"}),
+    ("reload_bulletins", {"actor": "admin"}),
+    ("ingest_bulletins", {"repo_root": "/tmp/x"}),
+    ("ingest_bulletins", {"source_dir": "/etc", "run_g0": True}),
+    ("cache_warm", {"collections": ["users"]}),
+    ("cache_warm", {"khoa_la": 1}),
+    ("forecast_run", {"horizon_h": "abc"}),
+])
+def test_tham_so_job_ngoai_danh_sach_trang_bi_422(client, fake_db, job_type, params):
+    """Tham số nội bộ / khoá lạ / sai kiểu → 422 và KHÔNG chèn việc vào hàng đợi."""
+    _mk_user(fake_db, "u_job3")
+    data = _login(client, "u_job3")
+    r = client.post(f"/api/v1/jobs/{job_type}", json={"params": params}, headers=_auth(data["access_token"]))
+    assert r.status_code == 422, f"phải là 422, thực tế {r.status_code}: {r.text}"
+    assert fake_db["jobs"].count_documents({"type": job_type}) == 0
+
+
+def test_tham_so_job_hop_le_duoc_luu_da_chuan_hoa(client, fake_db):
+    _mk_user(fake_db, "u_job4")
+    data = _login(client, "u_job4")
+    r = client.post("/api/v1/jobs/cache_warm", json={"params": {"collections": ["stations"]}},
+                    headers=_auth(data["access_token"]))
+    assert r.status_code == 200, r.text
+    doc = fake_db["jobs"].find_one({"_id": r.json()["id"]})
+    code = fake_db["users"].find_one({"_id": "u_job4"})["account_code"]
+    assert doc["params"] == {"collections": ["stations"]} and doc["requested_by"] == f"user:{code}:admin"
+    r = client.post("/api/v1/jobs/cache_warm", json={"params": {}, "khoa_la": 1},
+                    headers=_auth(data["access_token"]))
+    assert r.status_code == 422
+
+
+def test_forecast_run_chen_viec_queued_cho_worker(client, fake_db, monkeypatch):
+    """`POST /forecasts/run` mặc định giao worker (`queued`); có bản mẫu cũng KHÔNG chèn `sample` nếu chưa bật."""
+    import api.router.forecasts as fc
+
+    _mk_user(fake_db, "u_fc")
+    h = _auth(_login(client, "u_fc")["access_token"])
+    monkeypatch.delenv("PGNN_FORECAST_SAMPLE", raising=False)
+    monkeypatch.setattr(fc, "_sample_payload", lambda station, n: {"file": "x.csv", "note": "mẫu"})
+    r = client.post("/api/v1/forecasts/run", json={"station": "PHU_AN", "horizon_h": 48}, headers=h)
+    assert r.status_code == 200 and r.json()["state"] == "queued", r.text
+    doc = fake_db["jobs"].find_one({"_id": r.json()["job_id"]})
+    assert doc["state"] == "queued" and doc["type"] == "forecast_run"
+    assert doc["params"] == {"station": "PHU_AN", "horizon_h": 48}  # đã qua danh sách trắng, không có force_sample
+    assert doc["worker"] is None and doc["fence"] is None
+    # tham số sai danh sách trắng → 422, không chèn
+    n = fake_db["jobs"].count_documents({})
+    r = client.post("/api/v1/forecasts/run", json={"station": "PHU AN;drop"}, headers=h)
+    assert r.status_code == 422 and fake_db["jobs"].count_documents({}) == n
+
+
+def test_forecast_run_nhanh_mau_khi_bat(client, fake_db, monkeypatch):
+    """`force_sample` hoặc `PGNN_FORECAST_SAMPLE=1` → bản ghi trạng thái cuối `sample` (không qua `queued`)."""
+    import api.router.forecasts as fc
+
+    _mk_user(fake_db, "u_fc2")
+    h = _auth(_login(client, "u_fc2")["access_token"])
+    monkeypatch.delenv("PGNN_FORECAST_SAMPLE", raising=False)
+    monkeypatch.setattr(fc, "_sample_payload", lambda station, n: None)
+    r = client.post("/api/v1/forecasts/run", json={"station": "PHU_AN", "force_sample": True}, headers=h)
+    assert r.status_code == 503, r.text
+    monkeypatch.setattr(fc, "_sample_payload", lambda station, n: {"file": "x.csv", "note": "mẫu"})
+    r = client.post("/api/v1/forecasts/run", json={"station": "PHU_AN", "force_sample": True}, headers=h)
+    assert r.status_code == 200 and r.json()["state"] == "sample", r.text
+    monkeypatch.setenv("PGNN_FORECAST_SAMPLE", "1")
+    r = client.post("/api/v1/forecasts/run", json={"station": "PHU_AN"}, headers=h)
+    assert r.json()["state"] == "sample"
+    states = sorted(d["state"] for d in fake_db["jobs"].find({"type": "forecast_run"}))
+    assert states == ["failed", "sample", "sample"]
+    assert fake_db["jobs"].count_documents({"state": "queued"}) == 0
+
+
+def test_forecasts_latest_doc_model_forecasts(client, fake_db, monkeypatch):
+    import api.router.forecasts as fc
+
+    _mk_user(fake_db, "u_fc3")
+    h = _auth(_login(client, "u_fc3")["access_token"])
+    monkeypatch.setattr(fc, "_sample_payload", lambda station, n: None)
+    for day in ("2026-11-05", "2026-11-06"):
+        fake_db["model_forecasts"].insert_one({
+            "_id": f"{day}:PHU_AN:1", "run_date": day, "station": "PHU_AN", "lead_day": 1,
+            "target_date": day, "model": "phasegnn-v1", "h_max_q50": 1.3, "source": "phasegnn",
+            "peaks": [{"peak_idx": 0, "h_q10": 1.1, "h_q50": 1.3, "h_q90": 1.4, "t_peak": None}]})
+    r = client.get("/api/v1/forecasts/latest?station=PHU_AN", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["source"] == "model" and body["run_date"] == "2026-11-06" and body["count"] == 1
+    assert body["items"][0]["peaks"][0]["h_q50"] == 1.3
 
 
 # -------------------------------------------------------------------- audit ----

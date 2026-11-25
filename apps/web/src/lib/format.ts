@@ -2,6 +2,22 @@
  * Tiện ích định dạng và quy ước hiển thị dùng chung cho các màn hình.
  */
 
+/**
+ * Hiển thị người thực hiện. Nhật ký lưu định danh ổn định `user:<account_code>:<role>` (không lưu
+ * tên); API gắn thêm nhãn (`actor_label`, `requested_by_label`) khi đọc. Có nhãn → "tên (vai trò)";
+ * không có nhãn → rút gọn định danh ("acc_… (vai trò)"); giá trị cũ (tên đăng nhập, `cli`) giữ nguyên.
+ */
+export function formatActor(
+  actor: string | null | undefined,
+  label?: { display_name?: string | null; username?: string | null; role?: string | null } | null,
+): string {
+  if (!actor) return "—";
+  const m = /^user:(acc_[0-9a-f]+)(?::([A-Za-z0-9_.-]+))?$/.exec(actor);
+  const role = label?.role || m?.[2] || "";
+  const name = label?.display_name || label?.username || (m ? m[1] : actor);
+  return role ? `${name} (${role})` : name;
+}
+
 /** Ngày theo giờ Việt Nam (API trả ISO 8601 kèm múi giờ +07:00). */
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";

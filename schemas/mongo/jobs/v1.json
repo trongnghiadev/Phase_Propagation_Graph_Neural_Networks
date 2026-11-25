@@ -1,0 +1,54 @@
+{
+  "collection": "jobs",
+  "version": 1,
+  "description": "Bản ghi chạy job: hai bộ field cùng tồn tại — job Spark/nạp nguyên tử (`job` + `status`) và API/worker (`type` + `state`). Validator dùng `anyOf`: document phải khớp ít nhất một bộ.",
+  "validationLevel": "moderate",
+  "validationAction": "error",
+  "validator": {
+    "$jsonSchema": {
+      "bsonType": "object",
+      "required": ["_id"],
+      "properties": {
+        "_id": {"bsonType": "string"},
+        "job": {"bsonType": "string"},
+        "status": {"enum": ["running", "ok", "failed", "dry_run", "blocked", "rolled_back", "lost"]},
+        "run_id": {"bsonType": ["string", "null"]},
+        "generated_at": {"bsonType": ["date", "null"]},
+        "type": {"bsonType": "string"},
+        "state": {"enum": ["queued", "claimed", "running", "succeeded", "failed", "lost", "skipped", "sample"]},
+        "params": {"bsonType": ["object", "null"]},
+        "priority": {"bsonType": ["int", "long", "null"]},
+        "requested_by": {"bsonType": ["string", "null"]},
+        "worker": {"bsonType": ["string", "null"]},
+        "fence": {"bsonType": ["int", "long", "null"]},
+        "attempts": {"bsonType": ["int", "long"], "minimum": 0},
+        "heartbeat": {"bsonType": ["date", "null"]},
+        "created_at": {"bsonType": ["date", "null"]},
+        "updated_at": {"bsonType": ["date", "null"]},
+        "claimed_at": {"bsonType": ["date", "null"]},
+        "started_at": {"bsonType": ["date", "null"]},
+        "scheduled_at": {"bsonType": ["date", "null"]},
+        "finished_at": {"bsonType": ["date", "null"]},
+        "error": {"bsonType": ["string", "null"]},
+        "reason": {"bsonType": ["string", "null"]},
+        "skips": {"bsonType": "array"},
+        "reclaims": {"bsonType": "array"}
+      },
+      "anyOf": [
+        {"required": ["job", "status"]},
+        {"required": ["type", "state"]}
+      ]
+    }
+  },
+  "indexes": [
+    {"name": "queue_state_priority_created", "key": {"state": 1, "priority": -1, "created_at": 1}},
+    {"name": "queue_state_scheduled", "key": {"state": 1, "scheduled_at": 1}},
+    {"name": "state_heartbeat", "key": {"state": 1, "heartbeat": 1}},
+    {"name": "job_status_generated", "key": {"job": 1, "status": 1, "generated_at": -1}}
+  ],
+  "notes": [
+    "Không thống nhất hai bộ field (rủi ro: job Spark trong pipelines/spark/common/jobrun.py, vngis.atomic_reload và web/API đọc theo tên field hiện có).",
+    "Ba index đầu trùng định nghĩa với Scheduler._ensure_indexes của worker (tạo lại là no-op).",
+    "`_record_skip` của worker upsert `type`/`state` cùng lúc nên luôn khớp nhánh API/worker."
+  ]
+}

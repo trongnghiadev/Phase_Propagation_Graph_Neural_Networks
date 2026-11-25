@@ -1,44 +1,47 @@
 {
  "variant": "B3",
- "best_val_mae": 0.2679606957435608,
+ "best_val_mae": 0.3010021708011627,
  "best_epoch": 0,
  "history": [
   {
    "epoch": 0,
-   "train_loss": 1.0569552308634709,
+   "train_loss": 0.9981610555397836,
    "val": {
-    "mae_peak": 0.2679606957435608,
-    "mae_hour": 5.785635080158711,
-    "pinball": 0.09871206417679787,
+    "mae_peak": 0.3010021708011627,
+    "mae_slot": 0.3015877607638243,
+    "mae_hour": 6.302583545684814,
+    "pinball": 0.363381771966815,
     "n_samples": 100
    },
-   "seconds": 61.306456089019775
+   "seconds": 8.755303621292114
   },
   {
    "epoch": 1,
-   "train_loss": 1.009317856085928,
+   "train_loss": 0.9624417486943697,
    "val": {
-    "mae_peak": 0.2897404079437256,
-    "mae_hour": 5.752421293213963,
-    "pinball": 0.0821491614356637,
+    "mae_peak": 0.30494110560417176,
+    "mae_slot": 0.30411152417066867,
+    "mae_hour": 6.340450647354126,
+    "pinball": 0.29272509649395945,
     "n_samples": 100
    },
-   "seconds": 56.95724058151245
+   "seconds": 11.78278660774231
   },
   {
    "epoch": 2,
-   "train_loss": 1.0072564325834577,
+   "train_loss": 0.9338587051943729,
    "val": {
-    "mae_peak": 0.29713680160045625,
-    "mae_hour": 5.750674594417214,
-    "pinball": 0.08606283199042082,
+    "mae_peak": 0.3045185844898224,
+    "mae_slot": 0.30218786367032896,
+    "mae_hour": 6.288233146667481,
+    "pinball": 0.2930671997368336,
     "n_samples": 100
    },
-   "seconds": 49.404815673828125
+   "seconds": 14.00422978401184
   }
  ],
  "data_snapshot": {
-  "run_date": "2026-11-23",
+  "run_date": "2026-11-24",
   "job_version": "g5-v1",
   "collections": {
    "tide_extremes": 129420,
@@ -85,7 +88,15 @@
    "THU_DAU_MOT": 3594,
    "VUNG_TAU": 3595
   },
-  "astro_merged": false,
+  "astro_merged": true,
+  "astro_fit": {
+   "fit_from": "2017-01-01",
+   "fit_to": "2022-12-31",
+   "fit_splits": [
+    "train"
+   ],
+   "generated_at": "2026-11-24T11:34:47+0700"
+  },
   "leak_check": {
    "rows_with_input_obs": 32343,
    "violations": 0
@@ -118,7 +129,7 @@
   "mlflow_experiment": "phasegnn"
  },
  "dims": {
-  "in_dim": 18,
+  "in_dim": 20,
   "static_dim": 9,
   "edge_dim": 6
  }

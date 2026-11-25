@@ -150,31 +150,37 @@ async def reload_bulletins(user: UserContext = Depends(require(P.RUN_JOB, BULLET
     Giữ khoá `lock:reload:bulletins` có watchdog; tăng `ver:hydromet_bulletins` sau khi thay.
     Nếu không lấy được khoá → 423.
     """
+    from vngis.atomic_reload import LOCK_RESOURCE
     from vngis.locks import LockGuard
 
-    guard = LockGuard(state.lock, db=state.db, resource="reload:bulletins", ttl_ms=120_000)
+    # Cùng tài nguyên với worker (ingest/reload bản tin) ⇒ cùng khoá Redis và cùng bộ đếm fence.
+    guard = LockGuard(state.lock, db=state.db, resource=LOCK_RESOURCE, ttl_ms=120_000)
     acquire_guard(guard, busy_detail="đang có lượt nạp lại khác chạy")
     try:
-        # `reload_bulletins_atomic` chưa nhận callback kiểm tra khoá giữa các bước → chỉ kiểm tra trước khi
-        # bắt đầu ghi (staging tên riêng theo run_id; bước thay thế là một lệnh renameCollection).
+        # Kiểm tra trước khi ghi; `reload_bulletins_atomic` kiểm tra lại ngay trước sao lưu và rename.
         guard_check(guard)
-        result = await _reload_atomic(user)
+        result = await _reload_atomic(user, guard)
         return result
     finally:
         guard.release()
 
 
-async def _reload_atomic(user: UserContext) -> dict:
+async def _reload_atomic(user: UserContext, guard=None) -> dict:
     """Thực hiện nạp lại nguyên tử (dùng `vngis.atomic_reload`)."""
-    from vngis.atomic_reload import ReloadError, reload_bulletins_atomic
+    from vngis.atomic_reload import ReloadError
+    from vngis.locks import LockLost
 
     try:
-        return await _reload_atomic_call(user)
+        return await _reload_atomic_call(user, guard)
+    except LockLost as e:
+        # Mất khoá trước bước sao lưu/rename: bản chính giữ nguyên, staging đã dọn.
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e),
+                            headers={"Retry-After": "1"}) from None
     except ReloadError as e:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(e)) from None
 
 
-async def _reload_atomic_call(user: UserContext) -> dict:
+async def _reload_atomic_call(user: UserContext, guard=None) -> dict:
     import asyncio
     from vngis.atomic_reload import reload_bulletins_atomic
-    return await asyncio.to_thread(reload_bulletins_atomic, state.db, actor=user.username)
+    return await asyncio.to_thread(reload_bulletins_atomic, state.db, actor=user.actor, guard=guard)

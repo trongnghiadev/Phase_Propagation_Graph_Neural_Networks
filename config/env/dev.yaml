@@ -13,3 +13,9 @@ redis:
     sentinels: [localhost:26381, localhost:26382, localhost:26383]
   lock:
     nodes: [localhost:6391, localhost:6392, localhost:6393]
+
+# Web dev chạy http://localhost (không HTTPS): cookie refresh không đặt cờ Secure;
+# cho phép Next.js dev (cổng 3000) gọi thẳng API kèm cookie khi tắt proxy dev.
+auth:
+  cookie_secure: false
+  cors_origins: [http://localhost:3000, http://127.0.0.1:3000]

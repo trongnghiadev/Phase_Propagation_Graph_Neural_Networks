@@ -22,14 +22,14 @@
 # `schemas/prediction/v1.schema.json` roi chay lai script nay de danh gia.
 #
 # DAU RA:
-#   results/E5/evaluation_overall.csv
-#   results/E5/evaluation_by_lead.csv
-#   results/E5/evaluation_by_peak.csv
-#   results/E5/evaluation_by_station.csv
-#   results/E5/evaluation_contingency.csv
-#   results/E5/evaluation_tests.csv
-#   results/E5/evaluation_matched_sample.csv
-#   results/E5/evaluation_*.png
+#   results/evaluation/evaluation_overall.csv
+#   results/evaluation/evaluation_by_lead.csv
+#   results/evaluation/evaluation_by_peak.csv
+#   results/evaluation/evaluation_by_station.csv
+#   results/evaluation/evaluation_contingency.csv
+#   results/evaluation/evaluation_tests.csv
+#   results/evaluation/evaluation_matched_sample.csv
+#   results/evaluation/evaluation_*.png
 #
 # Luat phu thuoc (ADR 0001): khong goi Python, khong import tu `packages/`.
 
@@ -67,15 +67,15 @@ source(file.path(here, "R", "theme.R"))
 use_repo_rlib(repo)
 suppressPackageStartupMessages(library(ggplot2))
 
-OUT_E5 <- p_res("E5")
-ensure_dir(OUT_E5)
+OUT_EVAL <- p_res("evaluation")
+ensure_dir(OUT_EVAL)
 
 # ---------------------------------------------------------------------------
 # 0. THAM SO DONG LENH
 # ---------------------------------------------------------------------------
 # `--pred PATH ...` : them file du bao ngoai (CSV/Parquet) vao danh sach danh gia.
 #   File co the chua nhieu model -> tach theo cot `model`.
-# `--out-dir PATH` : thu muc ghi ket qua (mac dinh `results/E5`).
+# `--out-dir PATH` : thu muc ghi ket qua (mac dinh `results/evaluation`).
 # `--no-plot`      : bo qua ve bieu do.
 argv <- commandArgs(trailingOnly = TRUE)
 get_opt <- function(flag) {
@@ -97,8 +97,8 @@ if (length(ip)) {
   }
 }
 opt_out <- get_opt("--out-dir")
-if (length(opt_out) && nzchar(opt_out)) OUT_E5 <- opt_out
-ensure_dir(OUT_E5)
+if (length(opt_out) && nzchar(opt_out)) OUT_EVAL <- opt_out
+ensure_dir(OUT_EVAL)
 NO_PLOT <- "--no-plot" %in% argv
 SPLIT_CFG <- load_splits()
 opt_split <- get_opt("--split")
@@ -295,6 +295,7 @@ if (nrow(ast)) {
 }
 
 # --- Du bao ngoai (--pred) : PhaseGNN, B1, B2, ... --------------------------
+INTERNAL_MODELS <- names(preds)   # B0 (climatology), B_harm, B_KTTV do script tu dung
 if (length(opt_pred)) {
   say2("\n== Doc du bao ngoai (--pred) ==")
   for (p in opt_pred) {
@@ -310,7 +311,18 @@ if (length(opt_pred)) {
     say2("   ", basename(p), ": ", nrow(d), " ban ghi; model = ",
          paste(unique(d$model), collapse = ", "))
     for (mn in unique(d$model)) {
-      preds[[mn]] <- rbind(preds[[mn]], d[d$model == mn, , drop = FALSE])
+      dm <- d[d$model == mn, , drop = FALSE]
+      # TRUNG TEN voi mo hinh tinh trong script (B0 climatology, B_harm cua R):
+      # `scripts/run_baselines.py` cung dat ten "B0" (persistence) va "B_harm" ->
+      # neu gop chung se tron 2 mo hinh khac nhau vao mot nhom. Doi ten ban ngoai.
+      if (mn %in% INTERNAL_MODELS) {
+        new_mn <- paste0(mn, "_py")
+        say2("   [CANH BAO] model '", mn, "' trong ", basename(p),
+             " trung ten mo hinh cua evaluation.R -> doi thanh '", new_mn, "'")
+        dm$model <- new_mn
+        mn <- new_mn
+      }
+      preds[[mn]] <- rbind(preds[[mn]], dm)
     }
   }
 }
@@ -336,17 +348,17 @@ m <- ev$matched
 say2("so cap ghep duoc: ", nrow(m), " / ", nrow(all_pred), " ban ghi")
 
 if (!is.null(ev$overall)) {
-  write_csv_df(ev$overall, file.path(OUT_E5, "evaluation_overall.csv"))
-  write_csv_df(ev$by_lead, file.path(OUT_E5, "evaluation_by_lead.csv"))
-  write_csv_df(ev$by_peak, file.path(OUT_E5, "evaluation_by_peak.csv"))
-  write_csv_df(ev$by_station, file.path(OUT_E5, "evaluation_by_station.csv"))
-  write_csv_df(ev$contingency, file.path(OUT_E5, "evaluation_contingency.csv"))
-  write_csv_df(m, file.path(OUT_E5, "evaluation_matched_sample.csv"))
+  write_csv_df(ev$overall, file.path(OUT_EVAL, "evaluation_overall.csv"))
+  write_csv_df(ev$by_lead, file.path(OUT_EVAL, "evaluation_by_lead.csv"))
+  write_csv_df(ev$by_peak, file.path(OUT_EVAL, "evaluation_by_peak.csv"))
+  write_csv_df(ev$by_station, file.path(OUT_EVAL, "evaluation_by_station.csv"))
+  write_csv_df(ev$contingency, file.path(OUT_EVAL, "evaluation_contingency.csv"))
+  write_csv_df(m, file.path(OUT_EVAL, "evaluation_matched_sample.csv"))
   if (!is.null(ev$tests$wilcoxon)) {
-    write_csv_df(ev$tests$wilcoxon, file.path(OUT_E5, "evaluation_wilcoxon.csv"))
+    write_csv_df(ev$tests$wilcoxon, file.path(OUT_EVAL, "evaluation_wilcoxon.csv"))
   }
   if (!is.null(ev$tests$dm)) {
-    write_csv_df(ev$tests$dm, file.path(OUT_E5, "evaluation_diebold_mariano.csv"))
+    write_csv_df(ev$tests$dm, file.path(OUT_EVAL, "evaluation_diebold_mariano.csv"))
   }
   if (!is.null(ev$tests)) {
     tt_parts <- list()
@@ -364,7 +376,7 @@ if (!is.null(ev$overall)) {
     }
     tt <- do.call(rbind, tt_parts)
     tt$split <- EVAL_SPLIT
-    write_csv_df(tt, file.path(OUT_E5, "evaluation_tests.csv"))
+    write_csv_df(tt, file.path(OUT_EVAL, "evaluation_tests.csv"))
   }
   say2("\n-- Chi so tong hop --")
   print(ev$overall)
@@ -397,7 +409,7 @@ if (!is.null(ev$overall) && nrow(ev$overall)) {
          subtitle = "Ghep du bao - thuc do trong ±6 gio; mau trung vi (h_q50)",
          x = NULL, y = "MAE (m)") +
     theme_pgnn()
-  save_fig(p1, file.path(OUT_E5, "evaluation_mae_by_model.png"), width = 1120, height = 800)
+  save_fig(p1, file.path(OUT_EVAL, "evaluation_mae_by_model.png"), width = 1120, height = 800)
 }
 if (!is.null(ev$by_lead) && nrow(ev$by_lead)) {
   p2 <- ggplot(ev$by_lead, aes(x = factor(lead_day), y = mae, color = model,
@@ -408,7 +420,7 @@ if (!is.null(ev$by_lead) && nrow(ev$by_lead)) {
          subtitle = "lead_day = 1 la ngay ban tin, 5 la ngay du bao xa nhat",
          x = "Lead day", y = "MAE (m)", color = "Mo hinh") +
     theme_pgnn()
-  save_fig(p2, file.path(OUT_E5, "evaluation_mae_by_lead.png"), width = 1280, height = 800)
+  save_fig(p2, file.path(OUT_EVAL, "evaluation_mae_by_lead.png"), width = 1280, height = 800)
 }
 if (!is.null(ev$by_station) && nrow(ev$by_station)) {
   p3 <- ggplot(ev$by_station, aes(x = station, y = mae, fill = model)) +
@@ -416,7 +428,7 @@ if (!is.null(ev$by_station) && nrow(ev$by_station)) {
     scale_fill_manual(values = palette_pgnn(length(unique(ev$by_station$model)))) +
     labs(title = "MAE theo tram", x = NULL, y = "MAE (m)", fill = "Mo hinh") +
     theme_pgnn() + theme(axis.text.x = element_text(angle = 30, hjust = 1))
-  save_fig(p3, file.path(OUT_E5, "evaluation_mae_by_station.png"), width = 1600, height = 800)
+  save_fig(p3, file.path(OUT_EVAL, "evaluation_mae_by_station.png"), width = 1600, height = 800)
 }
 
 say2("\n================ KET QUA evaluation.R ================")

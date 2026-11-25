@@ -217,6 +217,15 @@ async def update_perm(user_id: str, body: PermRequest,
     before = {"perm": {k: int(v) for k, v in (doc.get("perm") or {}).items()},
               "perm_ver": int(doc.get("perm_ver", 1))}
 
+    # Nhật ký không chứa tên: người bị tác động ghi bằng `account_code` (cấp nếu chưa có), không bằng
+    # `user_id` (mặc định = tên đăng nhập). Không cấp được → 503, không đổi quyền.
+    try:
+        target_code = repo.ensure_account_code(user_id, doc)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail={"error": "account_code_unavailable",
+                                    "reason": "chưa cấp được mã tài khoản cho người dùng; thử lại sau"}) from None
+    actor = user.actor
     guard = LockGuard(state.lock, db=state.db, resource=f"user:{user_id}", ttl_ms=300_000)
     acquire_guard(guard, busy_detail=f"đang có tiến trình khác cập nhật quyền cho {user_id!r}")
     try:
@@ -226,8 +235,8 @@ async def update_perm(user_id: str, body: PermRequest,
             guard_check(guard)
             now = datetime.now(timezone.utc)
             logs = state.db["audit_logs"]
-            audit = {"at": now, "actor": user.username, "action": "user_perm", "source": "api",
-                     "collection": USERS, "doc_id": user_id, "target": {"user_id": user_id},
+            audit = {"at": now, "actor": actor, "action": "user_perm", "source": "api",
+                     "collection": USERS, "doc_id": target_code, "target": {"account_code": target_code},
                      "before": before, "after": None, "reason": body.reason.strip(), "state": "pending"}
             aid = logs.insert_one(audit).inserted_id
             try:

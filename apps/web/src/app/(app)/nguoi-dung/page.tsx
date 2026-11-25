@@ -6,8 +6,9 @@
  * Endpoint dùng:
  * - `GET /api/v1/users` — danh sách tài khoản (cần quyền `MANAGE_USERS`).
  *   API trả `perm` = `{collection: [tên quyền]}` và `perm_default` = quyền mặc định (`*`).
- * - `PUT /api/v1/users/{id}/perm` — cập nhật quyền nguyên tử bằng `$bit`:
- *   `{grant: [...], revoke: [...], collections: {coll: [flags]}, version, reason}`.
+ * - `PUT /api/v1/users/{id}/perm` — cập nhật quyền nguyên tử (một lệnh có điều kiện `perm_ver`):
+ *   `{grant: [...], revoke: [...], collections: {coll: [flags]}, perm_ver, reason}`;
+ *   `reason` bắt buộc; 409 nếu `perm_ver` lệch, 422 nếu tên quyền/collection sai, 423 nếu đang bị khoá.
  * - `PATCH /api/v1/users/{id}/active` — khoá/mở khoá tài khoản.
  *
  * Quy ước bitmask (12 bit) — xem `apps/api/src/api/permissions.py`:
@@ -28,7 +29,7 @@ import {
   inputStyle,
   type Column,
 } from "@/components/ui";
-import { api, toError } from "@/lib/api";
+import { ApiRequestError, api, toError } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
 import { usePermission } from "@/lib/session";
@@ -211,6 +212,11 @@ export default function UsersPage() {
           user={editing}
           onClose={() => setEditing(null)}
           onSaved={() => {
+            setOk(`Đã cập nhật quyền của ${editing.username}.`);
+            setEditing(null);
+            users.reload();
+          }}
+          onConflict={() => {
             setEditing(null);
             users.reload();
           }}
@@ -234,10 +240,12 @@ function PermissionEditor({
   user,
   onClose,
   onSaved,
+  onConflict,
 }: {
   user: UserItem;
   onClose: () => void;
   onSaved: () => void;
+  onConflict: () => void;
 }) {
   const [defaultFlags, setDefaultFlags] = useState<Set<string>>(
     new Set(user.perm_default ?? []),
@@ -314,7 +322,9 @@ function PermissionEditor({
         grant: diff.grant,
         revoke: diff.revoke,
         collections: Object.keys(diff.collPayload).length ? diff.collPayload : undefined,
-        reason,
+        // Khoá lạc quan: `perm_ver` lúc mở hộp thoại (409 nếu người khác vừa đổi quyền).
+        perm_ver: user.perm_ver ?? 1,
+        reason: reason.trim(),
       });
       onSaved();
     } catch (e) {
@@ -325,6 +335,9 @@ function PermissionEditor({
   }
 
   const allFlagNames = Object.keys(PERM_FLAGS) as PermFlagName[];
+  const changed =
+    diff.grant.length > 0 || diff.revoke.length > 0 || Object.keys(diff.collPayload).length > 0;
+  const conflict = err instanceof ApiRequestError && err.status === 409;
 
   return (
     <Modal
@@ -334,6 +347,14 @@ function PermissionEditor({
       width={900}
     >
       {err && <ErrorNotice error={err} onDismiss={() => setErr(null)} />}
+      {conflict && (
+        <div style={{ marginBottom: 10 }}>
+          <Button onClick={onConflict}>Đóng và tải lại danh sách (quyền đã bị người khác đổi)</Button>
+        </div>
+      )}
+      <div style={{ fontSize: 12, color: "#607d8b", marginBottom: 8 }}>
+        Phiên bản quyền đã xem: <code>{user.perm_ver ?? 1}</code>
+      </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
         <div>
@@ -426,18 +447,28 @@ function PermissionEditor({
 
       <div style={{ marginTop: 16 }}>
         <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
-          Lý do đổi quyền
+          Lý do đổi quyền (bắt buộc)
         </label>
         <input
           value={reason}
           onChange={(e) => setReason(e.target.value)}
+          maxLength={512}
           placeholder="ví dụ: bổ sung quyền duyệt cho vai trò reviewer"
           style={inputStyle}
         />
+        {!reason.trim() && (
+          <div style={{ fontSize: 12, color: "#ef6c00", marginTop: 4 }}>
+            Cần nhập lý do (ghi vào nhật ký thay đổi).
+          </div>
+        )}
       </div>
 
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-        <Button variant="primary" disabled={busy} onClick={() => void save()}>
+        <Button
+          variant="primary"
+          disabled={busy || !changed || !reason.trim()}
+          onClick={() => void save()}
+        >
           {busy ? "Đang lưu…" : "Lưu quyền"}
         </Button>
         <Button onClick={onClose}>Hủy</Button>

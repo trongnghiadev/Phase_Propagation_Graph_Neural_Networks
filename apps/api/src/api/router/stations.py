@@ -22,8 +22,8 @@ from pymongo import ReturnDocument
 
 from api.deps import UserContext, rate_limit, require
 from api.permissions import P
-from api.router.common import (acquire_guard, clean, guard_check, parse_day, parse_dt, qc_http_error,
-                               to_vn_date, to_vn_datetime)
+from api.router.common import (acquire_guard, attach_actor_labels, clean, guard_check,
+                               parse_day, parse_dt, qc_http_error, to_vn_date, to_vn_datetime)
 from api.state import state
 
 log = logging.getLogger("api.stations")
@@ -118,7 +118,7 @@ async def patch_station(code: str, body: StationPatch,
                                 detail={"error": "xung đột phiên bản", "expected": expected,
                                         "current": (actual or {}).get("version")})
         _invalidate("stations")
-        _audit("stations", code, code, changes, body.reason, user.username)
+        _audit("stations", code, code, changes, body.reason, user.actor)
         return clean(res)
     finally:
         guard.release()
@@ -140,11 +140,55 @@ async def station_tides(code: str, from_: str | None = Query(None, alias="from")
         flt["meta.kind"] = kind
     db = state.db
     docs = list(db[TIDE_EXTREMES].find(flt).sort([("ts", 1)]).limit(limit))
+    flags = _flags_for(db, code, docs)
+    items = []
+    for d in docs:
+        kind = (d.get("meta") or {}).get("kind")
+        item = {"ts": to_vn_datetime(d.get("ts")), "kind": kind,
+                "value": d.get("value"), "qc": d.get("qc"), "source_file": d.get("source_file"),
+                "flag_id": None, "flag_version": None, "flag_status": None, "flag_retired": None,
+                "flag_decided_by": None, "flag_decided_at": None}
+        f = flags.get(_flag_key(code, kind, d.get("ts")))
+        if f is not None:
+            item.update({"flag_id": f["_id"], "flag_version": f.get("version"),
+                         "flag_status": f.get("status"), "flag_retired": bool(f.get("retired")),
+                         "flag_decided_by": f.get("decided_by"),
+                         "flag_decided_at": to_vn_datetime(f.get("decided_at"))})
+        items.append(item)
+    attach_actor_labels(items, "flag_decided_by")
     return {"station": code, "count": len(docs),
-            "from": to_vn_date(d_from), "to": to_vn_date(d_to),
-            "items": [{"ts": to_vn_datetime(d.get("ts")), "kind": (d.get("meta") or {}).get("kind"),
-                       "value": d.get("value"), "qc": d.get("qc"), "source_file": d.get("source_file")}
-                      for d in docs]}
+            "from": to_vn_date(d_from), "to": to_vn_date(d_to), "items": items}
+
+
+def _flag_key(station: str, kind: Any, ts: Any) -> str | None:
+    """`_id` cờ QC của một phần tử triều (None nếu thiếu kind/ts)."""
+    from vngis import qc_rules
+    if kind not in ("high", "low") or not isinstance(ts, datetime):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    try:
+        return qc_rules.flag_id(station, kind, ts)
+    except ValueError:
+        return None
+
+
+def _flags_for(db, station: str, docs: list[dict]) -> dict[str, dict]:
+    """Cờ QC (`qc_flags`) của các phần tử triều, một truy vấn `$in` theo `_id` ổn định.
+
+    Web gửi đúng `flag_version` khi `PATCH /tides/...` (không cần đoán rồi nhận 428). Lỗi đọc cờ →
+    trả rỗng (chuỗi triều vẫn hiển thị; PATCH vẫn được bảo vệ bởi 428/409).
+    """
+    ids = sorted({k for d in docs if (k := _flag_key(station, (d.get("meta") or {}).get("kind"), d.get("ts")))})
+    if not ids:
+        return {}
+    try:
+        cur = db[QC_FLAGS].find({"_id": {"$in": ids}},
+                                {"version": 1, "status": 1, "retired": 1, "decided_by": 1, "decided_at": 1})
+        return {f["_id"]: f for f in cur}
+    except Exception as e:  # noqa: BLE001
+        log.warning("không đọc được qc_flags cho %s: %s", station, e)
+        return {}
 
 
 class TidePatch(BaseModel):
@@ -191,7 +235,7 @@ async def patch_tide(station: str, ts: str,
     try:
         fid = qc.flag_id(station, kind, ts_dt)
         # Kiểm tra quyết định TRƯỚC khi tạo cờ thủ công, để quyết định sai không để lại cờ mồ côi.
-        qc_rules.validate_decision(body.status, body.corrected_value, body.reason, user.username)
+        qc_rules.validate_decision(body.status, body.corrected_value, body.reason, user.actor)
     except ValueError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from None
 
@@ -205,7 +249,7 @@ async def patch_tide(station: str, ts: str,
             guard_check(guard)
             try:
                 flag = await asyncio.to_thread(qc.create_manual_flag, db, station, kind, ts_dt,
-                                               reason=body.reason, decided_by=user.username, source="api")
+                                               reason=body.reason, decided_by=user.actor, source="api")
             except (qc.QcError, ValueError) as e:
                 raise qc_http_error(e) from None
             created = True
@@ -219,7 +263,7 @@ async def patch_tide(station: str, ts: str,
         guard_check(guard)
         try:
             res = await asyncio.to_thread(qc.decide, db, fid, body.status, reason=body.reason,
-                                          decided_by=user.username, expected_version=expected,
+                                          decided_by=user.actor, expected_version=expected,
                                           corrected_value=body.corrected_value, source="api")
         except (qc.QcError, ValueError) as e:
             raise qc_http_error(e) from None
@@ -229,6 +273,7 @@ async def patch_tide(station: str, ts: str,
     out = clean(res)
     out["flag_id"] = fid
     out["flag_created"] = created
+    attach_actor_labels([out], "decided_by")
     out["note"] = "quyết định được ghi vào qc_flags; G0 áp vào tide_extremes ở lần chạy sau"
     return out
 

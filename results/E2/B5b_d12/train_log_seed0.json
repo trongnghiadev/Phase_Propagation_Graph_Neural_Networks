@@ -1,44 +1,47 @@
 {
  "variant": "B5b",
- "best_val_mae": 0.29280168855190275,
- "best_epoch": 2,
+ "best_val_mae": 0.30162163472175596,
+ "best_epoch": 1,
  "history": [
   {
    "epoch": 0,
-   "train_loss": 1.1439328444631476,
+   "train_loss": 1.0023189626241986,
    "val": {
-    "mae_peak": 0.32072036325931547,
-    "mae_hour": 5.729467997089029,
-    "pinball": 0.30410790055990217,
+    "mae_peak": 0.31248651921749115,
+    "mae_slot": 0.2942827724275135,
+    "mae_hour": 6.474356550216675,
+    "pinball": 0.38839694455266,
     "n_samples": 100
    },
-   "seconds": 37.42556190490723
+   "seconds": 6.949942588806152
   },
   {
    "epoch": 1,
-   "train_loss": 1.01873737259915,
+   "train_loss": 0.9693666100502014,
    "val": {
-    "mae_peak": 0.3526901513338089,
-    "mae_hour": 5.7431093333959575,
-    "pinball": 0.097762595936656,
+    "mae_peak": 0.30162163472175596,
+    "mae_slot": 0.2913787190245573,
+    "mae_hour": 6.5694117298126224,
+    "pinball": 0.2867570459842682,
     "n_samples": 100
    },
-   "seconds": 31.406186819076538
+   "seconds": 8.489306926727295
   },
   {
    "epoch": 2,
-   "train_loss": 1.0095450187984265,
+   "train_loss": 0.9514266817193282,
    "val": {
-    "mae_peak": 0.29280168855190275,
-    "mae_hour": 5.743156540602445,
-    "pinball": 0.08646721504628659,
+    "mae_peak": 0.303169726729393,
+    "mae_slot": 0.29031660455875297,
+    "mae_hour": 6.60185577583313,
+    "pinball": 0.2864991864562035,
     "n_samples": 100
    },
-   "seconds": 25.51476502418518
+   "seconds": 8.254092454910278
   }
  ],
  "data_snapshot": {
-  "run_date": "2026-11-23",
+  "run_date": "2026-11-24",
   "job_version": "g5-v1",
   "collections": {
    "tide_extremes": 129420,
@@ -85,7 +88,15 @@
    "THU_DAU_MOT": 3594,
    "VUNG_TAU": 3595
   },
-  "astro_merged": false,
+  "astro_merged": true,
+  "astro_fit": {
+   "fit_from": "2017-01-01",
+   "fit_to": "2022-12-31",
+   "fit_splits": [
+    "train"
+   ],
+   "generated_at": "2026-11-24T11:34:47+0700"
+  },
   "leak_check": {
    "rows_with_input_obs": 32343,
    "violations": 0
@@ -118,7 +129,7 @@
   "mlflow_experiment": "phasegnn"
  },
  "dims": {
-  "in_dim": 18,
+  "in_dim": 20,
   "static_dim": 9,
   "edge_dim": 6
  }

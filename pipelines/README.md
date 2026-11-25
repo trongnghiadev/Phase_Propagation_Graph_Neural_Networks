@@ -10,7 +10,7 @@
 | [`r/`](r/) | R | thống kê mô tả, phân tích điều hòa thủy triều, độ trễ pha, hàm đánh giá dùng chung cho mọi mô hình | Chương 4 |
 
 > **GĐ4 (R) — trạng thái:** đã chạy thật toàn bộ. Chi tiết cách chạy, số liệu đo và phương pháp: [`r/README.md`](r/README.md).
-> Đầu ra: `results/E8/` (thư viện mô tả), `results/E1/` (điều hòa + độ trễ pha), `results/E5/` (đánh giá mô hình).
+> Đầu ra: `results/E8/` (thư viện mô tả), `results/E1/` (điều hòa + độ trễ pha), `results/evaluation/` (đánh giá mô hình).
 > Đầu vào cho Spark G5: `data/processed/features/astro_tide.csv` (hợp đồng cột `day,h1,h2,t1_h,t2_h`).
 
 **Thứ tự chạy:** `ingest` → `spark/flatten` (G0) → `spark/qc` → quyết định QC (`qc/`) → `spark/flatten` lại → `spark/analytics`, `r/` → `spark/features` → huấn luyện (`packages/phasegnn`).

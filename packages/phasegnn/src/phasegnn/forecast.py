@@ -78,10 +78,18 @@ def _hours_to_iso(day: str, hour: float) -> str | None:
 
 
 def load_checkpoint(path: Path) -> tuple[PhaseGNN, TrainConfig, dict]:
-    """Nạp checkpoint do `train.py` ghi."""
+    """Nạp checkpoint do `train.py` ghi.
+
+    **An toàn (25/11/2026):** ``torch.load(weights_only=True)`` — chỉ giải nén tensor và kiểu cơ bản
+    (dict/list/tuple/str/số), không chạy pickle tùy ý. Checkpoint của `train.py` chỉ chứa các kiểu đó
+    (``state_dict``, ``config``/``train_config``/``dims``/``result`` là dict thuần) nên không cần allowlist
+    (`torch.serialization.add_safe_globals`); mọi checkpoint trong `results/` đều nạp được (đã kiểm tra).
+    Nơi gọi nhận đường dẫn từ nguồn ngoài (worker đọc `models`) phải tự kiểm tra đường dẫn trước
+    (`apps/worker/src/worker/forecast.py::safe_checkpoint_path`).
+    """
     import torch
 
-    blob = torch.load(path, map_location="cpu", weights_only=False)
+    blob = torch.load(path, map_location="cpu", weights_only=True)
     mcfg = ModelConfig.from_dict(blob["config"])
     tcfg = TrainConfig(**{k: v for k, v in blob.get("train_config", {}).items()
                           if k in TrainConfig.__dataclass_fields__})
@@ -218,7 +226,8 @@ def main(argv: list[str] | None = None) -> int:
     model, tcfg, result = load_checkpoint(Path(args.checkpoint))
     seed_everything(tcfg.seed)
 
-    datasets = build_datasets(df, t_in=tcfg.t_in, t_out=tcfg.t_out)
+    datasets = build_datasets(df, t_in=tcfg.t_in, t_out=tcfg.t_out,
+                              holdout_stations=tuple(tcfg.holdout_stations or ()))
     ds = datasets[args.split]
     if args.max_samples:
         # giữ nguyên thứ tự nhưng lấy N mẫu đầu mỗi trạm để phủ đều các trạm
@@ -231,7 +240,8 @@ def main(argv: list[str] | None = None) -> int:
             per_station[s.station] = c + 1
             kept.append(s)
         ds = SampleSet(samples=kept, split=ds.split, feature_names=ds.feature_names,
-                       stations=sorted(per_station), scaler=ds.scaler)
+                       stations=sorted(per_station), scaler=ds.scaler,
+                       height_scale=ds.height_scale)
     name = args.model_name or f"{tcfg.variant}-v1"
     records = predict_split(model, tcfg, graph, ds, model_name=name)
     print(f"[forecast] {len(records)} bản ghi cho tập {args.split}", flush=True)

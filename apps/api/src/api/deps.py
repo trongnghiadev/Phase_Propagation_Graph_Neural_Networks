@@ -38,6 +38,23 @@ class UserContext:
     perm_ver: int = 1
     jti: str = ""
     perm: dict[str, int] = field(default_factory=dict)
+    #: Mã tài khoản ổn định (`users.account_code`), không phải tên.
+    account_code: str = ""
+
+    @property
+    def actor(self) -> str:
+        """Định danh ghi vào `audit_logs.actor` / `jobs.requested_by`: ``user:<account_code>:<role>``.
+
+        Không ghi tên đăng nhập vào nhật ký (repo công khai, dữ liệu cá nhân). Không bao giờ dùng
+        `user_id`/`username` làm dự phòng (`_id` mặc định = tên đăng nhập): thiếu mã (không cấp được khi
+        nạp người dùng) → **503**, thao tác cần ghi người thực hiện không chạy. Đọc không cần actor vẫn chạy.
+        """
+        from api.auth.users import actor_id
+        if self.account_code:
+            return actor_id(self.account_code, self.role)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail={"error": "account_code_unavailable",
+                                    "reason": "chưa cấp được mã tài khoản; thử lại sau"})
 
     def mask_for(self, collection: str) -> int:
         return mask_of(self.perm, collection)
@@ -110,8 +127,16 @@ def _load_user(payload: dict[str, Any]) -> UserContext:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED,
                             detail="quyền đã thay đổi, hãy đăng nhập lại")
     perm = {k: int(v) for k, v in (doc.get("perm") or {}).items()}
+    code = str(doc.get("account_code") or "")
+    if not code:
+        try:
+            code = repo.ensure_account_code(user_id, doc)
+        except Exception as e:  # noqa: BLE001 - không cấp được mã → `actor` trả 503 (không dùng tên)
+            log.warning("không cấp được account_code: %s", type(e).__name__)
+            code = ""
     return UserContext(user_id=user_id, username=doc.get("username", ""), role=doc.get("role", ""),
-                       perm_ver=current_ver, jti=str(payload.get("jti", "")), perm=perm)
+                       perm_ver=current_ver, jti=str(payload.get("jti", "")), perm=perm,
+                       account_code=code)
 
 
 async def optional_user(request: Request) -> UserContext | None:

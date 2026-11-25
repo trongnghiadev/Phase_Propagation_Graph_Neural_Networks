@@ -5,10 +5,10 @@
  *
  * Gọi `POST /api/v1/auth/login` (xem `apps/api/src/api/router/auth.py`):
  * thân yêu cầu = `{ username, password }`; phản hồi = `access_token` (15 phút),
- * `refresh_token` (7 ngày), `expires_in`, `user_id`, `username`, `role`, `perm_ver`.
+ * `expires_in`, `user_id`, `username`, `role`, `perm_ver`. Refresh token (7 ngày) được API đặt vào
+ * cookie httpOnly `SameSite=Strict` (không trả trong JSON cho trình duyệt).
  *
- * Token được lưu trong `localStorage` (xem `src/lib/api.ts` → `tokenStore`) vì
- * backend chưa hỗ trợ cookie httpOnly. Hạn chế bảo mật đã ghi rõ trong README.
+ * Access token chỉ giữ trong bộ nhớ (xem `src/lib/api.ts` → `tokenStore`), không dùng `localStorage`.
  */
 
 import { useRouter } from "next/navigation";
@@ -17,6 +17,39 @@ import React, { useState } from "react";
 import { ErrorNotice, Button, Field, inputStyle } from "@/components/ui";
 import { ApiRequestError, toError } from "@/lib/api";
 import { SessionProvider, useSession } from "@/lib/session";
+
+/**
+ * Thông báo đăng nhập theo mã lỗi của API:
+ * - 401: sai tên đăng nhập hoặc mật khẩu (API luôn trả 401 khi mật khẩu sai, kể cả tài khoản
+ *   bị khoá/vô hiệu — không lộ tài khoản nào tồn tại);
+ * - 403 / 423: chỉ trả khi mật khẩu ĐÚNG (tài khoản bị vô hiệu / đang khoá tạm);
+ * - 429: đăng nhập quá nhiều lần; 503: dịch vụ giới hạn tần suất (Redis) gián đoạn.
+ */
+function loginError(err: Error): Error {
+  if (!(err instanceof ApiRequestError)) return err;
+  const wait = err.retryAfter ? ` Thử lại sau khoảng ${err.retryAfter} giây.` : " Vui lòng thử lại sau ít phút.";
+  let msg: string;
+  switch (err.status) {
+    case 401:
+      msg = "Tên đăng nhập hoặc mật khẩu không đúng.";
+      break;
+    case 403:
+      msg = "Tài khoản đã bị vô hiệu hoá. Liên hệ quản trị viên.";
+      break;
+    case 423:
+      msg = "Tài khoản đang bị khoá tạm do đăng nhập sai nhiều lần." + wait;
+      break;
+    case 429:
+      msg = "Bạn đăng nhập quá nhiều lần trong thời gian ngắn." + wait;
+      break;
+    case 503:
+      msg = "Hệ thống đăng nhập tạm thời không sẵn sàng." + wait;
+      break;
+    default:
+      return err;
+  }
+  return new ApiRequestError(err.status, msg, err.detail, err.requestId, err.instance, err.retryAfter);
+}
 
 function LoginForm() {
   const { login, error: sessionError } = useSession();
@@ -34,7 +67,7 @@ function LoginForm() {
       await login(username.trim(), password);
       router.replace("/");
     } catch (err) {
-      setError(toError(err));
+      setError(loginError(toError(err)));
     } finally {
       setBusy(false);
     }
@@ -72,7 +105,11 @@ function LoginForm() {
         </div>
 
         {error ? (
-          <ErrorNotice error={error} onDismiss={() => setError(null)} />
+          <ErrorNotice
+            error={error}
+            title="Đăng nhập không thành công"
+            onDismiss={() => setError(null)}
+          />
         ) : sessionError ? (
           <ErrorNotice error={sessionError} />
         ) : null}
@@ -86,7 +123,7 @@ function LoginForm() {
               required
               autoFocus
               style={inputStyle}
-              placeholder="viewer_seed"
+              placeholder="tên đăng nhập"
             />
           </Field>
           <Field label="Mật khẩu">
@@ -106,11 +143,6 @@ function LoginForm() {
           </div>
         </form>
 
-        {error instanceof ApiRequestError && error.status === 423 && (
-          <div style={{ marginTop: 10, fontSize: 13, color: "#7a4b00" }}>
-            Tài khoản đang bị khoá tạm do đăng nhập sai nhiều lần. Thử lại sau ít phút.
-          </div>
-        )}
 
         <div
           style={{

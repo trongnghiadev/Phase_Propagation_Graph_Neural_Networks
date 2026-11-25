@@ -1,7 +1,9 @@
 """Dự báo và mô hình (`/api/v1/forecasts/...`, `/api/v1/models/...`).
 
-**Quy tắc quan trọng (theo yêu cầu GĐ7.8):** các endpoint phụ thuộc mô hình PhaseGNN chưa
-huấn luyện sẽ:
+`POST /forecasts/run` giao việc ``forecast_run`` (``queued``) cho worker; worker chạy PhaseGNN từ
+checkpoint và ghi `model_forecasts` (`GET /forecasts/latest` đọc collection này khi `forecasts` rỗng).
+
+**Quy tắc (GĐ7.8):** khi chưa có dự báo của mô hình, các endpoint đọc sẽ:
 
 1. ưu tiên đọc dự báo mẫu đã có trong `results/` (bản dự báo tham chiếu, không phải mô hình
    chạy thật) → trả kèm cờ ``"source": "sample"``; hoặc
@@ -25,7 +27,7 @@ from pydantic import BaseModel, Field
 
 from api.deps import UserContext, require, rate_limit
 from api.permissions import P
-from api.router.common import clean, to_vn_date, to_vn_datetime
+from api.router.common import actor_labels, clean, to_vn_date, to_vn_datetime
 from api.state import state
 
 log = logging.getLogger("api.forecasts")
@@ -33,6 +35,8 @@ log = logging.getLogger("api.forecasts")
 router = APIRouter(tags=["forecasts"])
 
 FORECASTS = "forecasts"
+#: Dự báo PhaseGNN do worker ghi (`apps/worker/src/worker/forecast.py`).
+MODEL_FORECASTS = "model_forecasts"
 MODELS = "models"
 ALERTS = "alerts"
 
@@ -40,53 +44,82 @@ ALERTS = "alerts"
 RESULTS_DIR = Path(os.environ.get("PGNN_RESULTS_DIR", "results")).resolve()
 
 
-def _sample_forecast_files() -> list[Path]:
-    """Các tệp CSV dự báo mẫu trong `results/` (ưu tiên các tệp của E5/E7)."""
-    if not RESULTS_DIR.exists():
-        return []
-    pats = ["E5/*.csv", "E5/**/*.csv", "E7/*.csv", "E7/**/*.csv",
-            "forecast*.csv", "**/forecast*.csv", "**/*prediction*.csv"]
-    out: list[Path] = []
-    for p in pats:
-        out.extend(RESULTS_DIR.glob(p))
-    return sorted({f.resolve() for f in out if f.is_file()})
+#: Tệp dự báo mẫu, theo thứ tự ưu tiên (tương đối `RESULTS_DIR`): dự báo tập test theo
+#: `schemas/prediction/v1.schema.json` — PhaseGNN (E2) trước, rồi mô hình cơ sở. `results/E5/*.csv` là bảng
+#: chỉ số tổng quát hóa, KHÔNG phải dự báo ⇒ không dùng. `predictions*.csv` bị gitignore: chỉ có trên máy đã
+#: chạy thực nghiệm; không có ⇒ không trả mẫu (503).
+SAMPLE_FORECAST_CANDIDATES = (
+    "E2/phasegnn_long/test_full/predictions_test.csv",
+    "E2/*/test_full/predictions_test.csv",
+    "baselines/B0/predictions_test.csv",
+    "baselines/*/predictions_test.csv",
+)
+#: Cột bắt buộc của một tệp dự báo mẫu (tập con của schema dự báo v1).
+SAMPLE_REQUIRED_COLUMNS = frozenset({"model", "station", "issued_date", "target_date", "lead_day", "peak_idx",
+                                     "h_q10", "h_q50", "h_q90"})
 
 
-def _load_sample_rows(path: Path, limit: int) -> list[dict]:
-    """Đọc tệp CSV mẫu (dùng `csv` chuẩn, không phụ thuộc pandas)."""
+def _sample_header(path: Path) -> list[str] | None:
     import csv
 
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as fh:
+            return next(csv.reader(fh), None)
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return None
+
+
+def _sample_forecast_files() -> list[Path]:
+    """Các tệp dự báo mẫu hợp lệ trong `results/` (đúng thứ tự ưu tiên, đủ cột, nằm trong `RESULTS_DIR`)."""
+    if not RESULTS_DIR.exists():
+        return []
+    out: list[Path] = []
+    for pat in SAMPLE_FORECAST_CANDIDATES:
+        for f in sorted(RESULTS_DIR.glob(pat)):
+            f = f.resolve()
+            if f in out or not f.is_file():
+                continue
+            try:
+                f.relative_to(RESULTS_DIR)
+            except ValueError:      # symlink trỏ ra ngoài results/
+                continue
+            header = _sample_header(f)
+            if header is None or not SAMPLE_REQUIRED_COLUMNS <= set(header):
+                log.info("bỏ qua tệp mẫu %s: thiếu cột dự báo", f.name)
+                continue
+            out.append(f)
+    return out
+
+
+def _load_sample_rows(path: Path, limit: int, station: str | None = None) -> list[dict]:
+    """Đọc tệp CSV mẫu (dùng `csv` chuẩn, không phụ thuộc pandas); lọc trạm khi đọc."""
+    import csv
+
+    want = station.upper() if station else None
     rows: list[dict] = []
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as fh:
             for row in csv.DictReader(fh):
+                if want and str(row.get("station", "")).upper() != want:
+                    continue
                 rows.append(dict(row))
                 if len(rows) >= limit:
                     break
     except (OSError, UnicodeDecodeError, csv.Error) as e:
-        log.warning("không đọc được tệp mẫu %s: %s", path, e)
+        log.warning("không đọc được tệp mẫu %s: %s", path.name, e)
         return []
     return rows
 
 
 def _sample_payload(station: str | None, limit: int) -> dict | None:
-    """Dựng payload dự báo mẫu từ `results/` (trả None nếu không có)."""
-    files = _sample_forecast_files()
-    if not files:
-        return None
-    for path in files:
-        rows = _load_sample_rows(path, limit)
+    """Dựng payload dự báo mẫu từ `results/` (trả None nếu không có tệp hợp lệ / không có trạm yêu cầu)."""
+    for path in _sample_forecast_files():
+        rows = _load_sample_rows(path, limit, station)
         if not rows:
             continue
-        # lọc theo trạm nếu cột trạm có sẵn và người dùng yêu cầu
-        if station:
-            st_col = next((c for c in rows[0] if c.lower() in ("station", "station_code", "code")), None)
-            if st_col:
-                sel = [r for r in rows if str(r.get(st_col, "")).upper() == station.upper()]
-                if sel:
-                    rows = sel
-        return {"source": "sample", "file": path.name, "rows": rows,
-                "note": "dự báo mẫu từ kết quả nghiên cứu; KHÔNG phải kết quả mô hình PhaseGNN đã huấn luyện"}
+        rel = str(path.relative_to(RESULTS_DIR)).replace("\\", "/")
+        return {"source": "sample", "file": rel, "rows": rows,
+                "note": "dự báo mẫu (tập test của thực nghiệm) từ results/; KHÔNG phải dự báo vận hành"}
     return None
 
 
@@ -139,11 +172,35 @@ async def forecasts_latest(station: str | None = None, basin: str | None = None,
                   "peak_value": d.get("peak_value"), "model_version": d.get("model_version"),
                   "source": d.get("source", "model")} for d in docs]
         return {"source": "model", "count": len(items), "items": items}
+    mf = _model_forecasts_latest(db, station, limit)
+    if mf:
+        return mf
     sample = _sample_payload(station, limit)
     if sample:
         return {"source": "sample", "count": len(sample["rows"]), "items": sample["rows"],
                 "file": sample["file"], "note": sample["note"]}
     raise _not_ready("chưa có dự báo nào trong MongoDB và không tìm thấy dự báo mẫu trong results/")
+
+
+def _model_forecasts_latest(db, station: str | None, limit: int) -> dict | None:
+    """Lượt dự báo PhaseGNN mới nhất trong `model_forecasts` (worker ghi; mỗi (run_date, trạm, lead) một document)."""
+    if MODEL_FORECASTS not in db.list_collection_names():
+        return None
+    flt: dict[str, Any] = {"station": station} if station else {}
+    last = db[MODEL_FORECASTS].find_one(flt, {"run_date": 1}, sort=[("run_date", -1)])
+    if not last:
+        return None
+    flt["run_date"] = last["run_date"]
+    docs = list(db[MODEL_FORECASTS].find(flt).sort([("station", 1), ("lead_day", 1)]).limit(limit))
+    items = [{"station": d.get("station"), "run_date": d.get("run_date"), "lead_day": d.get("lead_day"),
+              "target_date": d.get("target_date"), "model": d.get("model"),
+              "model_version": d.get("model_version"), "h_max_q50": d.get("h_max_q50"),
+              "peaks": [{"peak_idx": p.get("peak_idx"), "h_q10": p.get("h_q10"), "h_q50": p.get("h_q50"),
+                         "h_q90": p.get("h_q90"), "t_peak": to_vn_datetime(p.get("t_peak"))}
+                        for p in d.get("peaks") or []],
+              "source": "phasegnn"} for d in docs]
+    return {"source": "model", "collection": MODEL_FORECASTS, "run_date": last["run_date"],
+            "count": len(items), "items": items}
 
 
 @router.get("/forecasts/compare", dependencies=[Depends(require(P.READ, FORECASTS))])
@@ -240,41 +297,53 @@ async def forecast_propagation(station: str, limit: int = Query(500, ge=1, le=50
     raise _not_ready(f"không có dữ liệu lan truyền pha cho trạm {station!r}")
 
 
+def _sample_enabled() -> bool:
+    """Bật nhánh dự báo mẫu cho `POST /forecasts/run` (``PGNN_FORECAST_SAMPLE=1``; mặc định tắt)."""
+    return os.environ.get("PGNN_FORECAST_SAMPLE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @router.post("/forecasts/run", dependencies=[Depends(require(P.RUN_FORECAST, FORECASTS)),
                                             Depends(rate_limit(scope="job"))])
 async def run_forecast(body: ForecastRunRequest,
                        user: UserContext = Depends(require(P.RUN_FORECAST, FORECASTS))):
-    """Chạy dự báo.
+    """Chạy dự báo: giao việc ``forecast_run`` cho `apps/worker` (``state="queued"``).
 
-    Vì `apps/api` không được import `phasegnn` (luật phụ thuộc), endpoint này **không** chạy
-    mô hình trực tiếp mà ghi một `jobs` và giao cho `apps/worker` xử lý. Nếu chưa có worker
-    hoặc không có mô hình, trả 503 kèm lý do; nếu có dự báo mẫu thì trả bản mẫu.
+    `apps/api` không import `phasegnn` (luật phụ thuộc): worker nhận việc, chạy PhaseGNN từ checkpoint và ghi
+    `model_forecasts`; thiếu checkpoint / thiếu `phasegnn` → worker đánh việc ``skipped`` kèm lý do.
+
+    Nhánh dự báo mẫu (`results/`) chỉ dùng khi ``force_sample=true`` hoặc cấu hình ``PGNN_FORECAST_SAMPLE=1``:
+    có bản mẫu → bản ghi `jobs` chèn thẳng trạng thái cuối ``sample`` (không qua ``queued`` ⇒ không tranh với
+    worker); ``force_sample`` mà không có bản mẫu → ``failed`` + 503. Cấu hình bật nhưng không có bản mẫu →
+    giao worker như bình thường.
     """
+    from vngis.job_params import JobParamsError, validate_job_params
+
     db = state.db
-    issued = body.issued_at or to_vn_datetime(datetime.now(timezone.utc))
-    job_id = f"forecast:{body.station or body.basin or 'all'}:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    doc = {"_id": job_id, "type": "forecast_run", "state": "queued",
-           "params": body.model_dump(), "requested_by": user.username,
-           "worker": None, "fence": None, "heartbeat": None,
-           "created_at": datetime.now(timezone.utc)}
-    db["jobs"].insert_one(doc)
-    if body.force_sample:
+    now = datetime.now(timezone.utc)
+    job_id = f"forecast:{body.station or body.basin or 'all'}:{now.strftime('%Y%m%dT%H%M%S%fZ')}"
+    actor = user.actor
+    base = {"_id": job_id, "type": "forecast_run", "requested_by": actor, "worker": None, "fence": None,
+            "heartbeat": None, "created_at": now, "updated_at": now}
+    if body.force_sample or _sample_enabled():
         sample = _sample_payload(body.station, 200)
         if sample:
+            db["jobs"].insert_one({**base, "params": body.model_dump(), "state": "sample",
+                                   "finished_at": now, "note": sample["note"]})
             return {"job_id": job_id, "state": "sample", "source": "sample",
                     "file": sample["file"], "note": sample["note"]}
-    if not body.force_sample:
-        # Thử dùng dự báo mẫu sẵn có khi chưa có mô hình huấn luyện.
-        sample = _sample_payload(body.station, 200)
-        if sample:
-            db["jobs"].update_one({"_id": job_id},
-                                  {"$set": {"state": "sample", "note": sample["note"]}})
-            return {"job_id": job_id, "state": "sample", "source": "sample",
-                    "file": sample["file"], "note": sample["note"]}
-    db["jobs"].update_one({"_id": job_id},
-                          {"$set": {"state": "failed", "error": "model_not_ready",
-                                    "message": "chưa có mô hình PhaseGNN đã huấn luyện"}})
-    raise _not_ready("chưa có mô hình PhaseGNN đã huấn luyện; lệnh đã ghi vào `jobs` để worker xử lý")
+        if body.force_sample:
+            db["jobs"].insert_one({**base, "params": body.model_dump(), "state": "failed", "finished_at": now,
+                                   "error": "sample_not_found", "message": "không có dự báo mẫu trong results/"})
+            raise _not_ready("force_sample=true nhưng không có dự báo mẫu trong results/")
+    try:
+        params = validate_job_params("forecast_run", body.model_dump(exclude_unset=True, exclude={"force_sample"}))
+    except JobParamsError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail={"message": str(e), "errors": e.errors}) from None
+    db["jobs"].insert_one({**base, "params": params, "state": "queued", "priority": 0, "finished_at": None})
+    return {"job_id": job_id, "state": "queued", "source": "model",
+            "note": "đã giao worker: chạy PhaseGNN từ checkpoint, ghi `model_forecasts`; "
+                    "thiếu checkpoint/phasegnn → việc `skipped` kèm lý do (xem GET /jobs/{job_id})"}
 
 
 @router.post("/models/train", dependencies=[Depends(require(P.MANAGE_MODEL, MODELS)),
@@ -291,7 +360,7 @@ async def train_model(body: TrainRequest,
                 "note": "phiên bản đã tồn tại"}
     db["jobs"].insert_one({"_id": job_id, "type": "train", "state": "queued",
                            "params": body.model_dump(), "model_version": ver,
-                           "requested_by": user.username, "worker": None, "fence": None,
+                           "requested_by": user.actor, "worker": None, "fence": None,
                            "heartbeat": None, "created_at": datetime.now(timezone.utc)})
     return {"job_id": job_id, "model_version": ver, "state": "queued",
             "note": "đã giao cho worker; apps/api không import phasegnn theo luật phụ thuộc"}
@@ -303,21 +372,35 @@ async def promote_model(version: str,
                         user: UserContext = Depends(require(P.MANAGE_MODEL, MODELS))):
     """Chuyển một phiên bản mô hình thành bản đang phục vụ (promote).
 
-    Ghi vào `models` và tăng `ver:models` để cache dự báo cũ bị vô hiệu.
+    Theo registry `phasegnn/registry.py` (`ModelRecord`): ``version`` là số nguyên (tham số đường dẫn
+    ``3``/``v3`` được ép kiểu; không phải số → 422), trạng thái ở trường ``status``
+    (``staging|production|archived``). Bản được promote → ``status="production"``; bản production khác →
+    ``archived``. Worker (`forecast_run`) chỉ chọn bản ``production``. Tăng `ver:models` để cache dự báo cũ
+    bị vô hiệu.
     """
+    from vngis.job_params import parse_model_version
+
+    try:
+        ver = parse_model_version(version)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from None
+    if ver is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="thiếu phiên bản mô hình")
     db = state.db
-    doc = db[MODELS].find_one({"version": version})
+    doc = db[MODELS].find_one({"version": ver})
     if doc is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"không có mô hình phiên bản {version!r}")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"không có mô hình phiên bản {ver!r}")
     now = datetime.now(timezone.utc)
-    db[MODELS].update_one({"version": version},
-                          {"$set": {"state": "promoted", "promoted_at": now,
-                                    "promoted_by": user.username}})
-    db[MODELS].update_many({"version": {"$ne": version}, "state": "promoted"},
-                           {"$set": {"state": "archived"}})
+    actor = user.actor
+    db[MODELS].update_one({"_id": doc["_id"]},
+                          {"$set": {"status": "production", "promoted_at": now, "promoted_by": actor}})
+    db[MODELS].update_many({"_id": {"$ne": doc["_id"]}, "status": "production"},
+                           {"$set": {"status": "archived"}})
     try:
         state.cache.bump_version("models")
         state.cache.bump_version("forecasts")
     except Exception as e:  # noqa: BLE001
         log.warning("không bump được ver: %s", e)
-    return {"model_version": version, "state": "promoted", "promoted_at": to_vn_datetime(now)}
+    return {"model_version": ver, "status": "production", "state": "production",
+            "promoted_at": to_vn_datetime(now), "promoted_by": actor,
+            "promoted_by_label": actor_labels([actor]).get(actor)}

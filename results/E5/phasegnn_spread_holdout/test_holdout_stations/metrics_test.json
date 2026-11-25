@@ -1,0 +1,61 @@
+{
+ "summary": {
+  "model": "phasegnn-spread-holdout",
+  "mae_peak_m": 0.18894920716612337,
+  "mae_hour_h": 3.4280817293579906,
+  "n_records": 16900
+ },
+ "by_station": [
+  {
+   "model": "phasegnn-spread-holdout",
+   "station": "PHU_AN",
+   "mae_peak_m": 0.17445051879686146,
+   "mae_hour_h": 3.61954551169223,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-spread-holdout",
+   "station": "TAN_AN",
+   "mae_peak_m": 0.20346614665367496,
+   "mae_hour_h": 3.2363769301779124,
+   "n_records": 8450
+  }
+ ],
+ "by_lead": [
+  {
+   "model": "phasegnn-spread-holdout",
+   "lead_day": 1,
+   "mae_peak_m": 0.18254678340789102,
+   "mae_hour_h": 3.376027900146843,
+   "n_records": 3380
+  },
+  {
+   "model": "phasegnn-spread-holdout",
+   "lead_day": 2,
+   "mae_peak_m": 0.1860032058731206,
+   "mae_hour_h": 3.426609538784067,
+   "n_records": 3380
+  },
+  {
+   "model": "phasegnn-spread-holdout",
+   "lead_day": 3,
+   "mae_peak_m": 0.18928858164007895,
+   "mae_hour_h": 3.4494444444444445,
+   "n_records": 3380
+  },
+  {
+   "model": "phasegnn-spread-holdout",
+   "lead_day": 4,
+   "mae_peak_m": 0.1921620005878941,
+   "mae_hour_h": 3.449414570230608,
+   "n_records": 3380
+  },
+  {
+   "model": "phasegnn-spread-holdout",
+   "lead_day": 5,
+   "mae_peak_m": 0.19474143764002344,
+   "mae_hour_h": 3.4388794549266244,
+   "n_records": 3380
+  }
+ ]
+}
