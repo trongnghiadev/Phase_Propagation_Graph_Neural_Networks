@@ -27,7 +27,7 @@ import {
   type Column,
 } from "@/components/ui";
 import { api, toError } from "@/lib/api";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, hasStationLocation } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
 import { usePermission } from "@/lib/session";
 import { COLLECTIONS } from "@/lib/permissions";
@@ -138,7 +138,7 @@ export default function StationCatalogPage() {
       key: "location",
       header: "Tọa độ (lon, lat)",
       render: (s) =>
-        s.location ? (
+        hasStationLocation(s.location) ? (
           <code style={{ fontSize: 11 }}>
             {Number(s.location[0]).toFixed(5)}, {Number(s.location[1]).toFixed(5)}
           </code>

@@ -36,6 +36,19 @@ interface BulletinRow {
   [k: string]: unknown;
 }
 
+/**
+ * Bản tin rỗng (chưa chọn tệp nào) — đủ shape để `detail.data?.parse?.rows` không ném lỗi.
+ * Hằng số ở cấp module để không tạo object mới ở mỗi lần render.
+ */
+const EMPTY_BULLETIN: Bulletin = {
+  source_file: "",
+  bulletin_date: null,
+  bulletin_type: null,
+  bulletin_no: null,
+  source: { is_primary: false },
+  parse: { warnings: [], rows: [] },
+};
+
 export default function BulletinsPage() {
   const { canRunJob, canExport, canRead } = usePermission();
   const [date, setDate] = useState("");
@@ -59,7 +72,7 @@ export default function BulletinsPage() {
   );
 
   const detail = useAsync<Bulletin>(
-    () => (selected ? api.bulletin(selected) : Promise.resolve({} as never)),
+    () => (selected ? api.bulletin(selected) : Promise.resolve(EMPTY_BULLETIN)),
     [selected],
   );
 

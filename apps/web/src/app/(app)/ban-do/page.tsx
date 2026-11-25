@@ -34,6 +34,7 @@ import {
   exceedLevel,
   fmtNum,
   formatDateTime,
+  hasStationLocation,
   thresholdsAt,
   type AlarmThresholds,
 } from "@/lib/format";
@@ -374,7 +375,9 @@ function StationDetailModal({
         .filter((p) => p.y !== null);
       out.push({ name: "Dự báo mô hình", color: "#c62828", points: fc });
     }
-    // Khoảng tin cậy (nếu API có trả h_q10/h_q50/h_q90).
+    // Khoảng tin cậy — CHỈ có khi API trả `h_q10`/`h_q50`/`h_q90`.
+    // `GET /forecasts/compare` ở nhánh collection `forecasts` không có các trường này
+    // (chỉ nhánh dự báo mẫu đọc từ CSV trong `results/` mới có) ⇒ không vẽ khoảng rỗng.
     const band = (compareGroups[code ?? ""] ?? [])
       .map((g) => ({
         x: String(g.peak_ts ?? "").slice(0, 10),
@@ -403,6 +406,13 @@ function StationDetailModal({
     return out;
   }, [thresholds]);
 
+  /** API có trả khoảng tin cậy (`h_q10`/`h_q50`/`h_q90`) cho trạm này không. */
+  const hasConfidenceBand = useMemo(
+    () =>
+      (compareGroups[code ?? ""] ?? []).some((g) => typeof g.h_q10 === "number"),
+    [compareGroups, code],
+  );
+
   return (
     <Modal
       open={Boolean(code)}
@@ -420,8 +430,8 @@ function StationDetailModal({
         </div>
         <div style={{ color: "#607d8b", fontSize: 13 }}>
           Tọa độ:{" "}
-          {station.data?.location
-            ? `${station.data.location[1].toFixed(4)}, ${station.data.location[0].toFixed(4)}`
+          {hasStationLocation(station.data?.location)
+            ? `${Number(station.data.location[1]).toFixed(4)}, ${Number(station.data.location[0]).toFixed(4)}`
             : "—"}
         </div>
         <div style={{ color: "#607d8b", fontSize: 13 }}>
@@ -445,6 +455,16 @@ function StationDetailModal({
         yLabel="m"
         title="Đỉnh triều: thực đo + dự báo + khoảng tin cậy"
       />
+
+      {!hasConfidenceBand && (
+        <InfoNotice kind="info">
+          <strong>Khoảng tin cậy không có sẵn từ API hiện tại.</strong>{" "}
+          <code>GET /forecasts/compare</code> chỉ trả <code>peak_value</code>/<code>peak_ts</code>{" "}
+          (nhánh collection <code>forecasts</code>); các trường <code>h_q10</code>/<code>h_q50</code>/
+          <code>h_q90</code> chỉ có ở nhánh dự báo mẫu đọc từ <code>results/</code>. Vì vậy biểu đồ
+          chỉ vẽ đường thực đo và đường dự báo.
+        </InfoNotice>
+      )}
 
       {propagation.data && propagation.data.items.length > 0 && (
         <div style={{ marginTop: 16 }}>

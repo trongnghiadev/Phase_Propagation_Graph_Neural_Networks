@@ -26,10 +26,22 @@ import {
 import { api } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
-import type { Province, Station, WardMapping } from "@/lib/types";
+import type { Province, Station, Ward, WardMapping } from "@/lib/types";
 
 /** Ngày mốc hiệu lực của kỳ địa giới mới (01/07/2025 giờ VN). */
 const ERA_SPLIT = "2025-07-01";
+
+/**
+ * Giá trị rỗng cho `wardMap` — đủ shape để `?.mappings?.length` không ném TypeError
+ * (placeholder `{}` thiếu thuộc tính ⇒ `.length` của `undefined` ⇒ lỗi runtime).
+ * Hằng số ở cấp module để không tạo object mới ở mỗi lần render.
+ */
+const EMPTY_WARD_MAP: {
+  era: string;
+  province_code: number;
+  wards: Ward[];
+  mappings: WardMapping[];
+} = { era: "", province_code: 0, wards: [], mappings: [] };
 
 export default function AdminUnitsPage() {
   const [at, setAt] = useState("");
@@ -61,13 +73,13 @@ export default function AdminUnitsPage() {
   const wardMap = useAsync<{
     era: string;
     province_code: number;
-    wards: import("@/lib/types").Ward[];
+    wards: Ward[];
     mappings: WardMapping[];
   }>(
     () =>
       selected && effectiveEra
         ? api.wardMapping(effectiveEra, selected.code)
-        : Promise.resolve({} as never),
+        : Promise.resolve(EMPTY_WARD_MAP),
     [selected, effectiveEra],
   );
 
@@ -304,7 +316,7 @@ export default function AdminUnitsPage() {
             )}
 
             <h3 style={{ marginTop: 0 }}>
-              Ánh xạ xã ({wardMap.data?.mappings.length ?? 0} bản ghi) — era{" "}
+              Ánh xạ xã ({wardMap.data?.mappings?.length ?? 0} bản ghi) — era{" "}
               <code>{effectiveEra}</code>
             </h3>
             {wardMap.error && <ErrorNotice error={wardMap.error} onRetry={wardMap.reload} />}

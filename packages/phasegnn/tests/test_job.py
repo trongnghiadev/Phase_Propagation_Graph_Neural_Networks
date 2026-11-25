@@ -57,9 +57,47 @@ def test_build_alerts_skips_station_without_threshold():
     assert build_alerts(recs, {"PHU_AN": 1.2}) == []
 
 
+def test_build_alerts_gan_alert_id_on_dinh_chuoi():
+    """Moi canh bao phai co `alert_id` **chuoi** va ON DINH (khong doi giua cac lan chay).
+
+    `alert_id` khop dung khoa logic ghi `alerts` trong `run_forecast_job`
+    (`model:station:target_date:lead_day:level`) ⇒ chay lai job khong sinh ban ghi trung.
+    """
+    recs = [_rec("PHU_AN", 1.5)]
+    a1 = build_alerts(recs, {"PHU_AN": 1.2})
+    a2 = build_alerts(recs, {"PHU_AN": 1.2})
+    assert len(a1) == 1
+    alert_id = a1[0]["alert_id"]
+    assert isinstance(alert_id, str)
+    assert alert_id == a2[0]["alert_id"], "alert_id phai on dinh"
+    assert alert_id == "phasegnn-v1:PHU_AN:2026-11-24:1:I"
+
+
+def test_build_alerts_alert_id_khac_nhau_theo_tram_va_ngay():
+    """`alert_id` khac nhau khi tram/ngay/lead_day khac nhau."""
+    recs = [_rec("PHU_AN", 1.5), _rec("NHA_BE", 2.0),
+            {**_rec("PHU_AN", 1.5), "target_date": "2026-11-25", "lead_day": 2}]
+    ids = {a["alert_id"] for a in build_alerts(recs, {"PHU_AN": 1.2, "NHA_BE": 1.2})}
+    assert len(ids) == 3
+
+
 # ---------------------------------------------------------------------------
 # Job
 # ---------------------------------------------------------------------------
+def test_run_forecast_job_ghi_alert_id_vao_mongo_khong_trung_ban_ghi():
+    """Chay job 2 lan: `alerts` chi co 1 ban ghi va co `alert_id` chuoi."""
+    mongomock = pytest.importorskip("mongomock")
+    db = mongomock.MongoClient()["vngis_test"]
+    recs = [_rec("PHU_AN", 1.5)]
+    for _ in range(2):
+        run_forecast_job(day="2026-11-24", basin="DONG_RAI", records=recs,
+                         thresholds={"PHU_AN": 1.2}, use_lock=False, db=db)
+    docs = list(db["alerts"].find({}))
+    assert len(docs) == 1, f"khong duoc sinh ban ghi trung, thuc te {len(docs)}"
+    assert isinstance(docs[0]["alert_id"], str)
+    assert docs[0]["alert_id"] == "phasegnn-v1:PHU_AN:2026-11-24:1:I"
+
+
 def test_run_forecast_job_without_datastores_writes_file(tmp_path):
     """Khong co Redis/MongoDB: job van chay va ghi file cuc bo."""
     recs = [_rec("PHU_AN", 1.5)]

@@ -445,7 +445,8 @@ export function LineChart({
   yMax += pad;
 
   const xOf = (x: string | number) => {
-    const i = xLabels.indexOf(String(x));
+    // `indexOf` trả -1 khi nhãn không có trong `xLabels` ⇒ toạ độ âm (vẽ ra ngoài khung).
+    const i = Math.max(xLabels.indexOf(String(x)), 0);
     const n = Math.max(xLabels.length - 1, 1);
     return PAD.l + (i / n) * (W - PAD.l - PAD.r);
   };

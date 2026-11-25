@@ -4,6 +4,11 @@ Cảnh báo được sinh bởi scheduler/worker (GĐ7.7) và lưu trong `alerts
 ``{alert_id, station, basin, type, severity, issued_at, valid_to, message, status, ack_by, acked_at}``.
 Khi đọc, API gắn ``ack_by_label`` (tra `users`, không lưu).
 
+**Định danh cảnh báo.** `alert_id` là **chuỗi**. Bản ghi cũ (hoặc bản ghi ghi tay) có
+thể chỉ có `_id` kiểu `ObjectId` — `ObjectId` không serialize được bởi JSON nên API luôn
+ép `alert_id` về chuỗi (`_alert_id_of`) và tra cứu được theo cả `alert_id` lẫn `_id`
+(`_alert_filter`).
+
 Mỗi cảnh báo có ``era`` của địa giới liên quan (luôn kèm `era` — ADR 0006).
 """
 from __future__ import annotations
@@ -13,6 +18,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from pymongo import ReturnDocument
@@ -27,6 +33,48 @@ log = logging.getLogger("api.alerts")
 router = APIRouter(tags=["alerts"])
 
 ALERTS = "alerts"
+
+
+def _is_objectid(s: str) -> bool:
+    """Chuỗi có phải ObjectId hợp lệ của MongoDB không."""
+    try:
+        ObjectId(s)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _alert_id_of(doc: dict) -> str | None:
+    """Định danh cảnh báo dạng **chuỗi**.
+
+    Cảnh báo do job `phasegnn` sinh có thể chỉ có `_id` kiểu `ObjectId` (bản ghi cũ,
+    hoặc bản ghi ghi tay) — `ObjectId` **không** serialize được bởi JSON nên trả về
+    client sẽ gây 500. Vì vậy luôn ép về chuỗi.
+    """
+    raw = doc.get("alert_id")
+    if raw is None or raw == "":
+        oid = doc.get("_id")
+        return str(oid) if oid is not None else None
+    return str(raw)
+
+
+def _alert_filter(alert_id: str) -> dict[str, Any]:
+    """Điều kiện tìm cảnh báo theo `alert_id` (chuỗi) — hỗ trợ cả `alert_id` lẫn `_id`.
+
+    `alert_id` có thể là chuỗi do job sinh (``model:station:date:lead:level``) hoặc là
+    biểu diễn chuỗi của `_id` (`ObjectId` 24 ký tự hex). Với trường hợp sau, `_id` là
+    `ObjectId` nên phải truyền đúng kiểu `ObjectId` — nếu không, không tìm thấy bản ghi.
+
+    Điều kiện là **OR** (`$or`) vì bản ghi cũ có `_id` là `ObjectId` mà **không** có
+    trường `alert_id` (ngược lại, điều kiện AND sẽ không khớp bản ghi nào).
+    """
+    ors: list[dict[str, Any]] = [{"alert_id": alert_id}]
+    if _is_objectid(alert_id):
+        ors.append({"_id": ObjectId(alert_id)})
+    else:
+        # `_id` có thể là chuỗi (bản ghi cũ đặt `_id` = "A1") → thử cả hai kiểu.
+        ors.append({"_id": alert_id})
+    return {"$or": ors}
 
 
 class AckRequest(BaseModel):
@@ -60,7 +108,7 @@ async def list_alerts(station: str | None = None, basin: str | None = None,
     docs = list(db[ALERTS].find(flt).sort([("issued_at", -1)]).limit(limit))
     items = []
     for d in docs:
-        items.append({"alert_id": d.get("alert_id") or d.get("_id"), "station": d.get("station"),
+        items.append({"alert_id": _alert_id_of(d), "station": d.get("station"),
                       "basin": d.get("basin"), "type": d.get("type"), "severity": d.get("severity"),
                       "issued_at": to_vn_datetime(d.get("issued_at")),
                       "valid_to": to_vn_datetime(d.get("valid_to")),
@@ -74,10 +122,13 @@ async def list_alerts(station: str | None = None, basin: str | None = None,
 @router.get("/alerts/{alert_id}", dependencies=[Depends(require(P.READ, ALERTS))])
 async def get_alert(alert_id: str):
     """Chi tiết một cảnh báo."""
-    doc = state.db[ALERTS].find_one({"alert_id": alert_id}) or state.db[ALERTS].find_one({"_id": alert_id})
+    doc = state.db[ALERTS].find_one(_alert_filter(alert_id))
     if doc is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"không có cảnh báo {alert_id!r}")
+    # `alert_id` phải lấy từ document **gốc**: `clean()` bỏ `_id` (ObjectId).
+    aid = _alert_id_of(doc)
     doc = clean(doc)
+    doc["alert_id"] = aid
     doc["issued_at"] = to_vn_datetime(doc.get("issued_at"))
     doc["valid_to"] = to_vn_datetime(doc.get("valid_to"))
     doc["acked_at"] = to_vn_datetime(doc.get("acked_at"))
@@ -91,7 +142,7 @@ async def ack_alert(alert_id: str, body: AckRequest,
     """Xác nhận cảnh báo (đóng yêu cầu xử lý)."""
     db = state.db
     now = datetime.now(timezone.utc)
-    flt = {"alert_id": alert_id} if db[ALERTS].find_one({"alert_id": alert_id}) else {"_id": alert_id}
+    flt = _alert_filter(alert_id)
     res = db[ALERTS].find_one_and_update(
         flt,
         {"$set": {"status": body.status, "ack_by": user.actor, "acked_at": now,
@@ -103,7 +154,10 @@ async def ack_alert(alert_id: str, body: AckRequest,
         state.cache.bump_version("alerts")
     except Exception as e:  # noqa: BLE001
         log.warning("không bump ver:alerts: %s", e)
+    # `alert_id` phải lấy từ document **gốc**: `clean()` bỏ `_id` (ObjectId).
+    aid = _alert_id_of(res)
     out = clean(res)
+    out["alert_id"] = aid
     out["issued_at"] = to_vn_datetime(out.get("issued_at"))
     out["acked_at"] = to_vn_datetime(out.get("acked_at"))
     attach_actor_labels([out], "ack_by")
