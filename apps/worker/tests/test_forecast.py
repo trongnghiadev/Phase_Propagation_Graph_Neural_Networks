@@ -242,3 +242,28 @@ def test_checkpoint_mac_dinh_la_spread_v2():
     if rec.is_file():  # tệp kết quả có trên máy đã chạy thực nghiệm
         d = json.loads(rec.read_text(encoding="utf-8"))
         assert d["train_config"]["subgraph_version"] == 2
+
+
+def test_lead_day_1_la_ngay_phat_ban_tin():
+    """Quy ước `lead_day` (khớp `phasegnn.forecast.predict_split` và `official_forecasts` của KTTV):
+    ``lead_day = target_date − run_date + 1`` ⇒ ``lead_day=1`` có ``target_date = run_date``."""
+    from datetime import date, timedelta
+
+    run = "2025-12-30"
+    recs = [{"model": "phasegnn-v1", "station": "PHU_AN", "issued_date": run,
+             "target_date": (date.fromisoformat(run) + timedelta(days=d)).isoformat(), "lead_day": d + 1,
+             "peak_idx": k, "h_q10": 1.0, "h_q50": 1.1, "h_q90": 1.2, "t_peak": None}
+            for d in range(5) for k in (0, 1)]
+    docs = fc.group_records(recs, run_date=run, model="phasegnn-v1")
+    assert [d["lead_day"] for d in docs] == [1, 2, 3, 4, 5]
+    assert docs[0]["target_date"] == run and docs[0]["_id"] == f"{run}:PHU_AN:1"
+    for d in docs:
+        lead = (date.fromisoformat(d["target_date"]) - date.fromisoformat(d["run_date"])).days + 1
+        assert lead == d["lead_day"]
+
+
+def test_lead_day_phasegnn_cung_quy_uoc():
+    """Nếu image có `phasegnn`: `target = issue + (lead_day − 1)` như `predict_split`."""
+    pf = pytest.importorskip("phasegnn.forecast")
+    assert pf._add_days("2025-12-30", 0) == "2025-12-30"
+    assert pf._add_days("2025-12-31", 1) == "2026-01-01"

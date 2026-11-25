@@ -90,6 +90,9 @@ class ModelConfig:
     directions: tuple[bool, bool] = (True, True)
     model_kind: str = "phasegnn"     # "phasegnn" | "graphsage"
     out_quantiles: tuple[float, ...] = QUANTILES
+    #: Cách τ tác động lên thông điệp (`layers.PhaseMessage`): "grid" (mặc định — cấu hình
+    #: của mọi checkpoint trước 25/11/2026, không có trường này) hoặc "phase".
+    tau_mode: str = "grid"
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -247,7 +250,7 @@ class PhaseGNN(nn.Module):
             self.message = PhaseMessage(
                 node_dim=hidden, edge_dim=edge_dim, q_dim=0,
                 hidden=cfg.message_hidden, smooth_steps=cfg.smooth_steps,
-                delta_h=cfg.delta_h, learn_tau=cfg.learn_tau)
+                delta_h=cfg.delta_h, learn_tau=cfg.learn_tau, tau_mode=cfg.tau_mode)
             self.topo = TopoGRU(node_dim=hidden, in_dim=self.in_dim + self.static_dim,
                                 message_dim=hidden, num_layers=1,
                                 directions=cfg.directions)

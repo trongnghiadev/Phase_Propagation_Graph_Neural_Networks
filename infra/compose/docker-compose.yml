@@ -8,6 +8,7 @@
 #          3 node Redis cho Redlock, 3 API sau Nginx, mongo-express
 #   spark  Spark standalone: 1 master + N worker (--scale spark-worker=N)
 #   shard  Kịch bản B – mở rộng: MongoDB sharded cluster (config + 2 shard + mongos)
+#   gpu    (tùy chọn) worker huấn luyện trên GPU NVIDIA, image phasegnn:cuda; bật cùng "ha"
 #
 #   docker compose -f infra/compose/docker-compose.yml --profile ha up -d --build
 #   docker compose -f infra/compose/docker-compose.yml --profile spark up -d --scale spark-worker=2
@@ -73,6 +74,9 @@ x-api: &api
     interval: 10s
     timeout: 5s
     retries: 3
+  volumes:
+    # Dự báo mẫu trong results/ được dùng khi chưa có model production.
+    - ../..\results:/srv/results:ro
   networks: [gisnet]
 
 x-spark: &spark
@@ -264,6 +268,57 @@ services:
       ME_CONFIG_BASICAUTH: "false"
       ME_CONFIG_OPTIONS: "--jsonMode=loose"
     ports: ["8082:8081"]
+    networks: [gisnet]
+
+  # ===========================================================================
+  # Worker GPU (profile "gpu", tùy chọn): worker chạy trong image `phasegnn:cuda`
+  # (packages/phasegnn/Dockerfile.cuda) để việc `train` dùng GPU NVIDIA. Cần driver NVIDIA trên
+  # Windows đủ mới cho CUDA 12.6 trên WSL2 (xem packages/phasegnn/README.md, mục "Chạy trên GPU").
+  # BẮT BUỘC bật cùng profile "ha" (MongoDB rs0, Redis Sentinel/lock đều thuộc "ha"):
+  #   docker build -f packages/phasegnn/Dockerfile.cuda -t phasegnn:cuda .
+  #   docker compose -f infra/compose/docker-compose.yml --profile ha --profile gpu up -d
+  # `depends_on` trỏ sang dịch vụ của profile khác chỉ hợp lệ với `required: false` (Compose ≥ 2.20; đã kiểm
+  # `--profile gpu config --quiet` không lỗi): bật cùng "ha" ⇒ chờ mongo-init/sentinel-1 như API; chỉ bật "gpu" ⇒
+  # Compose bỏ qua phụ thuộc và worker khởi động nhưng không kết nối được MongoDB/Redis (thoát lỗi, restart lặp).
+  # ===========================================================================
+  worker-gpu:
+    image: phasegnn:cuda
+    container_name: gis-dist-worker-gpu
+    restart: unless-stopped
+    profiles: ["gpu"]
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+        required: false
+      sentinel-1:
+        condition: service_started
+        required: false
+    working_dir: /work
+    command: ["python", "-X", "utf8", "-m", "worker", "--instance", "worker-gpu"]
+    environment:
+      APP_ENV: cluster
+      TZ: Asia/Ho_Chi_Minh
+      VNGIS_CONFIG_DIR: /work/config
+      PYTHONPATH: /work/apps/worker/src:/work/packages/vngis/src:/work/packages/phasegnn/src
+      MONGO_URI: mongodb://mongo1:27101,mongo2:27102,mongo3:27103/?replicaSet=rs0&w=majority&readConcernLevel=majority
+      MONGO_DB: vietnam_gis
+      REDIS_SENTINELS: sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
+      REDIS_SENTINEL_MASTER: cache
+      REDIS_LOCK_NODES: redis-lock-1:6379,redis-lock-2:6379,redis-lock-3:6379
+      INSTANCE: worker-gpu
+      # Thiết bị huấn luyện khi việc `train` không ghi `device`: auto = cuda nếu thấy GPU.
+      PGNN_TRAIN_DEVICE: ${PGNN_TRAIN_DEVICE:-auto}
+      # Dự báo một ngày rất nhẹ ⇒ mặc định CPU.
+      PGNN_FORECAST_DEVICE: ${PGNN_FORECAST_DEVICE:-cpu}
+    volumes:
+      - ../..:/work                  # mã nguồn + data/ + results/ (checkpoint ghi vào results/models)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     networks: [gisnet]
 
   # ===========================================================================

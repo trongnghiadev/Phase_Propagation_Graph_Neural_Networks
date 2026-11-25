@@ -37,6 +37,7 @@ import numpy as np
 from .data import (DEFAULT_T_IN, DEFAULT_T_OUT, DYNAMIC_FEATURES, SPLITS, FeatureScaler,
                    GraphData, SampleSet, WindowSample, build_datasets, check_leakage,
                    default_paths, load_g5, load_g5_meta, load_graph)
+from .device import DeviceUnavailable, device_info, parse_device_spec, resolve_device, set_deterministic
 from .losses import (QUANTILES, circular_distance_h, mae, mono_loss, peak_mae,
                      peak_hour_mae, pinball_loss, soft_peak_height, tau_loss)
 from .model import (ModelConfig, PhaseGNN, configure_threads, daily_grid,
@@ -58,9 +59,15 @@ VARIANTS: dict[str, dict] = {
 # Đồ thị con theo trạm
 # ---------------------------------------------------------------------------
 #: Phiên bản cách dựng đồ thị con (`build_station_subgraph`). 1 = thiếu cạnh `down` (trước
-#: 25/11/2026); 2 = đã sửa (mặc định cho lượt huấn luyện mới).
+#: 25/11/2026); 2 = đường biển → trạm có cạnh `down`; 3 = đồ thị **rút gọn đường đi**
+#: (biển + hồ chứa thượng nguồn nối thẳng vào trạm, τ tích luỹ). Mặc định cho lượt mới là **2**
+#: (cùng `tau_mode="phase"`): ablation 25/11/2026 cho v2+phase tốt nhất (0.1428 m), v3 kém v2
+#: ~0.016 m (`results/E2/README.md`). v3 vẫn chọn được bằng `--subgraph-version 3`.
 SUBGRAPH_VERSION = 2
-SUBGRAPH_VERSIONS = (1, 2)
+SUBGRAPH_VERSIONS = (1, 2, 3)
+
+#: Tên cột `GraphData.edge_attr` theo thứ tự (`data.load_graph` xếp theo tên).
+EDGE_ATTR_NAMES = ("is_down", "is_up", "length_km", "log_celerity", "log_tau", "slope_used")
 
 
 @dataclass
@@ -76,6 +83,10 @@ class StationSubgraph:
     static: np.ndarray              # [N, S]
     station_node: int               # chỉ số node của trạm trong đồ thị con
     sea_node: int                   # chỉ số node biển
+    #: phiên bản cách dựng (`SUBGRAPH_VERSIONS`); `prepare_sample` đặt đặc trưng theo phiên bản
+    version: int = 1
+    #: chỉ số các nút hồ chứa trong đồ thị con (v3: nhận đặc trưng `res_*`)
+    reservoir_nodes: tuple[int, ...] = ()
 
 
 def build_station_subgraph(graph: GraphData, station: str,
@@ -112,6 +123,8 @@ def build_station_subgraph(graph: GraphData, station: str,
         raise ValueError(f"subgraph version phải là một trong {SUBGRAPH_VERSIONS}, nhận {version!r}")
     if station not in graph.station_node:
         raise KeyError(f"trạm {station!r} không có nút trong đồ thị")
+    if version >= 3:
+        return _build_subgraph_v3(graph, station, sea_id)
     if sea_id not in graph.node_index:
         raise KeyError(f"nút biển {sea_id!r} không có trong đồ thị")
 
@@ -199,6 +212,158 @@ def build_station_subgraph(graph: GraphData, station: str,
         static=static,
         station_node=node_index[st_node],
         sea_node=node_index[sea_id],
+        version=int(version),
+    )
+
+
+def _is_reservoir_mask(graph: GraphData) -> np.ndarray:
+    from .data import STATIC_FEATURE_NAMES  # noqa: PLC0415
+
+    col = STATIC_FEATURE_NAMES.index("is_reservoir")
+    return np.asarray(graph.static_attr[:, col] > 0)
+
+
+def _build_subgraph_v3(graph: GraphData, station: str, sea_id: str) -> StationSubgraph:
+    """Đồ thị con v3 — **rút gọn đường đi** (thêm 25/11/2026).
+
+    **Vì sao.** Thông điệp của PhaseGNN được tính một lần từ mã hoá đầu vào của nút nguồn
+    (`PhaseMessage` trên `h_seq`) nên chỉ đi **một bước** (từ hàng xóm trực tiếp). Ở v1/v2,
+    hàng xóm của trạm là các đoạn sông trung gian **không có số liệu** (chỉ đặc trưng tĩnh
+    + đồng hồ lưới); tín hiệu triều ở nút biển và xả hồ không bao giờ tới trạm. v3 nối thẳng
+    các **nút nguồn có số liệu** vào trạm, τ = tổng τ dọc đường đi:
+
+    * **biển → trạm** (cạnh `up`, τ = Σ τ_up trên đường BFS biển → trạm như v2) và cạnh
+      `down` ngược lại trạm → biển (τ = Σ τ_down của các cạnh ngược có trong đồ thị);
+    * với **mỗi hồ chứa ở thượng nguồn** trạm (BFS theo cạnh `up` từ trạm, nút
+      `is_reservoir`): cạnh `down` hồ → trạm (τ = Σ τ_down — thời gian truyền xả lũ xuôi
+      dòng) và cạnh `up` trạm → hồ (τ = Σ τ_up).
+
+    Đặc trưng cạnh rút gọn: `length_km` tổng, `slope_used` và `log_celerity` trung bình,
+    `log_tau = log(τ tổng)`, `is_down`/`is_up` theo chiều. Trạm không có hồ ở thượng nguồn
+    (BEN_LUC, TAN_AN, GO_DAU_HA trong đồ thị hiện tại; DAU_TIENG nằm ngay tại nút hồ Dầu
+    Tiếng) không có cạnh `down` đi vào trạm. Nếu trạm trùng nút biển (VUNG_TAU) thì không có
+    cạnh biển.
+    """
+    if graph.edge_attr.shape[1] != len(EDGE_ATTR_NAMES):
+        raise ValueError(f"edge_attr phải có {len(EDGE_ATTR_NAMES)} cột {EDGE_ATTR_NAMES}")
+    col = {k: i for i, k in enumerate(EDGE_ATTR_NAMES)}
+    st = int(graph.station_node[station])
+    sea = int(graph.node_index[sea_id]) if sea_id in graph.node_index else -1
+    ei = np.asarray(graph.edge_index)
+    ed = np.asarray(graph.edge_dir)
+    up_out: dict[int, list[tuple[int, int]]] = {}
+    down_of: dict[tuple[int, int], int] = {}
+    for e in range(ei.shape[1]):
+        s_, d_ = int(ei[0, e]), int(ei[1, e])
+        if ed[e] == 1:
+            up_out.setdefault(s_, []).append((d_, e))
+        else:
+            down_of.setdefault((s_, d_), e)
+
+    def bfs_up(start: int) -> dict[int, tuple[int, int]]:
+        """BFS theo cạnh `up` (hạ nguồn → thượng nguồn); trả về nút → (nút trước, cạnh)."""
+        prev: dict[int, tuple[int, int]] = {}
+        seen = {start}
+        queue = [start]
+        head = 0
+        while head < len(queue):
+            cur = queue[head]
+            head += 1
+            for nxt, e in up_out.get(cur, ()):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    prev[nxt] = (cur, e)
+                    queue.append(nxt)
+        return prev
+
+    def path_edges(prev: dict[int, tuple[int, int]], target: int) -> list[int]:
+        out: list[int] = []
+        cur = target
+        while cur in prev:
+            p_, e = prev[cur]
+            out.append(e)
+            cur = p_
+        return out[::-1]
+
+    def contracted(path_up: list[int], direction: int) -> tuple[float, np.ndarray] | None:
+        """τ tổng và đặc trưng của cạnh rút gọn trên đường `path_up` (danh sách cạnh `up`)."""
+        if direction == 1:
+            comp = list(path_up)
+        else:
+            comp = [down_of[(int(ei[1, e]), int(ei[0, e]))] for e in path_up
+                    if (int(ei[1, e]), int(ei[0, e])) in down_of]
+        if not comp:
+            return None
+        comp_arr = np.asarray(comp, dtype=np.int64)
+        tau = float(np.sum(graph.tau_phys[comp_arr]))
+        tau = max(tau, 1e-3)
+        ea = graph.edge_attr[comp_arr]
+        attr = np.zeros(len(EDGE_ATTR_NAMES), dtype=np.float32)
+        attr[col["is_down"]] = 1.0 if direction == 0 else 0.0
+        attr[col["is_up"]] = 1.0 if direction == 1 else 0.0
+        attr[col["length_km"]] = float(ea[:, col["length_km"]].sum())
+        attr[col["log_celerity"]] = float(ea[:, col["log_celerity"]].mean())
+        attr[col["slope_used"]] = float(ea[:, col["slope_used"]].mean())
+        attr[col["log_tau"]] = float(np.log(tau))
+        return tau, attr
+
+    nodes: list[int] = [st]
+    edges: list[tuple[int, int, int, float, np.ndarray]] = []   # (src, dst, dir, τ, attr)
+
+    # --- biển → trạm ---------------------------------------------------------
+    if sea >= 0 and sea != st:
+        prev_sea = bfs_up(sea)
+        if st in prev_sea:
+            pe = path_edges(prev_sea, st)
+            nodes.append(sea)
+            up = contracted(pe, 1)
+            dn = contracted(pe, 0)
+            if up is not None:
+                edges.append((sea, st, 1, up[0], up[1]))
+            if dn is not None:
+                edges.append((st, sea, 0, dn[0], dn[1]))
+
+    # --- hồ chứa ở thượng nguồn → trạm ------------------------------------------
+    is_res = _is_reservoir_mask(graph)
+    prev_st = bfs_up(st)
+    reservoirs = sorted(n for n in prev_st if is_res[n] and n != st)
+    for r in reservoirs:
+        pe = path_edges(prev_st, r)                  # cạnh `up` trạm → … → hồ
+        dn = contracted(pe, 0)
+        up = contracted(pe, 1)
+        if dn is None and up is None:
+            continue
+        nodes.append(r)
+        if dn is not None:
+            edges.append((r, st, 0, dn[0], dn[1]))
+        if up is not None:
+            edges.append((st, r, 1, up[0], up[1]))
+
+    local = {g: i for i, g in enumerate(nodes)}
+    node_ids = [graph.node_ids[g] for g in nodes]
+    if edges:
+        edge_index = np.asarray([[local[a] for a, *_ in edges], [local[b] for _, b, *_ in edges]],
+                                dtype=np.int64)
+        edge_dir = np.asarray([d for _, _, d, _, _ in edges], dtype=np.int64)
+        tau = np.asarray([t for *_, t, _ in edges], dtype=np.float32)
+        eattr = np.stack([a for *_, a in edges]).astype(np.float32)
+    else:
+        edge_index = np.zeros((2, 0), dtype=np.int64)
+        edge_dir = np.zeros(0, dtype=np.int64)
+        tau = np.zeros(0, dtype=np.float32)
+        eattr = np.zeros((0, len(EDGE_ATTR_NAMES)), dtype=np.float32)
+    return StationSubgraph(
+        node_ids=node_ids,
+        node_index={v: i for i, v in enumerate(node_ids)},
+        edge_index=edge_index,
+        edge_dir=edge_dir,
+        tau_phys=tau,
+        edge_attr=eattr,
+        static=graph.static_attr[nodes].astype(np.float32),
+        station_node=0,
+        sea_node=local.get(sea, 0) if sea >= 0 else 0,
+        version=3,
+        reservoir_nodes=tuple(local[r] for r in nodes if is_res[r] and r != st),
     )
 
 
@@ -288,9 +453,14 @@ def prepare_sample(sample: WindowSample, sub: StationSubgraph, cfg: ModelConfig,
     node_seq[st, :, 2:4] = hourly_t
     node_seq[st, :, 4:n_feat] = rest_grid
 
-    # node biển: đặc trưng triều thiên văn (nếu có trong mẫu) — dùng `astro_h1/astro_h2`
-    # (cột 12, 13 của DYNAMIC_FEATURES) và giờ tương ứng (14, 15).
-    if n_feat >= 16:
+    if int(getattr(sub, "version", 1)) >= 3:
+        _place_v3_features(node_seq, feat, sub, grid_hours, day_index, n_feat)
+    # node biển (v1/v2, giữ nguyên để checkpoint cũ không đổi): dùng cột 12:14 làm độ cao và
+    # 14:16 làm giờ. **Sai lệch (phát hiện 25/11/2026):** với 18 cột `DYNAMIC_FEATURES` hiện
+    # tại, 12:14 là `res_turbine_m3s`, `rain_mm` và 14:16 là `astro_h1/2` (không phải giờ);
+    # nếu trạm trùng nút biển (VUNG_TAU) còn ghi đè quan trắc của trạm. v3 sửa
+    # (`_place_v3_features`).
+    elif n_feat >= 16:
         astro_h = feat[:, 12:14]
         astro_t = feat[:, 14:16]
         a_hourly = interpolate_to_grid(astro_h, astro_t, grid_hours)
@@ -314,6 +484,33 @@ def prepare_sample(sample: WindowSample, sub: StationSubgraph, cfg: ModelConfig,
         peak_target_scaled=sample.targets_scaled,
         peak_height_target_scaled=sample.peak_heights_scaled,
     )
+
+
+def _place_v3_features(node_seq: np.ndarray, feat: np.ndarray, sub, grid_hours: np.ndarray,
+                       day_index: np.ndarray, n_feat: int) -> None:
+    """Đặt đặc trưng động cho nút biển và nút hồ chứa (đồ thị con v3), theo **tên** cột.
+
+    * nút biển (nếu khác nút trạm): `astro_h1/2` → kênh độ cao 0:2, `astro_t1/2_h` → kênh
+      giờ 2:4 (nội suy lên lưới Δ như quan trắc của trạm);
+    * nút hồ chứa: `res_inflow/spill/turbine_m3s` ở đúng vị trí cột của chúng (cùng bố cục
+      với nút trạm). **Giới hạn:** G5 chỉ có **tổng** các hồ theo ngày, nên mọi nút hồ nhận
+      cùng chuỗi; khác nhau ở τ và đặc trưng tĩnh của cạnh/nút.
+    """
+    from .data import DYNAMIC_FEATURES  # noqa: PLC0415
+
+    if n_feat != len(DYNAMIC_FEATURES):
+        return
+    ix = {k: i for i, k in enumerate(DYNAMIC_FEATURES)}
+    sea, st = int(sub.sea_node), int(sub.station_node)
+    if sea != st and len(sub.node_ids) > 1:
+        a_h = feat[:, [ix["astro_h1"], ix["astro_h2"]]]
+        a_t = feat[:, [ix["astro_t1_h"], ix["astro_t2_h"]]]
+        node_seq[sea, :, 0:2] = interpolate_to_grid(a_h, a_t, grid_hours)
+        node_seq[sea, :, 2:4] = interpolate_to_grid(a_t, a_t, grid_hours)
+    res_cols = [ix["res_inflow_m3s"], ix["res_spill_m3s"], ix["res_turbine_m3s"]]
+    for r in getattr(sub, "reservoir_nodes", ()):
+        for c in res_cols:
+            node_seq[int(r), :, c] = feat[day_index, c]
 
 
 # ---------------------------------------------------------------------------
@@ -355,8 +552,13 @@ class TrainConfig:
     #: mới); 1 = hành vi cũ (thiếu cạnh `down`) — checkpoint cũ không có trường này được
     #: nạp với 1 (`forecast.load_checkpoint`).
     subgraph_version: int = SUBGRAPH_VERSION
+    #: Cách τ tác động lên thông điệp (`layers.PhaseMessage`): "phase" (mặc định lượt mới,
+    #: thêm 25/11/2026) hoặc "grid" (hành vi cũ). Checkpoint cũ ⇒ "grid".
+    tau_mode: str = "phase"
     aux_weight: float = 0.3
     device: str = "cpu"
+    #: Chế độ tất định của torch (`device.set_deterministic`, cờ ``--deterministic``).
+    deterministic: bool = False
     #: So luong CPU cho torch. Mac dinh 1: khoi luong nho (do thi con) bi da luong
     #: lam chay cham hon ~20 lan (do lai 24/11/2026).
     num_threads: int = 1
@@ -402,10 +604,40 @@ def _make_model_cfg(tcfg: TrainConfig) -> ModelConfig:
         learn_tau=v["learn_tau"],
         directions=v["directions"],
         model_kind=v["model_kind"],
+        tau_mode=tcfg.tau_mode,
     )
 
 
 SUBSAMPLE_MODES = ("head", "spread")
+
+
+def trial_config(args, params: dict, holdout_stations: Sequence[str] = ()) -> TrainConfig:
+    """Cấu hình một lần thử Optuna: siêu tham số từ `params`, **mọi** cờ còn lại lấy đúng từ CLI.
+
+    Trước đây lần thử bỏ qua ``tau_mode``/``subgraph_version``/``subsample``/``holdout_stations``/``num_threads``
+    ⇒ dùng mặc định của `TrainConfig` (khác lượt cuối) và (với ``holdout``) val chứa trạm giữ riêng.
+    """
+    return TrainConfig(
+        variant=args.variant, epochs=args.epochs,
+        batch_size=int(params.get("batch_size", args.batch_size)),
+        lr=float(params.get("lr", args.lr)),
+        weight_decay=float(params.get("weight_decay", 1e-4)),
+        seed=args.seed, t_in=args.t_in, t_out=args.t_out,
+        hidden_dim=int(params.get("hidden_dim", args.hidden_dim)),
+        num_gnn_layers=int(params.get("num_gnn_layers", args.num_gnn_layers)),
+        delta_h=args.delta_h, patience=args.patience,
+        lam1=float(params.get("lam1", 1.0)), lam2=float(params.get("lam2", 0.5)),
+        lam3=float(params.get("lam3", 0.1)), lam4=float(params.get("lam4", 0.1)),
+        max_train_samples=args.max_train_samples,
+        max_val_samples=args.max_val_samples,
+        subsample=args.subsample,
+        holdout_stations=tuple(holdout_stations or ()),
+        subgraph_version=int(args.subgraph_version),
+        tau_mode=args.tau_mode,
+        num_threads=args.num_threads,
+        device=args.device, deterministic=bool(args.deterministic),
+        use_mlflow=False, register_to_db=False,
+    )
 
 
 def select_samples(samples: Sequence[WindowSample], max_n: int | None = None,
@@ -438,6 +670,7 @@ def train_model(datasets: dict[str, SampleSet], graph: GraphData, tcfg: TrainCon
     configure_threads(tcfg.num_threads)
     cfg = _make_model_cfg(tcfg)
     device = torch.device(tcfg.device)
+    log(f"[{tcfg.variant}] thiết bị: {device}; tất định: {tcfg.deterministic}")
 
     train_set = datasets["train"]
     val_set = datasets.get("val")
@@ -625,7 +858,8 @@ def _loss_for_batch(model, tensors: Sequence[tuple], cfg: ModelConfig,
     for (_sub, node_seq, static, ei, ea, ed, tau, st_idx,
          tgt, tgt_h, ph, ph_t, w, tgt_s, ph_s) in tensors:
         out = model.forward_batch(node_seq, static, ei, ea, ed, tau,
-                                  target_nodes=torch.as_tensor([st_idx], dtype=torch.long))
+                                  target_nodes=torch.as_tensor([st_idx], dtype=torch.long,
+                                                               device=device))
         b = node_seq.shape[0]
         # đầu ra [B, T, 2, Q]: lấy node trạm
         peak = out.peak_height[:, 0]           # [B, T, 2, Q]
@@ -813,7 +1047,7 @@ def evaluate(model, samples: Sequence[WindowSample], subgraphs, cfg: ModelConfig
                                            dtype=torch.float32, device=device)
                 out = model.forward_batch(
                     node_seq, static, ei, ea, ed, tau,
-                    target_nodes=torch.as_tensor([st_idx], dtype=torch.long))
+                    target_nodes=torch.as_tensor([st_idx], dtype=torch.long, device=device))
                 peak = out.peak_height[:, 0]
                 hours = out.peak_hour[:, 0]
                 p_peak, p_hours, p_pd, p_hd = _select_daily(peak, hours, tcfg.t_out,
@@ -916,8 +1150,12 @@ def main(argv: list[str] | None = None) -> int:
                          "spread (cách đều trên mọi trạm/ngày)")
     ap.add_argument("--subgraph-version", type=int, default=SUBGRAPH_VERSION,
                     choices=list(SUBGRAPH_VERSIONS),
-                    help="cách dựng đồ thị con: 2 = có cạnh down (mặc định), 1 = hành vi cũ "
-                         "trước 25/11/2026 (thiếu cạnh down) để tái tạo số cũ")
+                    help="cách dựng đồ thị con: 2 = đường biển → trạm có cạnh down (mặc định, "
+                         "cùng --tau-mode phase), 3 = rút gọn đường đi biển/hồ chứa → trạm, "
+                         "1 = hành vi cũ trước 25/11/2026 (thiếu cạnh down) để tái tạo số cũ")
+    ap.add_argument("--tau-mode", default="phase", choices=["grid", "phase"],
+                    help="τ tác động lên thông điệp: phase = dịch lưới + nhúng pha liên tục "
+                         "(mặc định), grid = chỉ dịch trên lưới Δ (hành vi cũ)")
     ap.add_argument("--holdout-stations", default="",
                     help="trạm giữ riêng, cách nhau dấu phẩy (bỏ khỏi train/val; E5)")
     ap.add_argument("--out-dir", default=None, help="thư mục ghi checkpoint và log")
@@ -940,7 +1178,20 @@ def main(argv: list[str] | None = None) -> int:
                     help="số lần thử Optuna (0 = không tìm siêu tham số)")
     ap.add_argument("--optuna-time-budget", type=float, default=1800.0,
                     help="ngân sách thời gian Optuna (giây)")
+    ap.add_argument("--device", default="cpu", type=parse_device_spec,
+                    help="auto|cpu|cuda|cuda:N (mặc định cpu — tái lập số thực nghiệm cũ; "
+                         "auto = cuda nếu có)")
+    ap.add_argument("--deterministic", action="store_true",
+                    help="bật thuật toán tất định của torch/cuDNN (chậm hơn; tái lập trên GPU)")
     args = ap.parse_args(argv)
+    try:
+        args.device = resolve_device(args.device)
+    except DeviceUnavailable as e:
+        ap.error(str(e))
+    if args.deterministic:
+        set_deterministic(True)
+    dev_info = device_info(args.device)
+    print(f"[train] thiết bị: {dev_info}", flush=True)
     if args.model_version is not None and args.model_version < 1:
         ap.error("--model-version phải ≥ 1")
     # Chỉ ghi `models` khi được yêu cầu rõ (chạy thực nghiệm mặc định không đụng DB).
@@ -969,21 +1220,7 @@ def main(argv: list[str] | None = None) -> int:
     search_info: dict = {}
     if args.optuna_trials and args.optuna_trials > 0:
         def _objective(params: dict) -> float:
-            cfg_trial = TrainConfig(
-                variant=args.variant, epochs=args.epochs,
-                batch_size=int(params.get("batch_size", args.batch_size)),
-                lr=float(params.get("lr", args.lr)),
-                weight_decay=float(params.get("weight_decay", 1e-4)),
-                seed=args.seed, t_in=args.t_in, t_out=args.t_out,
-                hidden_dim=int(params.get("hidden_dim", args.hidden_dim)),
-                num_gnn_layers=int(params.get("num_gnn_layers", args.num_gnn_layers)),
-                delta_h=args.delta_h, patience=args.patience,
-                lam1=float(params.get("lam1", 1.0)), lam2=float(params.get("lam2", 0.5)),
-                lam3=float(params.get("lam3", 0.1)), lam4=float(params.get("lam4", 0.1)),
-                max_train_samples=args.max_train_samples,
-                max_val_samples=args.max_val_samples,
-                use_mlflow=False, register_to_db=False,
-            )
+            cfg_trial = trial_config(args, params, holdout)
             _, res = train_model(datasets, graph, cfg_trial)
             return float(res.best_val_mae)
 
@@ -1008,12 +1245,15 @@ def main(argv: list[str] | None = None) -> int:
         subsample=args.subsample,
         holdout_stations=holdout,
         subgraph_version=args.subgraph_version,
+        tau_mode=args.tau_mode,
         num_threads=args.num_threads,
+        device=args.device, deterministic=bool(args.deterministic),
         use_mlflow=not args.no_mlflow,
         register_to_db=register_db,
         mlflow_experiment="phasegnn",
     )
     model, result = train_model(datasets, graph, tcfg)
+    result.config["device_info"] = dev_info  # thiết bị thực dùng → train_log
     result.data_snapshot = meta.get("data_snapshot", {})
 
     out_dir = Path(args.out_dir) if args.out_dir else Path("results") / "E2" / args.variant
@@ -1076,7 +1316,7 @@ def main(argv: list[str] | None = None) -> int:
                  "best_epoch": result.best_epoch},
         data_snapshot=result.data_snapshot,
         artifact_path=_portable_path(ckpt_path),
-        train_config=tcfg.__dict__.copy(),
+        train_config=tcfg.__dict__.copy() | {"device_info": dev_info},
         seed=args.seed,
     )
     if tcfg.register_to_db:

@@ -56,9 +56,10 @@ def test_v1_giu_hanh_vi_cu_khong_co_canh_down():
     assert _pairs(sub, 0) == set()
 
 
-def test_mac_dinh_la_v2_va_tau_khop_canh():
+def test_v2_tau_khop_canh():
     g = _chain_graph()
-    sub = T.build_station_subgraph(g, "ST")
+    sub = T.build_station_subgraph(g, "ST", version=2)
+    # mặc định lượt mới là v2 (+ tau_mode phase) theo ablation 25/11/2026
     assert T.SUBGRAPH_VERSION == 2 and T.TrainConfig().subgraph_version == 2
     assert len(_pairs(sub, 0)) == 3
     # τ_phys của đồ thị con lấy đúng từ cạnh tương ứng trong đồ thị toàn cục

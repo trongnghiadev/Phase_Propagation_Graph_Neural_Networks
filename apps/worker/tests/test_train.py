@@ -13,6 +13,7 @@ from worker.scheduler import Scheduler
 from worker.train import build_command, run_training
 
 NOW = datetime(2026, 11, 25, tzinfo=timezone.utc)
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _seed(db, ver: int = 3, **extra) -> str:
@@ -50,10 +51,12 @@ class FakeTrainer:
 
 def _handler(root: Path, trainer, available=lambda: (True, "")):
     def train(db, cache=None, *, model_version=None, epochs=50, learning_rate=1e-3, station=None, basin=None,
-              guard=None, job_id=None):
+              guard=None, job_id=None, max_train_samples=None, max_val_samples=None, subsample="spread"):
         return run_training(db, root=root, model_version=model_version, epochs=epochs,
                             learning_rate=learning_rate, station=station, basin=basin, guard=guard,
-                            job_id=job_id, runner=trainer, available=available, heartbeat_s=0.01)
+                            job_id=job_id, runner=trainer, available=available, heartbeat_s=0.01,
+                            max_train_samples=max_train_samples, max_val_samples=max_val_samples,
+                            subsample=subsample)
     return train
 
 
@@ -75,7 +78,8 @@ def test_train_thanh_cong_cap_nhat_models(sched, fake_db, tmp_path):
     assert out["state"] == "succeeded", out
     m = fake_db["models"].find_one({"_id": mid})
     assert m["train_state"] == "succeeded" and m["status"] == "staging", "promote là thao tác riêng"
-    assert m["checkpoint_path"] == "results/models/phasegnn-3/checkpoint_seed0.pt"
+    att = f"results/models/phasegnn-3/attempt-{out['fence']}"
+    assert m["checkpoint_path"] == f"{att}/checkpoint_seed0.pt", "mỗi lượt (fence) một thư mục riêng"
     assert m["metrics"] == {"val_mae_peak": 0.21, "val_mae_hour": None, "best_epoch": 1}
     assert m["train_fence"] == out["fence"] and m["train_job_id"] == "train:3" and m.get("train_heartbeat")
     job = fake_db["jobs"].find_one({"_id": "train:3"})
@@ -85,7 +89,8 @@ def test_train_thanh_cong_cap_nhat_models(sched, fake_db, tmp_path):
     assert cmd[cmd.index("--epochs") + 1] == "2" and float(cmd[cmd.index("--lr") + 1]) == 0.01
     assert cmd[cmd.index("--model-version") + 1] == "3"
     assert cmd[cmd.index("--train-fence") + 1] == str(out["fence"])
-    assert cmd[cmd.index("--out-dir") + 1] == "results/models/phasegnn-3"
+    assert cmd[cmd.index("--out-dir") + 1] == att
+    assert "--max-train-samples" not in cmd and "--subsample" not in cmd, "không giới hạn mẫu → không truyền cờ"
     assert tr.calls[0]["env"].get("MONGO_DB") == fake_db.name, "tiến trình con dùng đúng DB của worker"
     # chạy lại việc đã xong → bỏ qua (idempotent)
     out2 = run_training(fake_db, root=tmp_path, model_version=3, runner=tr, available=lambda: (True, ""))
@@ -304,3 +309,149 @@ def test_abandon_khong_dung_luot_giao_lai_moi(fake_db):
     fake_db["models"].insert_one({"_id": "phasegnn-3", "version": 3, "train_state": "queued", "job_id": "train:3:2"})
     assert abandon_training(fake_db, {"_id": "train:3", "model_version": 3}, "x") is False
     assert fake_db["models"].find_one({"_id": "phasegnn-3"})["train_state"] == "queued"
+
+
+# ---------------------------------------------------------------- giới hạn mẫu ---
+def test_build_command_gioi_han_mau():
+    cmd = build_command(model_version=4, epochs=3, learning_rate=0.001, out_dir="results/models/phasegnn-4/attempt-2",
+                        fence=2, max_train_samples=2000, max_val_samples=400, subsample="spread")
+    assert cmd[cmd.index("--max-train-samples") + 1] == "2000"
+    assert cmd[cmd.index("--max-val-samples") + 1] == "400"
+    assert cmd[cmd.index("--subsample") + 1] == "spread"
+    only_val = build_command(model_version=4, epochs=3, learning_rate=0.001, out_dir="x", fence=None,
+                             max_val_samples=100, subsample="head")
+    assert "--max-train-samples" not in only_val and only_val[only_val.index("--subsample") + 1] == "head"
+    with pytest.raises(ValueError):
+        build_command(model_version=4, epochs=3, learning_rate=0.001, out_dir="x", fence=None,
+                      max_train_samples=100, subsample="all; rm -rf")
+
+
+def test_co_tren_cli_cua_phasegnn_train():
+    """Tên cờ khớp argparse của `phasegnn.train` (đọc mã nguồn, không import torch)."""
+    src = REPO_ROOT / "packages" / "phasegnn" / "src" / "phasegnn" / "train.py"
+    if not src.is_file():
+        pytest.skip("không có mã nguồn phasegnn")
+    text = src.read_text(encoding="utf-8")
+    for flag in ("--max-train-samples", "--max-val-samples", "--subsample", "--train-fence", "--model-version",
+                 "--out-dir", "--epochs", "--lr", "--no-mlflow"):
+        assert f'"{flag}"' in text, flag
+    assert 'SUBSAMPLE_MODES = ("head", "spread")' in text
+
+
+def test_train_truyen_gioi_han_mau_tu_hang_doi(sched, fake_db, tmp_path):
+    mid = _seed(fake_db)
+    fake_db["jobs"].update_one({"_id": "train:3"}, {"$set": {"params": {
+        "model_version": 3, "epochs": 2, "max_train_samples": 500, "max_val_samples": 100}}})
+    tr = FakeTrainer(tmp_path)
+    out = _run(sched, fake_db, tmp_path, tr)
+    assert out["state"] == "succeeded", out
+    cmd = tr.calls[0]["cmd"]
+    assert cmd[cmd.index("--max-train-samples") + 1] == "500"
+    assert cmd[cmd.index("--max-val-samples") + 1] == "100"
+    assert cmd[cmd.index("--subsample") + 1] == "spread", "mặc định spread"
+    m = fake_db["models"].find_one({"_id": mid})
+    assert m["train_params"]["max_train_samples"] == 500 and m["train_params"]["subsample"] == "spread"
+    job = fake_db["jobs"].find_one({"_id": "train:3"})
+    assert job["result"]["estimate"]["train_samples"] == 500 and job["result"]["estimate"]["verdict"] == "ok"
+
+
+def test_tham_so_mau_ngoai_mien_bi_tu_choi(sched, fake_db, tmp_path):
+    _seed(fake_db)
+    fake_db["jobs"].update_one({"_id": "train:3"}, {"$set": {"params": {"model_version": 3,
+                                                                         "max_train_samples": 5}}})
+    tr = FakeTrainer(tmp_path)
+    out = _run(sched, fake_db, tmp_path, tr)
+    assert out["state"] == "failed" and out["reason"] == "invalid_params" and tr.calls == []
+
+
+# ---------------------------------------------------------------- thư mục theo lượt ---
+def test_luot_thang_don_thu_muc_luot_cu(sched, fake_db, tmp_path):
+    """Lượt cũ (fence nhỏ) còn để lại checkpoint (tiến trình mồ côi) → lượt thắng ghi thư mục riêng,
+    `checkpoint_path` trỏ vào thư mục của nó, rồi xoá `attempt-<k>` cũ; thư mục khác không bị đụng."""
+    mid = _seed(fake_db)
+    base = tmp_path / "results" / "models" / mid
+    old = base / "attempt-0"
+    old.mkdir(parents=True)
+    (old / "checkpoint_seed0.pt").write_bytes(b"orphan")
+    keep = base / "notes"
+    keep.mkdir()
+    out = _run(sched, fake_db, tmp_path, FakeTrainer(tmp_path))
+    assert out["state"] == "succeeded" and out["fence"] >= 1
+    m = fake_db["models"].find_one({"_id": mid})
+    own = base / f"attempt-{out['fence']}"
+    assert m["checkpoint_path"] == f"results/models/{mid}/attempt-{out['fence']}/checkpoint_seed0.pt"
+    assert (own / "checkpoint_seed0.pt").read_bytes() == b"fake"
+    assert not old.exists() and keep.exists()
+    assert fake_db["jobs"].find_one({"_id": "train:3"})["result"]["removed_attempts"] == ["attempt-0"]
+
+
+def test_tien_trinh_mo_coi_khong_ghi_de_luot_moi(sched, fake_db, tmp_path):
+    """Lượt 1 mất khoá (tiến trình con coi như mồ côi, vẫn ghi vào thư mục của nó) → lượt 2 thắng; tệp lượt 1
+    ghi sau đó không đụng checkpoint của lượt 2."""
+    from vngis.locks import LockLost
+
+    mid = _seed(fake_db)
+    out1 = _run(sched, fake_db, tmp_path, FakeTrainer(tmp_path, raise_exc=LockLost("mất khoá")))
+    assert out1["state"] == "lost"
+    out2 = _run(sched, fake_db, tmp_path, FakeTrainer(tmp_path))
+    assert out2["state"] == "succeeded" and out2["fence"] > out1["fence"]
+    # tiến trình mồ côi của lượt 1 ghi muộn
+    orphan = tmp_path / "results" / "models" / mid / f"attempt-{out1['fence']}"
+    orphan.mkdir(parents=True, exist_ok=True)
+    (orphan / "checkpoint_seed0.pt").write_bytes(b"orphan")
+    m = fake_db["models"].find_one({"_id": mid})
+    assert (tmp_path / m["checkpoint_path"]).read_bytes() == b"fake"
+    assert f"attempt-{out2['fence']}" in m["checkpoint_path"]
+
+
+def test_luot_thua_xoa_thu_muc_cua_minh(fake_db, tmp_path):
+    """Ghi kết quả bị fence từ chối (lượt mới hơn đã chiếm) → không đổi `checkpoint_path`, xoá thư mục mình."""
+    mid = _seed(fake_db)
+
+    class G:
+        fence, lost = 5, False
+
+        def check(self):
+            pass
+
+    class Overtaken(FakeTrainer):
+        def __call__(self, cmd, **kw):
+            res = super().__call__(cmd, **kw)
+            fake_db["models"].update_one({"_id": mid}, {"$set": {"train_fence": 9}})
+            return res
+
+    tr = Overtaken(tmp_path)
+    with pytest.raises(RuntimeError, match="fence"):
+        run_training(fake_db, root=tmp_path, model_version=3, guard=G(), runner=tr, available=lambda: (True, ""))
+    assert not (tmp_path / "results" / "models" / mid / "attempt-5").exists()
+    assert fake_db["models"].find_one({"_id": mid}).get("checkpoint_path") is None
+
+
+def test_kill_children_dung_tien_trinh_con(tmp_path):
+    """`kill_children` (atexit/tín hiệu) dừng tiến trình con đang chạy trong nhóm riêng."""
+    import threading
+
+    from worker import jobs
+
+    res: dict = {}
+
+    def run():
+        try:
+            res["p"] = jobs._run_proc([sys.executable, "-c", "import time; time.sleep(60)"], cwd=tmp_path,
+                                      env=None, timeout_s=120)
+        except Exception as e:  # noqa: BLE001 - dừng do worker thoát ⇒ WorkerShutdown (không trả mã -9)
+            res["exc"] = e
+
+    t = threading.Thread(target=run)
+    t0 = datetime.now()
+    t.start()
+    for _ in range(100):
+        if jobs._LIVE_PROCS:
+            break
+        threading.Event().wait(0.05)
+    assert jobs.kill_children() == 1
+    t.join(20)
+    from worker.scheduler import WorkerShutdown
+
+    assert not t.is_alive() and isinstance(res.get("exc"), WorkerShutdown), res
+    assert (datetime.now() - t0).total_seconds() < 20 and not jobs._LIVE_PROCS

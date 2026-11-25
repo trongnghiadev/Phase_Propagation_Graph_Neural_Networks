@@ -22,7 +22,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 __all__ = ["JobParamsError", "JOB_PARAM_MODELS", "JOB_TYPES", "INTERNAL_PARAMS",
-           "WARMABLE_COLLECTIONS", "validate_job_params", "parse_model_version"]
+           "WARMABLE_COLLECTIONS", "validate_job_params", "parse_model_version", "TRAIN_SAMPLE_PARAMS",
+           "estimate_train_seconds", "train_timeout_s", "effective_train_device", "train_sec_per_sample",
+           "MAX_TRAIN_EPOCHS"]
 
 #: Tham số do hệ thống truyền (không được nhận từ `params` của hàng đợi).
 INTERNAL_PARAMS = frozenset({"db", "cache", "guard", "actor", "documents", "repo_root", "source_dir",
@@ -65,6 +67,85 @@ class ForecastRunParams(_Params):
         return v
 
 
+#: Trần số epoch của việc ``train`` (dừng sớm `patience` của `phasegnn.train` thường dừng trước đó).
+MAX_TRAIN_EPOCHS = 500
+#: Các khoá giới hạn mẫu của `TrainParams` (API giữ lại trong ``hyperparams`` để giao lại cùng cấu hình).
+TRAIN_SAMPLE_PARAMS = ("max_train_samples", "max_val_samples", "subsample")
+#: Ước lượng thô (đo trên CPU của bài thử end-to-end): toàn bộ ≈ 19,6 nghìn mẫu train ≈ 25 phút/epoch.
+FULL_TRAIN_SAMPLES = 19_600
+FULL_VAL_SAMPLES = 4_200
+#: Giây cho một mẫu train trong một epoch (val chỉ suy luận ≈ 1/3); ghi đè bằng ``PGNN_TRAIN_SEC_PER_SAMPLE``.
+TRAIN_SEC_PER_SAMPLE = 1500.0 / (FULL_TRAIN_SAMPLES + FULL_VAL_SAMPLES / 3)
+#: `patience` mặc định của `phasegnn.train` ⇒ chạy ít nhất ``min(epochs, patience + 1)`` epoch.
+TRAIN_PATIENCE = 10
+#: Thời gian tối đa của tiến trình huấn luyện (khớp ``TRAIN_TIMEOUT_S`` của worker, mặc định 6 h).
+DEFAULT_TRAIN_TIMEOUT_S = 6 * 3600
+
+
+def train_timeout_s() -> int:
+    """``TRAIN_TIMEOUT_S`` (giây) — API và worker cùng đọc một biến."""
+    import os
+
+    try:
+        return max(60, int(os.getenv("TRAIN_TIMEOUT_S", str(DEFAULT_TRAIN_TIMEOUT_S))))
+    except ValueError:
+        return DEFAULT_TRAIN_TIMEOUT_S
+
+
+def estimate_train_seconds(params: dict, *, timeout_s: int | None = None) -> dict:
+    """Ước lượng thời gian huấn luyện từ tham số đã kiểm tra (chỉ là ước lượng thô, phụ thuộc máy).
+
+    Trả ``{per_epoch_s, min_s, max_s, timeout_s, verdict}``: ``min_s`` = ``min(epochs, patience+1)`` epoch
+    (dừng sớm sớm nhất), ``max_s`` = đủ ``epochs``. ``verdict``: ``exceeds`` (``min_s`` > timeout — chắc chắn
+    vượt), ``may_exceed`` (chỉ ``max_s`` vượt), ``ok``. Tốc độ theo ``device`` hiệu lực (`effective_train_device`:
+    tham số → ``PGNN_TRAIN_DEVICE`` → ``auto``): ``cuda`` dùng `train_sec_per_sample("cuda")` (≈ CPU/4 theo bench,
+    ghi đè ``PGNN_TRAIN_SEC_PER_SAMPLE_CUDA``); ``cpu``/``auto`` dùng tốc độ CPU.
+    """
+    n_tr = min(int(params.get("max_train_samples") or FULL_TRAIN_SAMPLES), FULL_TRAIN_SAMPLES)
+    n_va = min(int(params.get("max_val_samples") or FULL_VAL_SAMPLES), FULL_VAL_SAMPLES)
+    epochs = int(params.get("epochs") or 50)
+    device = effective_train_device(params.get("device"))
+    # ``auto``: không biết worker nhận việc có GPU hay không ⇒ ước lượng theo CPU (thận trọng, như trước khi có
+    # ``device``). Cụm chỉ có worker GPU: đặt ``PGNN_TRAIN_DEVICE=cuda`` cho cả API lẫn worker.
+    per_epoch = train_sec_per_sample("cuda" if device == "cuda" else "cpu") * (n_tr + n_va / 3)
+    lim = int(timeout_s if timeout_s is not None else train_timeout_s())
+    lo, hi = per_epoch * min(epochs, TRAIN_PATIENCE + 1), per_epoch * epochs
+    verdict = "exceeds" if lo > lim else ("may_exceed" if hi > lim else "ok")
+    return {"per_epoch_s": round(per_epoch, 1), "min_s": round(lo), "max_s": round(hi), "timeout_s": lim,
+            "train_samples": n_tr, "val_samples": n_va, "device": device, "verdict": verdict}
+
+
+#: Hệ số tăng tốc GPU so với CPU (bench ``--device cuda`` ≈ CPU/4); ghi đè bằng ``PGNN_TRAIN_SEC_PER_SAMPLE_CUDA``.
+CUDA_SPEEDUP = 4.0
+TRAIN_DEVICES = ("auto", "cpu", "cuda")
+
+
+def effective_train_device(device: Any = None) -> str:
+    """Thiết bị hiệu lực: tham số việc → ``PGNN_TRAIN_DEVICE`` → ``auto`` (giá trị lạ của biến môi trường → ``auto``)."""
+    import os
+
+    dev = str(device or os.getenv("PGNN_TRAIN_DEVICE") or "auto").strip().lower()
+    if dev.startswith("cuda:"):
+        dev = "cuda"
+    return dev if dev in TRAIN_DEVICES else "auto"
+
+
+def train_sec_per_sample(device: str = "cpu") -> float:
+    """Giây/mẫu/epoch: CPU ``PGNN_TRAIN_SEC_PER_SAMPLE``; CUDA ``PGNN_TRAIN_SEC_PER_SAMPLE_CUDA`` (mặc định CPU/4)."""
+    import os
+
+    try:
+        cpu = float(os.getenv("PGNN_TRAIN_SEC_PER_SAMPLE") or TRAIN_SEC_PER_SAMPLE)
+    except ValueError:
+        cpu = TRAIN_SEC_PER_SAMPLE
+    if device != "cuda":
+        return cpu
+    try:
+        return float(os.getenv("PGNN_TRAIN_SEC_PER_SAMPLE_CUDA") or cpu / CUDA_SPEEDUP)
+    except ValueError:
+        return cpu / CUDA_SPEEDUP
+
+
 class TrainParams(_Params):
     """Tham số huấn luyện (khớp `TrainRequest` của API).
 
@@ -72,10 +153,19 @@ class TrainParams(_Params):
     số mới nguyên tử khi người dùng bỏ trống.
     """
     model_version: int | None = None
-    epochs: int = Field(default=50, ge=1, le=2000)
+    epochs: int = Field(default=50, ge=1, le=MAX_TRAIN_EPOCHS)
     learning_rate: float = Field(default=1e-3, gt=0, le=1)
     station: str | None = Field(default=None, pattern=_CODE)
     basin: str | None = Field(default=None, pattern=_CODE)
+    #: Giới hạn số mẫu train/val (cờ ``--max-train-samples``/``--max-val-samples`` của `phasegnn.train`);
+    #: bỏ trống → toàn bộ (~19,6 nghìn mẫu train, ~25 phút/epoch trên CPU).
+    max_train_samples: int | None = Field(default=None, ge=100, le=50_000)
+    max_val_samples: int | None = Field(default=None, ge=50, le=50_000)
+    #: Cách chọn khi giới hạn mẫu (``--subsample``): ``spread`` lấy đều các trạm/thời gian, ``head`` lấy đầu.
+    subsample: Literal["spread", "head"] = "spread"
+    #: Thiết bị huấn luyện (cờ ``--device`` của `phasegnn.train`); bỏ trống → biến môi trường
+    #: ``PGNN_TRAIN_DEVICE`` của worker, không có thì ``auto`` (GPU nếu image/container có CUDA).
+    device: Literal["auto", "cpu", "cuda"] | None = None
 
     @field_validator("model_version", mode="before")
     @classmethod
