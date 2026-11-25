@@ -12,6 +12,8 @@ build/
 .env
 *.env
 !.env.example
+# Cấu hình dev cục bộ (Next.js tự tạo) — không commit
+*.local
 
 # Dữ liệu lớn / có hạn chế (chỉ commit README và manifest)
 data/raw/*
