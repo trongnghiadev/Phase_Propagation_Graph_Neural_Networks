@@ -30,7 +30,7 @@ import {
   type Column,
 } from "@/components/ui";
 import { api } from "@/lib/api";
-import { fmtNum, formatDateTime } from "@/lib/format";
+import { fmtNum, formatDateTime, hasStationLocation } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
 import type { Station } from "@/lib/types";
 
@@ -101,15 +101,16 @@ export default function PropagationPage() {
   const waves = useMemo<Wave[]>(() => {
     const out: Wave[] = [];
     const chain = STATION_ORDER.map((c) => byCode[c]).filter(
-      (s): s is Station => Boolean(s && s.location),
+      (s): s is Station => Boolean(s) && hasStationLocation(s.location),
     );
     // Sóng triều: từ trạm hạ lưu đi ngược lên thượng lưu (Vũng Tàu → các trạm trên).
     for (let i = chain.length - 1; i > 0; i -= 1) {
       const to = chain[i];
       const from = chain[i + 1];
+      if (!hasStationLocation(to.location) || !hasStationLocation(from.location)) continue;
       out.push({
-        from: [from.location![1], from.location![0]],
-        to: [to.location![1], to.location![0]],
+        from: [from.location[1], from.location[0]],
+        to: [to.location[1], to.location[0]],
         lagH: i * 3,
         label: `Triều: ${from.code} → ${to.code}`,
         kind: "tide",
@@ -118,18 +119,19 @@ export default function PropagationPage() {
     // Sóng xả hồ: từ các hồ chứa đi xuống hạ lưu.
     const reservoirs = ordered.filter(
       (s) =>
-        s.location &&
+        hasStationLocation(s.location) &&
         (s.kind ?? "").toLowerCase().includes("reservoir") &&
         ["DAUTIEN", "TRANAN", "THACMO"].includes(s.code.toUpperCase()),
     );
     reservoirs.forEach((res) => {
+      if (!hasStationLocation(res.location)) return;
       const idx = chain.findIndex((s) => s.code === res.code);
       const anchor = idx >= 0 ? chain[idx] : chain[chain.length - 1];
       const next = chain[chain.length - 1];
-      if (anchor && next && anchor.code !== next.code) {
+      if (anchor && next && anchor.code !== next.code && hasStationLocation(anchor.location)) {
         out.push({
-          from: [res.location![1], res.location![0]],
-          to: [anchor.location![1], anchor.location![0]],
+          from: [res.location[1], res.location[0]],
+          to: [anchor.location[1], anchor.location[0]],
           lagH: 6,
           label: `Xả hồ: ${res.code} → ${anchor.code}`,
           kind: "release",
@@ -192,9 +194,10 @@ export default function PropagationPage() {
   const stationPoints: MapPoint[] = useMemo(
     () =>
       ordered
-        .filter((s) => s.location)
+        .filter((s) => hasStationLocation(s.location))
         .map((s) => ({
           id: s.code,
+          // `hasStationLocation` đã lọc ở trên ⇒ `location` chắc chắn là `[lon, lat]`.
           lat: s.location![1],
           lon: s.location![0],
           color: s.code.toUpperCase() === selected.toUpperCase() ? "#c62828" : "#1b5e20",
@@ -221,9 +224,18 @@ export default function PropagationPage() {
       if (!geom || geom.type !== "LineString") return;
       const coords = geom.coordinates as Array<[number, number]>;
       if (!Array.isArray(coords) || coords.length < 2) return;
+      const points: Array<[number, number]> = [];
+      for (const c of coords) {
+        if (!Array.isArray(c) || c.length < 2) continue;
+        const lon = Number(c[0]);
+        const lat = Number(c[1]);
+        if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+        points.push([lat, lon]);
+      }
+      if (points.length < 2) return;
       out.push({
         id: `river-${i}`,
-        points: coords.map((c) => [c[1], c[0]] as [number, number]),
+        points,
         color: "#4fc3f7",
         weight: 2,
         opacity: 0.6,

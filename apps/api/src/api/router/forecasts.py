@@ -236,13 +236,24 @@ def _model_forecasts_latest(db, station: str | None, limit: int) -> dict | None:
         return None
     flt["run_date"] = last["run_date"]
     docs = list(db[MODEL_FORECASTS].find(flt).sort([("station", 1), ("lead_day", 1)]).limit(limit))
-    items = [{"station": d.get("station"), "run_date": d.get("run_date"), "lead_day": d.get("lead_day"),
-              "target_date": d.get("target_date"), "model": d.get("model"),
-              "model_version": d.get("model_version"), "h_max_q50": d.get("h_max_q50"),
-              "peaks": [{"peak_idx": p.get("peak_idx"), "h_q10": p.get("h_q10"), "h_q50": p.get("h_q50"),
-                         "h_q90": p.get("h_q90"), "t_peak": to_vn_datetime(p.get("t_peak"))}
-                        for p in d.get("peaks") or []],
-              "source": "phasegnn"} for d in docs]
+    items = []
+    for d in docs:
+        peaks = [{"peak_idx": p.get("peak_idx"), "h_q10": p.get("h_q10"), "h_q50": p.get("h_q50"),
+                  "h_q90": p.get("h_q90"), "t_peak": to_vn_datetime(p.get("t_peak"))}
+                 for p in d.get("peaks") or []]
+        # Đỉnh đầu tiên — dùng cho `peak_value`/`peak_ts` để payload hai nhánh (`forecasts` và
+        # `model_forecasts`) có cùng trường, giao diện đọc được mà không cần rẽ nhánh.
+        first = peaks[0] if peaks else {}
+        peak_value = first.get("h_q50")
+        if peak_value is None:
+            peak_value = d.get("h_max_q50")
+        peak_ts = first.get("t_peak")
+        items.append({"station": d.get("station"), "run_date": d.get("run_date"), "lead_day": d.get("lead_day"),
+                      "target_date": d.get("target_date"), "model": d.get("model"),
+                      "model_version": d.get("model_version"), "h_max_q50": d.get("h_max_q50"),
+                      "peaks": peaks,
+                      "peak_value": peak_value, "peak_ts": peak_ts,
+                      "source": "phasegnn"})
     return {"source": "model", "collection": MODEL_FORECASTS, "run_date": last["run_date"],
             "count": len(items), "items": items}
 

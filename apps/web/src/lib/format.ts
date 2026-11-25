@@ -142,6 +142,24 @@ export function truncate(s: string | null | undefined, max = 60): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
+/**
+ * Kiểm tra tọa độ trạm hợp lệ: mảng GeoJSON Point `[lon, lat]` có ít nhất 2 phần tử
+ * và hai phần tử đầu là số hữu hạn. Dùng để tránh `.toFixed` / `Number(...)` lỗi khi
+ * `location` rỗng, thiếu phần tử hoặc chứa giá trị không phải số.
+ */
+export function hasStationLocation(
+  location: readonly number[] | null | undefined,
+): location is [number, number] {
+  return (
+    Array.isArray(location) &&
+    location.length >= 2 &&
+    typeof location[0] === "number" &&
+    typeof location[1] === "number" &&
+    Number.isFinite(location[0]) &&
+    Number.isFinite(location[1])
+  );
+}
+
 /** Tên hiển thị của trạng job / QC / cảnh báo (tiếng Việt). */
 export function statusLabel(state: string | null | undefined): string {
   const map: Record<string, string> = {

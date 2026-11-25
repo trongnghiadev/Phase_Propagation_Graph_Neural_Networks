@@ -78,11 +78,17 @@ def _try_db():
         return None
 
 
-def build_alerts(records: Sequence[dict], thresholds: dict[str, float]) -> list[dict]:
+def build_alerts(records: Sequence[dict], thresholds: dict[str, float],
+                 model_name: str = "phasegnn-v1") -> list[dict]:
     """Tao canh bao bao dong tu du bao.
 
     `thresholds` la mapping `station -> nguong` (m). Ban ghi du bao co `h_q50` >= nguong
     se sinh mot canh bao.
+
+    **Moi canh bao co `alert_id` ON DINH** (chuoi, khong doi): ``model:station:target_date:lead_day:level``.
+    De do la khoa logic cua lenh ghi `alerts` trong `run_forecast_job` ⇒ chay lai job
+    cung cap nhat duoc cung mot ban ghi (khong sinh ban ghi trung) va API co the tra
+    `alert_id` (chuoi, serialize duoc) cho client.
     """
     out: list[dict] = []
     for r in records:
@@ -98,17 +104,33 @@ def build_alerts(records: Sequence[dict], thresholds: dict[str, float]) -> list[
         except (TypeError, ValueError):
             continue
         if h >= float(thr):
+            level = "I"
+            target_date = r.get("target_date")
+            lead_day = r.get("lead_day")
+            model = r.get("model") or model_name
             out.append({
+                "alert_id": alert_id_of(model=model, station=st, target_date=target_date,
+                                       lead_day=lead_day, level=level),
                 "station": st,
-                "target_date": r.get("target_date"),
+                "target_date": target_date,
                 "issued_date": r.get("issued_date"),
-                "lead_day": r.get("lead_day"),
-                "level": "I",
+                "lead_day": lead_day,
+                "level": level,
                 "predicted_h": h,
                 "threshold": float(thr),
-                "model": r.get("model"),
+                "model": model,
             })
     return out
+
+
+def alert_id_of(*, model: str, station: str, target_date: Any, lead_day: Any, level: str) -> str:
+    """``alert_id`` on dinh cho mot canh bao: ``model:station:target_date:lead_day:level``.
+
+    Chuoi nay KHOA DUNG khoa logic ghi `alerts` (`model_name`/`station`/`target_date`/
+    `lead_day`/`level`) ⇒ `alert_id` duy nhat cho moi canh bao va khong doi giữa
+    cac lan chay job.
+    """
+    return ":".join([str(model), str(station), str(target_date), str(lead_day), str(level)])
 
 
 def run_forecast_job(*, day: str, basin: str = "DONG_RAI", records: Sequence[dict],
@@ -127,7 +149,7 @@ def run_forecast_job(*, day: str, basin: str = "DONG_RAI", records: Sequence[dic
     res = ForecastJobResult(day=day, basin=basin, model_name=model_name,
                             n_forecasts=len(records))
     thresholds = thresholds or {}
-    alerts = build_alerts(records, thresholds)
+    alerts = build_alerts(records, thresholds, model_name=model_name)
     res.n_alerts = len(alerts)
 
     database = db if db is not None else _try_db()
@@ -175,6 +197,10 @@ def run_forecast_job(*, day: str, basin: str = "DONG_RAI", records: Sequence[dic
                 for al in alerts:
                     doc = dict(al)
                     doc["last_fence"] = res.fence
+                    # `alert_id` on dinh (chuoi) — API tra ve client va tra cuu theo no.
+                    doc["alert_id"] = al.get("alert_id") or alert_id_of(
+                        model=model_name, station=al["station"], target_date=al["target_date"],
+                        lead_day=al["lead_day"], level=al["level"])
                     key = {"model_name": model_name, "station": al["station"],
                            "target_date": al["target_date"], "lead_day": al["lead_day"],
                            "level": al["level"]}

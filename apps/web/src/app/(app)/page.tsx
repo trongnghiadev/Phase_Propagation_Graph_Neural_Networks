@@ -41,6 +41,39 @@ import type { AlertItem, Province, Station, TideStats } from "@/lib/types";
 
 const YEARS = [2026, 2025, 2024, 2023, 2022, 2021, 2020, 2019, 2018, 2017];
 
+/**
+ * Thời điểm đỉnh của một dòng dự báo.
+ *
+ * `GET /forecasts/latest` có hai nhánh: collection `forecasts` (chuẩn hoá: `peak_ts`) và
+ * collection `model_forecasts` (PhaseGNN: `peaks[].t_peak`). Nhánh `model_forecasts` nay đã
+ * có `peak_ts` do API bổ sung, nhưng vẫn fallback sang `peaks[0].t_peak` để dữ liệu cũ
+ * (đã ghi trước khi sửa API) vẫn hiển thị được.
+ */
+function forecastPeakTs(row: Record<string, unknown>): string | null {
+  const direct = row.peak_ts;
+  if (typeof direct === "string" && direct) return direct;
+  const peaks = row.peaks;
+  if (Array.isArray(peaks) && peaks.length > 0) {
+    const t = (peaks[0] as Record<string, unknown> | null)?.t_peak;
+    if (typeof t === "string" && t) return t;
+  }
+  return null;
+}
+
+/** Cao độ đỉnh (m) của một dòng dự báo — fallback `h_max_q50` / `peaks[0].h_q50`. */
+function forecastPeakValue(row: Record<string, unknown>): number | null {
+  const direct = row.peak_value;
+  if (typeof direct === "number") return direct;
+  const peaks = row.peaks;
+  if (Array.isArray(peaks) && peaks.length > 0) {
+    const h = (peaks[0] as Record<string, unknown> | null)?.h_q50;
+    if (typeof h === "number") return h;
+  }
+  const hmax = row.h_max_q50;
+  if (typeof hmax === "number") return hmax;
+  return null;
+}
+
 export default function DashboardPage() {
   const [year, setYear] = useState<number>(2026);
   const [at, setAt] = useState<string>(todayVN());
@@ -274,7 +307,7 @@ export default function DashboardPage() {
         <DataTable
           columns={statColumns}
           rows={stats.data?.stations ?? []}
-          rowKey={(r) => r.station ?? String(Math.random())}
+          rowKey={(r, i) => `${r.station ?? "?"}-${i}`}
           loading={stats.loading}
           empty="Chưa có thống kê cho năm này."
           maxHeight={420}
@@ -289,12 +322,16 @@ export default function DashboardPage() {
           columns={[
             { key: "station", header: "Trạm", render: (r) => String(r.station ?? "—") },
             { key: "issued_at", header: "Phát hành", render: (r) => formatDateTime(r.issued_at as string) },
-            { key: "peak_ts", header: "Thời điểm đỉnh", render: (r) => formatDateTime(r.peak_ts as string) },
+            {
+              key: "peak_ts",
+              header: "Thời điểm đỉnh",
+              render: (r) => formatDateTime(forecastPeakTs(r) ?? undefined),
+            },
             {
               key: "peak_value",
               header: "Cao độ đỉnh (m)",
               align: "right",
-              render: (r) => fmtNum(r.peak_value as number),
+              render: (r) => fmtNum(forecastPeakValue(r)),
             },
             { key: "model_version", header: "Phiên bản mô hình" },
             {

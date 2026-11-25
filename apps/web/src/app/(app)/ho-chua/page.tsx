@@ -191,7 +191,7 @@ export default function ReservoirsPage() {
         {name && (
           <div style={{ fontSize: 12, color: "#607d8b" }}>
             Khoảng: {formatDateTime(daily.data?.from)} → {formatDateTime(daily.data?.to)} ·{" "}
-            {daily.data?.items.length ?? 0} bản ghi
+            {daily.data?.items?.length ?? 0} bản ghi
           </div>
         )}
       </div>
