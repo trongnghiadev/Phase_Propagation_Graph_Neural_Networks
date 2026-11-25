@@ -19,6 +19,10 @@
 
 Mọi đường dẫn nghiệp vụ có tiền tố `/api/v1`. Thay đổi phá vỡ thì tạo `/api/v2`, giữ v1 tới khi frontend chuyển xong. Tài liệu OpenAPI tương tác: `/docs` (Swagger), `/redoc`, `/openapi.json`.
 
+## Tọa độ trạm
+
+MongoDB lưu `stations.location` theo **GeoJSON Point** (`{"type": "Point", "coordinates": [lon, lat]}`) — bắt buộc cho index `location_2dsphere`. API **chuẩn hoá khi trả về client**: `GET /stations`, `GET /stations/{code}` và `GET /trace/{comid}` trả `location` là mảng `[lon, lat]` (`null` khi trạm chưa có tọa độ); `GET /forecasts/map` dựng `geometry` GeoJSON đúng chuẩn. `PATCH /stations/{code}` nhận `location` dạng mảng `[lon, lat]` rồi ghi lại thành GeoJSON Point (422 nếu sai định dạng). Hàm dùng chung: `api.router.common.to_lonlat`, `to_point`, `clean_station`.
+
 ## Xác thực và phân quyền
 
 - `POST /api/v1/auth/login` trả `access_token` (15 phút) + `refresh_token` (7 ngày), JWT chứa `user_id` và `perm_ver`.

@@ -18,7 +18,8 @@ from vngis.admin import BEFORE, ERAS, FROM, VN_TZ, era_of
 
 __all__ = ["VN_TZ", "BEFORE", "FROM", "ERAS", "era_of", "clean", "to_vn_date", "to_vn_datetime",
            "parse_day", "parse_dt", "check_era", "HttpError", "obj_id", "page", "acquire_guard",
-           "guard_check", "qc_http_error", "actor_labels", "attach_actor_labels"]
+           "guard_check", "qc_http_error", "actor_labels", "attach_actor_labels",
+           "to_lonlat", "to_point", "clean_station"]
 
 #: Lỗi HTTP kèm mã trạng thái nghiệp vụ.
 HttpError = HTTPException
@@ -44,6 +45,62 @@ def clean(doc: Any) -> Any:
     if isinstance(doc, date):
         return doc.isoformat()
     return doc
+
+
+def to_lonlat(loc: Any) -> list[float] | None:
+    """Tọa độ trạm về dạng mảng ``[lon, lat]``.
+
+    MongoDB lưu `stations.location` theo GeoJSON Point (`{"type": "Point", "coordinates": [lon, lat]}`
+    — bắt buộc cho index 2dsphere), nhưng giao diện web và các endpoint khác dùng mảng ``[lon, lat]``.
+    Hàm này chuẩn hoá mọi dạng đầu vào về mảng để client không phải tự rút.
+
+    - ``None``/rỗng → ``None``.
+    - Mảng/tuple có ≥ 2 phần tử → ``[lon, lat]`` ( ép kiểu ``float``).
+    - GeoJSON Point → lấy ``coordinates`` rồi áp dụng lại quy tắc trên.
+    - Dạng khác → ``None`` (không đoán; client bỏ qua trạm không có tọa độ).
+    """
+    if loc is None:
+        return None
+    if isinstance(loc, dict):
+        if loc.get("type") == "Point":
+            return to_lonlat(loc.get("coordinates"))
+        return None
+    if isinstance(loc, (list, tuple)) and len(loc) >= 2:
+        try:
+            lon, lat = float(loc[0]), float(loc[1])
+        except (TypeError, ValueError):
+            return None
+        return [lon, lat]
+    return None
+
+
+def to_point(lonlat: Any) -> dict[str, Any] | None:
+    """Ngược của `to_lonlat`: mảng ``[lon, lat]`` → GeoJSON Point để ghi vào MongoDB.
+
+    Giữ nguyên GeoJSON Point nếu đầu vào đã là Point (không mất `coordinates`).
+    """
+    if lonlat is None:
+        return None
+    if isinstance(lonlat, dict) and lonlat.get("type") == "Point":
+        return lonlat
+    coords = to_lonlat(lonlat)
+    if coords is None:
+        return None
+    return {"type": "Point", "coordinates": coords}
+
+
+def clean_station(doc: Any) -> Any:
+    """Chuẩn hoá document trạm cho client: `location` về mảng ``[lon, lat]``.
+
+    Nhận cả một document lẻ lẫn danh sách document. Giữ nguyên `location_meta` (nguồn/độ
+    tin cậy của tọa độ) và mọi trường khác.
+    """
+    out = clean(doc)
+    if isinstance(out, list):
+        return [clean_station(d) for d in out]
+    if isinstance(out, dict) and "location" in out:
+        out["location"] = to_lonlat(out.get("location"))
+    return out
 
 
 def to_vn_date(dt: datetime | str | None) -> str | None:

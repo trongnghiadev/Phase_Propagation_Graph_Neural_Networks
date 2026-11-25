@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from api.deps import UserContext, require, rate_limit
 from api.permissions import P
-from api.router.common import (acquire_guard, actor_labels, clean, guard_check, to_vn_date,
+from api.router.common import (acquire_guard, actor_labels, clean, guard_check, to_lonlat, to_vn_date,
                                to_vn_datetime)
 from api.state import state
 from vngis.job_params import MAX_TRAIN_EPOCHS, TRAIN_SAMPLE_PARAMS
@@ -292,7 +292,7 @@ async def forecasts_map(basin: str | None = None, issued_at: str | None = None):
         from api.router.common import parse_dt
         flt["issued_at"] = parse_dt(issued_at, field="issued_at")
     docs = list(db[FORECASTS].find(flt).sort([("issued_at", -1)]).limit(2000))
-    coords = {s["code"]: s.get("location") for s in db["stations"].find(
+    coords = {s["code"]: to_lonlat(s.get("location")) for s in db["stations"].find(
         {}, {"_id": 0, "code": 1, "location": 1})}
     features = []
     for d in docs:
