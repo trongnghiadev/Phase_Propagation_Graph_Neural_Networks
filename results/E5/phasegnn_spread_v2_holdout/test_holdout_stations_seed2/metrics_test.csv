@@ -1,0 +1,2 @@
+model,mae_peak_m,mae_hour_h,n_records
+phasegnn-spread-v2-holdout-s2,0.19161355219893875,4.518676458254707,16900

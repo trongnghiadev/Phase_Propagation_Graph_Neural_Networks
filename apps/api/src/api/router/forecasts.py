@@ -27,7 +27,8 @@ from pydantic import BaseModel, Field
 
 from api.deps import UserContext, require, rate_limit
 from api.permissions import P
-from api.router.common import actor_labels, clean, to_vn_date, to_vn_datetime
+from api.router.common import (acquire_guard, actor_labels, clean, guard_check, to_vn_date,
+                               to_vn_datetime)
 from api.state import state
 
 log = logging.getLogger("api.forecasts")
@@ -49,6 +50,8 @@ RESULTS_DIR = Path(os.environ.get("PGNN_RESULTS_DIR", "results")).resolve()
 #: chỉ số tổng quát hóa, KHÔNG phải dự báo ⇒ không dùng. `predictions*.csv` bị gitignore: chỉ có trên máy đã
 #: chạy thực nghiệm; không có ⇒ không trả mẫu (503).
 SAMPLE_FORECAST_CANDIDATES = (
+    # cùng mô hình với checkpoint mặc định của worker (`spread` 9 trạm, đồ thị con v2, seed 0)
+    "E2/phasegnn_spread_v2/test_full_seed0/predictions_test.csv",
     "E2/phasegnn_long/test_full/predictions_test.csv",
     "E2/*/test_full/predictions_test.csv",
     "baselines/B0/predictions_test.csv",
@@ -141,8 +144,8 @@ class ForecastRunRequest(BaseModel):
 
 
 class TrainRequest(BaseModel):
-    """Yêu cầu huấn luyện mô hình."""
-    model_version: str | None = None
+    """Yêu cầu huấn luyện mô hình (bỏ trống `model_version` → hệ thống cấp số nguyên mới)."""
+    model_version: int | str | None = Field(default=None, description="chỉ để hỏi lại phiên bản đã có")
     epochs: int = Field(default=50, ge=1, le=2000)
     learning_rate: float = Field(default=1e-3, gt=0, le=1)
     station: str | None = None
@@ -346,24 +349,203 @@ async def run_forecast(body: ForecastRunRequest,
                     "thiếu checkpoint/phasegnn → việc `skipped` kèm lý do (xem GET /jobs/{job_id})"}
 
 
+#: Trường `models` trả cho giao diện (không trả `checkpoint_path`, `hyperparams` đầy đủ, `train_config`).
+_MODEL_FIELDS = ("version", "name", "variant", "status", "train_state", "train_reason", "train_error", "job_id",
+                 "metrics", "requested_by", "created_at", "updated_at", "train_started_at", "train_finished_at",
+                 "train_heartbeat", "promoted_at", "promoted_by", "promote_seq", "archived_at")
+_MODEL_TIME_FIELDS = ("created_at", "updated_at", "train_started_at", "train_finished_at", "train_heartbeat",
+                      "promoted_at", "archived_at")
+
+
+@router.get("/models", dependencies=[Depends(require(P.READ, MODELS))])
+async def list_models(limit: int = Query(100, ge=1, le=500)):
+    """Danh sách phiên bản mô hình (registry `models`, ``version`` int), mới nhất trước.
+
+    Kèm ``train_state``/``train_reason``/``train_error`` (worker `train`) và ``status``; ``promotable`` = đã
+    huấn luyện xong (``train_state`` thiếu — bản ghi cũ — hoặc ``succeeded``) và chưa phục vụ.
+    """
+    from vngis.model_registry import PRODUCTION, find_production
+
+    db = state.db
+
+    def _load() -> tuple[list[dict], Any]:
+        docs = list(db[MODELS].find({"version": {"$type": "number"}}, {k: 1 for k in _MODEL_FIELDS},
+                                    sort=[("version", -1)], limit=limit))
+        top = find_production(db, projection={"_id": 1})
+        return docs, (top or {}).get("_id")
+
+    docs, serving = await asyncio.to_thread(_load)
+    actors = actor_labels([d.get("requested_by") for d in docs] + [d.get("promoted_by") for d in docs])
+    items = []
+    for d in docs:
+        it = {k: d.get(k) for k in _MODEL_FIELDS if k in d}
+        it["id"] = str(d["_id"])
+        for k in _MODEL_TIME_FIELDS:
+            if it.get(k) is not None:
+                it[k] = to_vn_datetime(it[k])
+        it["serving"] = d["_id"] == serving
+        it["promotable"] = d.get("train_state") in (None, "succeeded") and not (
+            d.get("status") == PRODUCTION and it["serving"])
+        it["requested_by_label"] = actors.get(d.get("requested_by"))
+        it["promoted_by_label"] = actors.get(d.get("promoted_by"))
+        items.append(clean(it))
+    return {"items": items, "count": len(items)}
+
+
+#: Trạng thái huấn luyện được giao lại qua `POST /models/train` với ``model_version=n``.
+_RETRYABLE_TRAIN_STATES = ("failed", "skipped")
+#: Việc ``train`` còn hiệu lực (chưa kết thúc) — có thì không giao thêm.
+_ACTIVE_JOB_STATES = ("queued", "claimed", "running")
+
+
+def _train_stale_s() -> float:
+    """``train_state=running`` không có heartbeat quá ngưỡng này (và không còn việc hiệu lực) → coi là kẹt."""
+    try:
+        return max(float(os.environ.get("PGNN_TRAIN_STALE_S", "2700")), 60.0)
+    except ValueError:
+        return 2700.0
+
+
+def _train_job_doc(job_id: str, ver: int, params: dict, actor: str, now: datetime, attempt: int) -> dict:
+    return {"_id": job_id, "type": "train", "state": "queued", "priority": 0, "params": params,
+            "model_version": ver, "train_attempt": attempt, "requested_by": actor, "worker": None, "fence": None,
+            "heartbeat": None, "created_at": now, "updated_at": now, "finished_at": None}
+
+
+def _insert_train_job(db, job: dict, model_id: str, now: datetime) -> None:
+    """Chèn việc ``train``; lỗi → đánh bản ghi `models` ``failed`` kèm lý do (không để ``queued`` mồ côi)."""
+    try:
+        db["jobs"].insert_one(job)
+    except Exception as e:  # noqa: BLE001 - mọi lỗi ghi: dọn trạng thái rồi báo 503
+        db[MODELS].update_one({"_id": model_id, "job_id": job["_id"], "train_state": "queued"},
+                              {"$set": {"train_state": "failed", "updated_at": now,
+                                        "train_error": f"không giao được việc huấn luyện: {e}"[:500]}})
+        log.warning("không chèn được việc %s: %s", job["_id"], e)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail={"error": "train_enqueue_failed", "model_id": model_id,
+                                    "reason": "không giao được việc huấn luyện; bản ghi models đánh failed"}) from None
+
+
 @router.post("/models/train", dependencies=[Depends(require(P.MANAGE_MODEL, MODELS)),
                                             Depends(rate_limit(scope="job"))])
 async def train_model(body: TrainRequest,
                       user: UserContext = Depends(require(P.MANAGE_MODEL, MODELS))):
-    """Yêu cầu huấn luyện mô hình — giao cho `apps/worker` (luật: `apps/api` không import `phasegnn`)."""
+    """Yêu cầu huấn luyện mô hình — giao cho `apps/worker` (luật: `apps/api` không import `phasegnn`).
+
+    **BREAKING (so với ``v<timestamp>``):** ``version`` là **số nguyên** do hệ thống cấp nguyên tử (bộ đếm
+    `counters._id="models.version"`, ``$inc``); phản hồi ``model_version`` kiểu int. API ghi trước bản ghi
+    `models` ``{_id: "phasegnn-<n>", version: n, status: "staging", train_state: "queued", job_id,
+    train_attempt: 1}`` rồi giao việc ``train`` (``_id: "train:<n>"``); chèn việc lỗi → bản ghi `models` đánh
+    ``failed`` (``train_error``) và trả 503.
+
+    ``model_version=n`` (``3``/``"v3"``) không tự đặt số mới (chưa có → 404, không phải số → 422):
+
+    - bản ghi ``train_state`` ∈ ``failed|skipped``, hoặc ``running`` kẹt (không còn việc ``train`` hiệu lực và
+      ``train_heartbeat`` cũ hơn ``PGNN_TRAIN_STALE_S``, mặc định 2700 s) → **giao lại**: ``train_attempt += 1``
+      (nguyên tử, có điều kiện trạng thái), việc mới ``train:<n>:<attempt>`` (không trùng ``_id``), tham số =
+      ``hyperparams`` cũ + trường gửi kèm;
+    - còn lại (``queued``/``running`` đang chạy/``succeeded``, bản không phải staging) → trả bản ghi hiện có
+      (``created: false``).
+    """
+    from vngis.job_params import JobParamsError, parse_model_version, validate_job_params
+    from vngis.model_registry import STAGING, allocate_model_version, model_doc_id
+
     db = state.db
-    ver = body.model_version or f"v{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    actor = user.actor
+    overrides = body.model_dump(exclude_unset=True, exclude={"model_version"})
+    if body.model_version not in (None, ""):
+        try:
+            asked = parse_model_version(body.model_version)
+        except ValueError as e:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from None
+        existing = db[MODELS].find_one({"version": asked})
+        if existing is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                detail={"error": "model_version_not_found", "model_version": asked,
+                                        "reason": "phiên bản do hệ thống cấp; bỏ trống model_version để "
+                                                  "huấn luyện phiên bản mới"})
+        return await asyncio.to_thread(_retry_or_report, db, existing, asked, overrides, actor)
+    try:
+        params = validate_job_params("train", overrides)
+    except JobParamsError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail={"message": str(e), "errors": e.errors}) from None
+    ver = allocate_model_version(db)
+    params["model_version"] = ver
+    now = datetime.now(timezone.utc)
     job_id = f"train:{ver}"
-    existing = db[MODELS].find_one({"version": ver})
-    if existing:
-        return {"model_version": ver, "state": existing.get("state", "unknown"),
-                "note": "phiên bản đã tồn tại"}
-    db["jobs"].insert_one({"_id": job_id, "type": "train", "state": "queued",
-                           "params": body.model_dump(), "model_version": ver,
-                           "requested_by": user.actor, "worker": None, "fence": None,
-                           "heartbeat": None, "created_at": datetime.now(timezone.utc)})
-    return {"job_id": job_id, "model_version": ver, "state": "queued",
+    model_id = model_doc_id("phasegnn", ver)
+    db[MODELS].insert_one({"_id": model_id, "model_id": model_id,
+                           "name": "phasegnn", "variant": "phasegnn", "version": ver, "status": STAGING,
+                           "train_state": "queued", "job_id": job_id, "train_attempt": 1, "requested_by": actor,
+                           "hyperparams": {k: params[k] for k in ("epochs", "learning_rate") if k in params},
+                           "created_at": now, "updated_at": now})
+    _insert_train_job(db, _train_job_doc(job_id, ver, params, actor, now, 1), model_id, now)
+    return {"job_id": job_id, "model_version": ver, "status": STAGING, "state": "queued", "created": True,
             "note": "đã giao cho worker; apps/api không import phasegnn theo luật phụ thuộc"}
+
+
+def _existing_reply(doc: dict, ver: int, note: str) -> dict:
+    return {"model_version": ver, "status": doc.get("status"), "created": False,
+            "state": doc.get("train_state") or doc.get("status") or "unknown",
+            "job_id": doc.get("job_id"), "note": note}
+
+
+def _aware(ts: Any) -> Any:
+    if ts is not None and getattr(ts, "tzinfo", None) is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
+def _retry_or_report(db, existing: dict, ver: int, overrides: dict, actor: str) -> dict:
+    """`POST /models/train` với ``model_version``: giao lại khi được phép, không thì trả bản ghi hiện có."""
+    from vngis.job_params import JobParamsError, validate_job_params
+    from vngis.model_registry import STAGING
+
+    ts = existing.get("train_state")
+    active = db["jobs"].find_one({"type": "train", "model_version": ver,
+                                  "state": {"$in": list(_ACTIVE_JOB_STATES)}}, {"_id": 1, "state": 1})
+    if active is not None:
+        return _existing_reply(existing, ver, f"đang có việc huấn luyện {active['_id']}")
+    if existing.get("status") != STAGING or not (ts in _RETRYABLE_TRAIN_STATES or ts == "running"):
+        return _existing_reply(existing, ver, "phiên bản đã tồn tại")
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=_train_stale_s())
+    cond: dict[str, Any] = {"_id": existing["_id"], "status": STAGING, "train_state": ts}
+    if ts == "running":
+        hb = _aware(existing.get("train_heartbeat") or existing.get("train_started_at")
+                    or existing.get("updated_at"))
+        if hb is not None and hb >= cutoff:
+            return _existing_reply(existing, ver, "đang huấn luyện (heartbeat còn mới)")
+        cond["$or"] = [{"train_heartbeat": None}, {"train_heartbeat": {"$lt": cutoff}}]
+    base = {k: v for k, v in (existing.get("hyperparams") or {}).items() if k in ("epochs", "learning_rate")}
+    try:
+        params = validate_job_params("train", {**base, **overrides})
+    except JobParamsError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail={"message": str(e), "errors": e.errors}) from None
+    params["model_version"] = ver
+    # Bản ghi cũ chưa có `train_attempt` (lượt đầu = 1) → lượt giao lại đầu tiên là 2.
+    if existing.get("train_attempt") is None:
+        db[MODELS].update_one({"_id": existing["_id"], "train_attempt": {"$exists": False}},
+                              {"$set": {"train_attempt": 1}})
+    # `train_attempt` cấp nguyên tử + điều kiện trạng thái: hai request đồng thời không cùng giao lại.
+    doc = db[MODELS].find_one_and_update(
+        cond, {"$inc": {"train_attempt": 1},
+               "$set": {"train_state": "queued", "updated_at": now, "train_error": None, "train_reason": None,
+                        "retried_by": actor,
+                        "hyperparams": {k: params[k] for k in ("epochs", "learning_rate") if k in params}}},
+        return_document=True)
+    if doc is None:
+        cur = db[MODELS].find_one({"_id": existing["_id"]}) or existing
+        return _existing_reply(cur, ver, "trạng thái vừa đổi; không giao lại")
+    attempt = int(doc.get("train_attempt") or 2)
+    job_id = f"train:{ver}:{attempt}"
+    db[MODELS].update_one({"_id": existing["_id"], "train_attempt": attempt}, {"$set": {"job_id": job_id}})
+    _insert_train_job(db, _train_job_doc(job_id, ver, params, actor, now, attempt), existing["_id"], now)
+    return {"job_id": job_id, "model_version": ver, "status": STAGING, "state": "queued", "created": True,
+            "retry": True, "train_attempt": attempt, "previous_train_state": ts,
+            "note": f"giao lại huấn luyện (lượt {attempt}, trước đó train_state={ts})"}
 
 
 @router.post("/models/{version}/promote", dependencies=[Depends(require(P.MANAGE_MODEL, MODELS)),
@@ -375,10 +557,16 @@ async def promote_model(version: str,
     Theo registry `phasegnn/registry.py` (`ModelRecord`): ``version`` là số nguyên (tham số đường dẫn
     ``3``/``v3`` được ép kiểu; không phải số → 422), trạng thái ở trường ``status``
     (``staging|production|archived``). Bản được promote → ``status="production"``; bản production khác →
-    ``archived``. Worker (`forecast_run`) chỉ chọn bản ``production``. Tăng `ver:models` để cache dự báo cũ
-    bị vô hiệu.
+    ``archived``. Worker (`forecast_run`) chỉ chọn bản ``production`` (lượt promote mới nhất,
+    `vngis.model_registry.PRODUCTION_SORT`). Tăng `ver:models` để cache dự báo cũ bị vô hiệu.
+
+    An toàn đồng thời: giữ khoá ``models:promote`` (bận → 423) và ghi qua `vngis.model_registry.promote_model`
+    — transaction khi có replica set, không thì thứ tự ghi có điều kiện ``promote_seq`` (tự sửa, không để hai
+    bản production tồn tại lâu). Bản đang huấn luyện (``train_state`` queued/running/failed/skipped) → 409.
     """
     from vngis.job_params import parse_model_version
+    from vngis.locks import LockGuard
+    from vngis.model_registry import PROMOTE_LOCK_RESOURCE, promote_model as _promote
 
     try:
         ver = parse_model_version(version)
@@ -390,17 +578,36 @@ async def promote_model(version: str,
     doc = db[MODELS].find_one({"version": ver})
     if doc is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"không có mô hình phiên bản {ver!r}")
-    now = datetime.now(timezone.utc)
+    ts = doc.get("train_state")
+    if ts is not None and ts != "succeeded":
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            detail={"error": "model_not_trained", "model_version": ver, "train_state": ts,
+                                    "reason": "chỉ promote được bản đã huấn luyện xong (train_state=succeeded)"})
     actor = user.actor
-    db[MODELS].update_one({"_id": doc["_id"]},
-                          {"$set": {"status": "production", "promoted_at": now, "promoted_by": actor}})
-    db[MODELS].update_many({"_id": {"$ne": doc["_id"]}, "status": "production"},
-                           {"$set": {"status": "archived"}})
+    guard = LockGuard(state.lock, db=db, resource=PROMOTE_LOCK_RESOURCE, ttl_ms=30_000)
+    acquire_guard(guard, busy_detail="đang có lượt promote khác chạy")
+    try:
+        guard_check(guard)
+        now = datetime.now(timezone.utc)
+        out = await asyncio.to_thread(_promote, db, doc["_id"], actor=actor, now=now)
+    finally:
+        guard.release()
     try:
         state.cache.bump_version("models")
         state.cache.bump_version("forecasts")
     except Exception as e:  # noqa: BLE001
         log.warning("không bump được ver: %s", e)
+    if out.get("not_trained"):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            detail={"error": "model_not_trained", "model_version": ver,
+                                    "train_state": out.get("train_state"),
+                                    "reason": "chỉ promote được bản đã huấn luyện xong (train_state=succeeded)"})
+    if out.get("superseded"):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            detail={"error": "promote_superseded", "model_version": ver,
+                                    "reason": "một lượt promote mới hơn đã thắng; bản này không phục vụ"})
     return {"model_version": ver, "status": "production", "state": "production",
             "promoted_at": to_vn_datetime(now), "promoted_by": actor,
-            "promoted_by_label": actor_labels([actor]).get(actor)}
+            "promoted_by_label": actor_labels([actor]).get(actor),
+            "archived": [str(x) for x in (out.get("archived") or []) + (out.get("repaired") or [])],
+            "transaction": bool(out.get("transaction"))}

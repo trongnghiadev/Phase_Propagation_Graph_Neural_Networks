@@ -9,10 +9,16 @@
  * - `POST /api/v1/models/{version}/promote` — chuyển phiên bản thành bản đang phục vụ.
  *   Bản đang promote trước đó chuyển sang `archived`; cache `ver:models` và
  *   `ver:forecasts` được tăng để dự báo cũ mất hiệu lực.
+ * - `GET /api/v1/models` — danh sách phiên bản (registry `models`) kèm `train_state`/`train_reason`,
+ *   `promotable` (đã huấn luyện xong, chưa phục vụ) và `serving` (bản production đang phục vụ).
  * - `GET /api/v1/jobs?type=train` — theo dõi tiến trình huấn luyện.
  *
- * Lưu ý: API **không** có endpoint liệt kê mô hình (`GET /models`). Danh sách phiên bản
- * ở đây được suy ra từ các job `train` đã giao — nếu chưa có job nào thì danh sách rỗng.
+ * Nút promote chỉ bật cho bản `train_state=succeeded` (hoặc bản ghi cũ không có `train_state`) và
+ * chưa phục vụ. Lỗi promote: 409 (`promote_superseded` — lượt promote khác mới hơn đã thắng; hoặc bản
+ * chưa huấn luyện xong) và 423 (đang có lượt promote khác) được báo rõ, **không tự thử lại**.
+ *
+ * Phiên bản là **số nguyên** do API cấp nguyên tử (registry `models.version`, `status`
+ * `staging|production|archived`); người dùng không tự đặt số.
  */
 
 import React, { useMemo, useState } from "react";
@@ -27,26 +33,83 @@ import {
   type Column,
 } from "@/components/ui";
 import { JobStateBadge } from "@/components/JobStateBadge";
-import { api, toError } from "@/lib/api";
+import { api, ApiRequestError, toError } from "@/lib/api";
 import { formatActor, formatDateTime } from "@/lib/format";
 import { useAsync } from "@/lib/useAsync";
 import { usePermission } from "@/lib/session";
 import { COLLECTIONS } from "@/lib/permissions";
-import type { JobItem } from "@/lib/types";
+import type { JobItem, ModelItem } from "@/lib/types";
+
+/** Phiên bản mô hình (int của registry; job cũ có thể còn chuỗi) → chuỗi hiển thị/khóa. */
+function versionKey(v: unknown): string | null {
+  if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  if (typeof v === "string" && v.trim()) return v.trim();
+  return null;
+}
+
+/** Nhãn + màu cho `models.train_state`. */
+const TRAIN_STATE: Record<string, { label: string; color: string }> = {
+  queued: { label: "chờ huấn luyện", color: "#78909c" },
+  running: { label: "đang huấn luyện", color: "#1565c0" },
+  succeeded: { label: "đã huấn luyện", color: "#2e7d32" },
+  failed: { label: "lỗi", color: "#c62828" },
+  skipped: { label: "bỏ qua", color: "#ef6c00" },
+};
+
+/** Nhãn + màu cho `models.status`. */
+const MODEL_STATUS: Record<string, { label: string; color: string }> = {
+  staging: { label: "staging", color: "#78909c" },
+  production: { label: "production", color: "#2e7d32" },
+  archived: { label: "archived", color: "#90a4ae" },
+};
+
+/** Vì sao bản này chưa promote được (hiện thay cho nút). */
+function notPromotableReason(m: ModelItem): string {
+  if (m.serving) return "Đang phục vụ";
+  const ts = m.train_state;
+  if (ts === "queued" || ts === "running") return "Chưa huấn luyện xong";
+  if (ts === "failed") return "Huấn luyện lỗi";
+  if (ts === "skipped") return "Huấn luyện bị bỏ qua";
+  return "Không promote được";
+}
+
+/** Thông điệp rõ cho lỗi promote (409/423); `null` → dùng thông điệp chung. */
+function promoteErrorMessage(e: unknown, version: string): string | null {
+  if (!(e instanceof ApiRequestError)) return null;
+  const d = e.detail && typeof e.detail === "object" ? (e.detail as Record<string, unknown>) : {};
+  if (e.status === 423) {
+    return (
+      `Đang có lượt promote khác chạy (khoá models:promote) — phiên bản ${version} chưa được phát hành. ` +
+      "Đợi lượt kia xong, tải lại danh sách rồi quyết định lại."
+    );
+  }
+  if (e.status === 409 && d.error === "promote_superseded") {
+    return (
+      `Một lượt promote mới hơn đã thắng — phiên bản ${version} không được phục vụ. ` +
+      "Tải lại danh sách để xem bản đang phục vụ."
+    );
+  }
+  if (e.status === 409 && d.error === "model_not_trained") {
+    const ts = typeof d.train_state === "string" ? d.train_state : "?";
+    return `Phiên bản ${version} chưa huấn luyện xong (train_state=${ts}); chỉ promote được bản đã huấn luyện.`;
+  }
+  return null;
+}
 
 export default function ModelsPage() {
   const { canManageModel, canRunForecast } = usePermission();
-  const [version, setVersion] = useState("");
   const [epochs, setEpochs] = useState("50");
   const [lr, setLr] = useState("0.001");
-  const [station, setStation] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<Error | null>(null);
   const [ok, setOk] = useState<string | null>(null);
   const [promoting, setPromoting] = useState<string | null>(null);
 
-  /** Các job huấn luyện đã giao — suy ra danh sách phiên bản mô hình. */
+  /** Các job huấn luyện đã giao. */
   const trainJobs = useAsync<{ items: JobItem[] }>(() => api.jobs({ type: "train", limit: 200 }), []);
+
+  /** Phiên bản mô hình (registry `models`). */
+  const models = useAsync<{ items: ModelItem[] }>(() => api.models({ limit: 200 }), []);
 
   /** Các job dự báo để tham chiếu phiên bản mô hình đang phục vụ. */
   const forecastJobs = useAsync<{ items: JobItem[] }>(
@@ -54,26 +117,11 @@ export default function ModelsPage() {
     [],
   );
 
-  /** Phiên bản mô hình đã biết (từ job train) kèm trạng thái. */
-  const modelVersions = useMemo(() => {
-    const map = new Map<string, { version: string; state: string; created: string | null }>();
-    (trainJobs.data?.items ?? []).forEach((j) => {
-      const v = j.model_version ?? (j.params?.model_version as string | undefined);
-      if (!v) return;
-      map.set(v, {
-        version: v,
-        state: j.state ?? "unknown",
-        created: j.created_at ?? null,
-      });
-    });
-    return [...map.values()].sort((a, b) => (b.created ?? "").localeCompare(a.created ?? ""));
-  }, [trainJobs.data]);
-
   /** Phiên bản đang được dùng để dự báo (job dự báo gần nhất). */
   const activeVersion = useMemo(() => {
     const jobs = forecastJobs.data?.items ?? [];
     for (const j of jobs) {
-      const v = j.params?.model_version as string | undefined;
+      const v = versionKey(j.params?.model_version);
       if (v) return v;
     }
     return null;
@@ -85,17 +133,18 @@ export default function ModelsPage() {
     setOk(null);
     try {
       const res = await api.trainModel({
-        model_version: version.trim() || undefined,
         epochs: Number(epochs) || 50,
         learning_rate: Number(lr) || 0.001,
-        station: station.trim() || undefined,
+        // Không gửi `station`: trình huấn luyện chưa hỗ trợ (worker bỏ qua, ghi `params_ignored`).
       });
+      const job = res.job_id ? `job ${res.job_id}, ` : "";
       setOk(
-        `Đã giao huấn luyện phiên bản ${res.model_version} (job ${res.job_id}, trạng thái ${res.state}). ${
-          res.note ?? ""
-        }`,
+        res.created === false
+          ? `Phiên bản ${res.model_version} đã có (${job}trạng thái ${res.state}). ${res.note ?? ""}`
+          : `Đã giao huấn luyện phiên bản ${res.model_version} (${job}trạng thái ${res.state}). ${res.note ?? ""}`,
       );
       trainJobs.reload();
+      models.reload();
     } catch (e) {
       setErr(toError(e));
     } finally {
@@ -115,51 +164,84 @@ export default function ModelsPage() {
           res.promoted_by_label,
         )}).`,
       );
-      trainJobs.reload();
     } catch (e) {
-      setErr(toError(e));
+      // Không tự thử lại: 409/423 cần người dùng xem lại danh sách rồi quyết định.
+      const msg = promoteErrorMessage(e, v);
+      setErr(msg ? new Error(msg) : toError(e));
     } finally {
       setPromoting(null);
+      models.reload();
     }
   }
 
-  const versionColumns: Column<{ version: string; state: string; created: string | null }>[] = [
-    { key: "version", header: "Phiên bản", render: (m) => <code>{m.version}</code> },
+  const versionColumns: Column<ModelItem>[] = [
     {
-      key: "state",
-      header: "Trạng thái",
+      key: "version",
+      header: "Phiên bản",
       render: (m) => (
-        <Badge
-          color={
-            m.state === "done"
-              ? "#2e7d32"
-              : m.state === "failed"
-                ? "#c62828"
-                : m.state === "running"
-                  ? "#1565c0"
-                  : "#78909c"
-          }
-        >
-          {m.state}
-        </Badge>
+        <>
+          <code>{m.version}</code>
+          {m.serving && (
+            <span style={{ marginLeft: 6 }}>
+              <Badge color="#2e7d32">đang phục vụ</Badge>
+            </span>
+          )}
+        </>
       ),
     },
-    { key: "created", header: "Tạo lúc", render: (m) => formatDateTime(m.created) },
+    {
+      key: "status",
+      header: "Registry",
+      render: (m) => {
+        const st = MODEL_STATUS[m.status ?? ""] ?? { label: m.status ?? "—", color: "#78909c" };
+        return <Badge color={st.color}>{st.label}</Badge>;
+      },
+    },
+    {
+      key: "train_state",
+      header: "Huấn luyện",
+      render: (m) => {
+        if (!m.train_state) return <span style={{ color: "#90a4ae" }}>—</span>;
+        const ts = TRAIN_STATE[m.train_state] ?? { label: m.train_state, color: "#78909c" };
+        const why = m.train_reason || m.train_error;
+        return (
+          <div>
+            <Badge color={ts.color}>{ts.label}</Badge>
+            {why && (
+              <div style={{ fontSize: 11, color: "#607d8b", marginTop: 3, maxWidth: 260 }} title={why}>
+                {why.length > 120 ? `${why.slice(0, 120)}…` : why}
+              </div>
+            )}
+          </div>
+        );
+      },
+    },
+    {
+      key: "metrics",
+      header: "MAE đỉnh (val)",
+      render: (m) => {
+        const v = m.metrics?.val_mae_peak;
+        return typeof v === "number" ? `${v.toFixed(3)} m` : "—";
+      },
+    },
+    { key: "created", header: "Tạo lúc", render: (m) => formatDateTime(m.created_at ?? null) },
     {
       key: "action",
       header: "",
-      render: (m) =>
-        canManageModel(COLLECTIONS.models) ? (
-          <Button
-            variant="primary"
-            disabled={promoting === m.version}
-            onClick={() => void promote(m.version)}
-          >
-            {promoting === m.version ? "Đang phát hành…" : "Phát hành (promote)"}
+      render: (m) => {
+        const key = String(m.version);
+        if (!canManageModel(COLLECTIONS.models)) {
+          return <span style={{ fontSize: 12, color: "#90a4ae" }}>Chỉ đọc</span>;
+        }
+        if (!m.promotable) {
+          return <span style={{ fontSize: 12, color: "#90a4ae" }}>{notPromotableReason(m)}</span>;
+        }
+        return (
+          <Button variant="primary" disabled={promoting !== null} onClick={() => void promote(key)}>
+            {promoting === key ? "Đang phát hành…" : "Phát hành (promote)"}
           </Button>
-        ) : (
-          <span style={{ fontSize: 12, color: "#90a4ae" }}>Chỉ đọc</span>
-        ),
+        );
+      },
     },
   ];
 
@@ -169,7 +251,7 @@ export default function ModelsPage() {
     {
       key: "model_version",
       header: "Phiên bản",
-      render: (j) => j.model_version ?? (j.params?.model_version as string) ?? "—",
+      render: (j) => versionKey(j.model_version) ?? versionKey(j.params?.model_version) ?? "—",
     },
     { key: "requested_by", header: "Người giao", render: (j) => formatActor(j.requested_by, j.requested_by_label) },
     { key: "worker", header: "Worker", render: (j) => j.worker ?? "—" },
@@ -191,6 +273,7 @@ export default function ModelsPage() {
       </p>
 
       {trainJobs.error && <ErrorNotice error={trainJobs.error} onRetry={trainJobs.reload} />}
+      {models.error && <ErrorNotice error={models.error} onRetry={models.reload} />}
       {err && <ErrorNotice error={err} onDismiss={() => setErr(null)} />}
       {ok && <InfoNotice kind="success">{ok}</InfoNotice>}
 
@@ -224,15 +307,9 @@ export default function ModelsPage() {
             </InfoNotice>
           ) : (
             <>
-              <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 3 }}>
-                Phiên bản (để trống = tự sinh)
-              </label>
-              <input
-                value={version}
-                onChange={(e) => setVersion(e.target.value)}
-                placeholder="ví dụ: v20261124"
-                style={{ ...inputStyle, marginBottom: 10 }}
-              />
+              <p style={{ fontSize: 12, color: "#607d8b", marginTop: 0 }}>
+                Phiên bản do hệ thống cấp (số nguyên tăng dần), bản ghi mới ở trạng thái <code>staging</code>.
+              </p>
 
               <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 3 }}>
                 Số epoch
@@ -255,15 +332,9 @@ export default function ModelsPage() {
                 style={{ ...inputStyle, marginBottom: 10 }}
               />
 
-              <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 3 }}>
-                Trạm (tuỳ chọn)
-              </label>
-              <input
-                value={station}
-                onChange={(e) => setStation(e.target.value)}
-                placeholder="ví dụ: VUONGTAU"
-                style={{ ...inputStyle, marginBottom: 12 }}
-              />
+              <p style={{ fontSize: 12, color: "#607d8b", marginTop: 0, marginBottom: 12 }}>
+                Huấn luyện trên toàn bộ các trạm (chưa hỗ trợ chọn riêng một trạm).
+              </p>
 
               <Button variant="primary" disabled={busy} onClick={() => void train()}>
                 {busy ? "Đang giao…" : "Giao huấn luyện"}
@@ -281,15 +352,15 @@ export default function ModelsPage() {
           }}
         >
           <h2 style={{ marginTop: 0 }}>Phiên bản mô hình</h2>
-          <InfoNotice kind="info">
-            API chưa có endpoint liệt kê mô hình; danh sách này suy ra từ các job huấn
-            luyện đã giao.
-          </InfoNotice>
+          <p style={{ fontSize: 12, color: "#607d8b", marginTop: 0 }}>
+            Chỉ phát hành được bản đã huấn luyện xong (<code>train_state=succeeded</code>).{" "}
+            <Button onClick={() => models.reload()}>Tải lại</Button>
+          </p>
           <DataTable
             columns={versionColumns}
-            rows={modelVersions}
-            rowKey={(m) => m.version}
-            loading={trainJobs.loading}
+            rows={models.data?.items ?? []}
+            rowKey={(m) => m.id}
+            loading={models.loading}
             empty="Chưa có phiên bản nào được huấn luyện."
             maxHeight={260}
           />

@@ -186,6 +186,34 @@ def test_promote_theo_registry(client, fake_db):
     assert client.post("/api/v1/models/9/promote", headers=h).status_code == 404
 
 
+def test_train_cap_version_so_nguyen_theo_registry(client, fake_db):
+    """`POST /models/train`: version int cấp tăng dần (không trùng bản đã có), `models.status="staging"`."""
+    _mk_user(fake_db, "u_train")
+    h = _h(client, "u_train")
+    fake_db["models"].insert_one({"_id": "phasegnn-seed0", "name": "phasegnn", "version": 4, "status": "production"})
+    r1 = client.post("/api/v1/models/train", json={"epochs": 5}, headers=h)
+    r2 = client.post("/api/v1/models/train", json={}, headers=h)
+    assert r1.status_code == 200 and r2.status_code == 200, (r1.text, r2.text)
+    assert (r1.json()["model_version"], r2.json()["model_version"]) == (5, 6)
+    m = fake_db["models"].find_one({"version": 5})
+    assert m["_id"] == "phasegnn-5" and m["status"] == "staging" and m["requested_by"].startswith("user:acc_")
+    job = fake_db["jobs"].find_one({"_id": "train:5"})
+    assert job["model_version"] == 5 and job["params"] == {"epochs": 5, "model_version": 5}
+    assert job["state"] == "queued" and job["type"] == "train"
+    # hỏi lại phiên bản đã có; số chưa có → 404; không phải số → 422
+    again = client.post("/api/v1/models/train", json={"model_version": "v5"}, headers=h)
+    assert again.status_code == 200 and again.json()["model_version"] == 5 and again.json()["note"]
+    assert client.post("/api/v1/models/train", json={"model_version": 99}, headers=h).status_code == 404
+    assert client.post("/api/v1/models/train", json={"model_version": "abc"}, headers=h).status_code == 422
+    assert fake_db["jobs"].count_documents({"type": "train"}) == 2
+    # bản chưa huấn luyện xong (train_state=queued) → 409; xong rồi thì promote được bằng số nguyên
+    r = client.post("/api/v1/models/6/promote", headers=h)
+    assert r.status_code == 409 and r.json()["error"]["detail"]["train_state"] == "queued"
+    fake_db["models"].update_one({"version": 6}, {"$set": {"train_state": "succeeded"}})
+    assert client.post("/api/v1/models/6/promote", headers=h).json()["status"] == "production"
+    assert fake_db["models"].find_one({"_id": "phasegnn-seed0"})["status"] == "archived"
+
+
 # ------------------------------------------------------------ dự báo mẫu ----------
 _PRED_HEADER = "model,station,issued_date,target_date,lead_day,peak_idx,h_q10,h_q50,h_q90,t_peak\n"
 
@@ -211,6 +239,12 @@ def test_du_bao_mau_chi_lay_tep_du_bao_dung_cot(tmp_path, monkeypatch):
     out = fc._sample_payload("PHU_AN", 10)
     assert [r["station"] for r in out["rows"]] == ["PHU_AN"]
     assert fc._sample_payload("NHA_BE", 10) is None, "không có trạm → không trả dữ liệu trạm khác"
+    # có dự báo `spread` v2 (cùng mô hình với checkpoint mặc định của worker) → ưu tiên
+    v2 = tmp_path / "E2" / "phasegnn_spread_v2" / "test_full_seed0"
+    v2.mkdir(parents=True)
+    (v2 / "predictions_test.csv").write_text(
+        _PRED_HEADER + "phasegnn-spread-v2-s0,NHA_BE,2024-07-15,2024-07-15,1,0,0.1,0.4,0.7,\n", "utf-8")
+    assert fc._sample_payload(None, 10)["file"] == "E2/phasegnn_spread_v2/test_full_seed0/predictions_test.csv"
 
 
 # ------------------------------------------------------------ X-Forwarded-Host -----
@@ -236,3 +270,91 @@ def test_same_host_chi_tin_x_forwarded_host_tu_proxy(cfg):
         assert not _same_host(_req("203.0.113.7", "api:8000", "gis.local:8088"), "http://gis.local:8088")
     finally:
         state.cfg = None
+
+
+# ------------------------------------------------------------ giao lại huấn luyện --
+def test_train_giao_lai_ban_failed_skipped_running_ket(client, fake_db):
+    """`model_version=n` + `train_state` failed/skipped/running kẹt → việc mới `train:<n>:<lượt>`."""
+    from datetime import timedelta
+
+    _mk_user(fake_db, "u_retry")
+    h = _h(client, "u_retry")
+    r = client.post("/api/v1/models/train", json={"epochs": 7}, headers=h)
+    ver = r.json()["model_version"]
+    assert r.json()["created"] is True
+    # còn việc queued → không giao thêm, trả bản ghi hiện có (có job_id)
+    again = client.post("/api/v1/models/train", json={"model_version": ver}, headers=h).json()
+    assert again["created"] is False and again["job_id"] == f"train:{ver}"
+    # worker đánh failed → giao lại, giữ hyperparams cũ
+    fake_db["jobs"].update_one({"_id": f"train:{ver}"}, {"$set": {"state": "failed"}})
+    fake_db["models"].update_one({"version": ver}, {"$set": {"train_state": "failed", "train_error": "boom"}})
+    r2 = client.post("/api/v1/models/train", json={"model_version": ver}, headers=h).json()
+    assert r2["retry"] is True and r2["job_id"] == f"train:{ver}:2" and r2["train_attempt"] == 2
+    job = fake_db["jobs"].find_one({"_id": f"train:{ver}:2"})
+    assert job["state"] == "queued" and job["params"] == {"epochs": 7, "model_version": ver}
+    m = fake_db["models"].find_one({"version": ver})
+    assert m["train_state"] == "queued" and m["job_id"] == f"train:{ver}:2" and m["train_error"] is None
+    # skipped → lượt 3
+    fake_db["jobs"].update_one({"_id": f"train:{ver}:2"}, {"$set": {"state": "skipped"}})
+    fake_db["models"].update_one({"version": ver}, {"$set": {"train_state": "skipped"}})
+    assert client.post("/api/v1/models/train", json={"model_version": ver}, headers=h).json()["job_id"] == \
+        f"train:{ver}:3"
+    # running có heartbeat mới → không giao lại; heartbeat cũ (việc đã lost) → giao lại
+    now = datetime.now(timezone.utc)
+    fake_db["jobs"].update_one({"_id": f"train:{ver}:3"}, {"$set": {"state": "lost"}})
+    fake_db["models"].update_one({"version": ver}, {"$set": {"train_state": "running", "train_heartbeat": now}})
+    assert client.post("/api/v1/models/train", json={"model_version": ver}, headers=h).json()["created"] is False
+    fake_db["models"].update_one({"version": ver},
+                                 {"$set": {"train_heartbeat": now - timedelta(hours=2)}})
+    r4 = client.post("/api/v1/models/train", json={"model_version": ver}, headers=h).json()
+    assert r4["job_id"] == f"train:{ver}:4" and r4["previous_train_state"] == "running"
+    # succeeded → không giao lại
+    fake_db["jobs"].update_one({"_id": f"train:{ver}:4"}, {"$set": {"state": "succeeded"}})
+    fake_db["models"].update_one({"version": ver}, {"$set": {"train_state": "succeeded"}})
+    assert client.post("/api/v1/models/train", json={"model_version": ver}, headers=h).json()["created"] is False
+    assert fake_db["jobs"].count_documents({"type": "train"}) == 4
+
+
+def test_train_chen_viec_loi_danh_models_failed(client, fake_db):
+    """Chèn `jobs` lỗi (ở đây: trùng `_id` có sẵn) → `models` đánh failed + lý do, trả 503."""
+    _mk_user(fake_db, "u_trfail")
+    h = _h(client, "u_trfail")
+    fake_db["jobs"].insert_one({"_id": "train:1", "type": "train", "state": "succeeded"})
+    r = client.post("/api/v1/models/train", json={}, headers=h)
+    assert r.status_code == 503, r.text
+    m = fake_db["models"].find_one({"version": 1})
+    assert m["train_state"] == "failed" and "không giao được" in m["train_error"]
+
+
+def test_index_models_khop_migration_0010(fake_db):
+    from vngis.model_registry import MODELS_INDEXES, ensure_model_indexes
+
+    path = REPO / "migrations" / "mongo" / "0010_models_version_unique.py"
+    spec = importlib.util.spec_from_file_location("m0010_models_version_unique", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    assert mod.INDEXES == MODELS_INDEXES
+    ensure_model_indexes(fake_db)
+    ensure_model_indexes(fake_db)  # idempotent
+    ix = fake_db["models"].index_information()["version_unique_number"]
+    assert ix["unique"]
+
+
+def test_promote_bi_chan_neu_train_state_doi_giua_chung(client, fake_db, monkeypatch):
+    """API kiểm tra train_state trước, nhưng lệnh ghi cũng có điều kiện (đổi giữa chừng → 409, không promote)."""
+    from vngis import model_registry as MR
+
+    _mk_user(fake_db, "u_pnt")
+    h = _h(client, "u_pnt")
+    fake_db["models"].insert_one({"_id": "phasegnn-9", "name": "phasegnn", "version": 9, "status": "staging",
+                                  "train_state": "succeeded"})
+    real = MR._promote_steps
+
+    def steps(db, doc_id, actor, now, session=None, hook=None):
+        db["models"].update_one({"_id": doc_id}, {"$set": {"train_state": "queued"}})
+        return real(db, doc_id, actor, now, session, hook)
+
+    monkeypatch.setattr(MR, "_promote_steps", steps)
+    r = client.post("/api/v1/models/9/promote", headers=h)
+    assert r.status_code == 409 and r.json()["error"]["detail"]["error"] == "model_not_trained"
+    assert fake_db["models"].find_one({"_id": "phasegnn-9"})["status"] == "staging"

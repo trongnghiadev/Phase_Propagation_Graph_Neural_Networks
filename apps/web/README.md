@@ -22,3 +22,15 @@ Token: access token (15 phút) chỉ giữ trong **bộ nhớ** của trang (kh�
 Dev: proxy Next.js (`NEXT_PUBLIC_API_PROXY=1`) giữ cùng origin nên cookie và CSRF không cần cấu hình thêm. Gọi thẳng API khác cổng (`NEXT_PUBLIC_API_PROXY=0`) thì API phải có origin của web trong `auth.cors_origins` (`CORS_ORIGINS`; `config/env/dev.yaml` đã có `http://localhost:3000`). Dev chạy http nên API đặt `auth.cookie_secure: false` (`AUTH_COOKIE_SECURE=false`); production qua HTTPS giữ `Secure`.
 
 Trang QC dùng `flag_version` mà `GET /stations/{code}/tides` trả kèm từng điểm có cờ QC để gửi đúng `version` khi `PATCH /tides/...` (không dựa vào lỗi 428). Nhật ký, việc nền, hàng đợi duyệt, cảnh báo hiển thị người thực hiện bằng nhãn API trả (`actor_label`, `requested_by_label`); dữ liệu lưu chỉ có `user:<account_code>:<role>`.
+
+## Kiểm thử thủ công 25/11/2026
+
+Phiên đăng nhập bằng cookie refresh, chạy trên máy dev: API tạm (`APP_ENV=dev`, DB MongoDB tạm riêng, Redis tạm) + `next dev` với proxy (`NEXT_PUBLIC_API_PROXY=1`, cùng origin); tài khoản thử tạo ngẫu nhiên cho lượt này, xoá cùng DB tạm sau khi thử (không ghi tên tài khoản/mật khẩu ở đây).
+
+| Bước | Kết quả |
+|---|---|
+| Đăng nhập | đạt: `localStorage` trống; cookie refresh `httpOnly` không đọc được từ JS (`document.cookie` không chứa) |
+| Tải lại trang | đạt: giữ phiên (refresh qua cookie) |
+| Hai tab tải lại đồng thời | đạt: cả hai vẫn đăng nhập (không bị thu hồi do dùng lại refresh token) |
+| Đăng xuất ở tab 2 | đạt: tab 1 về trang đăng nhập; tải lại không khôi phục phiên |
+| Log API | đạt: `401` ở `/auth/refresh` chỉ xuất hiện trước khi đăng nhập và sau khi đăng xuất |

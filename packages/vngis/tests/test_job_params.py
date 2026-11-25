@@ -75,3 +75,12 @@ def test_parse_model_version_ep_kieu_so_nguyen():
     for bad in ("abc", "v", "1.5", True, -1, "9" * 19):
         with _pt.raises(ValueError):
             parse_model_version(bad)
+
+
+def test_train_model_version_la_so_nguyen():
+    """`TrainParams.model_version` theo registry: int (nhận "v3"/"3"/3), không phải số → lỗi."""
+    assert validate_job_params("train", {"model_version": "v3"}) == {"model_version": 3}
+    assert validate_job_params("train", {"model_version": 7}) == {"model_version": 7}
+    for bad in ("abc", "v0", 0, True):
+        with pytest.raises(JobParamsError):
+            validate_job_params("train", {"model_version": bad})

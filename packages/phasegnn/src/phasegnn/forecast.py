@@ -91,8 +91,11 @@ def load_checkpoint(path: Path) -> tuple[PhaseGNN, TrainConfig, dict]:
 
     blob = torch.load(path, map_location="cpu", weights_only=True)
     mcfg = ModelConfig.from_dict(blob["config"])
-    tcfg = TrainConfig(**{k: v for k, v in blob.get("train_config", {}).items()
-                          if k in TrainConfig.__dataclass_fields__})
+    tc = dict(blob.get("train_config", {}))
+    # Checkpoint trước 25/11/2026 không ghi `subgraph_version` ⇒ dựng đồ thị con kiểu cũ (v1,
+    # thiếu cạnh `down`) để dự báo của chúng không đổi (xem `train.build_station_subgraph`).
+    tc.setdefault("subgraph_version", 1)
+    tcfg = TrainConfig(**{k: v for k, v in tc.items() if k in TrainConfig.__dataclass_fields__})
     dims = blob.get("dims", {})
     # `in_dim` của checkpoint cũ (trước 24/11/2026) KHÔNG có 2 kênh đồng hồ lưới;
     # checkpoint mới luôn ghi kèm số kênh thực tế trong `dims`.
@@ -129,7 +132,8 @@ def predict_split(model: PhaseGNN, tcfg: TrainConfig, graph, dataset,
     subgraphs: dict[str, StationSubgraph] = {}
     for st in sorted({s.station for s in dataset.samples}):
         try:
-            subgraphs[st] = build_station_subgraph(graph, st)
+            subgraphs[st] = build_station_subgraph(
+                graph, st, version=int(getattr(tcfg, "subgraph_version", 1)))
         except KeyError:
             continue
 

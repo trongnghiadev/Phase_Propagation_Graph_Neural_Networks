@@ -49,7 +49,9 @@ def _job_resources() -> dict[str, str]:
     from vngis.atomic_reload import LOCK_RESOURCE
 
     return {"ingest_bulletins": LOCK_RESOURCE, "reload_bulletins": LOCK_RESOURCE,
-            "forecast_run": "forecast_run", "cache_warm": "cache_warm"}
+            "forecast_run": "forecast_run", "cache_warm": "cache_warm",
+            # Một lượt huấn luyện mỗi lúc trên toàn cụm (CPU/RAM lớn, ghi `results/models/`).
+            "train": "train"}
 
 
 def build_scheduler(instance: str) -> Any:
@@ -57,7 +59,7 @@ def build_scheduler(instance: str) -> Any:
     from vngis.config import get_config
     from vngis.db import get_db, redlock
 
-    from worker.jobs import forecast_run, ingest_bulletins, reload_bulletins, warm_cache
+    from worker.jobs import forecast_run, ingest_bulletins, reload_bulletins, train_run, warm_cache
     from worker.scheduler import Scheduler
 
     resources = _job_resources()
@@ -86,8 +88,15 @@ def build_scheduler(instance: str) -> Any:
         sched.interval("cache_warm", 600, warm_cache, db=db, cache=cache)
     # Việc do API giao (`state="queued"`): khoá theo tài nguyên (`_job_resources`), tham số theo danh sách
     # trắng `vngis.job_params`.
+    # `train` chạy hàng giờ ⇒ bộ quét riêng (job APScheduler riêng), không chặn các việc ngắn.
     sched.queue({"ingest_bulletins": ingest_bulletins, "reload_bulletins": reload_bulletins,
-                 "forecast_run": forecast_run, "cache_warm": warm_cache}, seconds=15, db=db, cache=cache)
+                 "forecast_run": forecast_run, "cache_warm": warm_cache},
+                seconds=15, exclude_types=["train"], db=db, cache=cache)
+    sched.queue({"train": train_run}, seconds=30, name="train_queue", types=["train"], db=db, cache=cache)
+    # Việc `train` bị bỏ hẳn (mất khoá/worker chết quá max_attempts lần) → models.train_state="failed".
+    from worker.train import abandon_training
+
+    sched.abandon_hooks["train"] = abandon_training
     return sched
 
 

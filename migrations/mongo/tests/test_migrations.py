@@ -4,7 +4,7 @@
         -v "<gốc repo>:/repo" -w /repo pgnn-testdeps:3.12 python -m pytest migrations/mongo/tests -q
 
 Không có MongoDB → skip. ``MIGRATION_SOURCE_DB`` (tuỳ chọn): DB nguồn để **đọc** `jobs`, `qc_flags`,
-`audit_logs` thật, chép sang DB tạm rồi áp migration (kiểm tra 0 document cũ không hợp lệ). Không ghi vào DB nguồn.
+`audit_logs`, `users`, `alerts`, `models` thật, chép sang DB tạm rồi áp migration (kiểm tra 0 document cũ không hợp lệ). Không ghi vào DB nguồn.
 """
 from __future__ import annotations
 
@@ -131,6 +131,32 @@ def test_0008_dung_khi_co_ma_trung(db):
     assert "0008_users_account_code" not in runner.applied(db)
 
 
+def test_0010_models_version_unique(db):
+    models = db["models"]
+    models.insert_many([{"_id": "cu-a", "version": "v20240101"}, {"_id": "cu-b", "version": "v20240101"},
+                        {"_id": "khong-so"}, {"_id": "phasegnn-1", "version": 1}])
+    out = runner.up(db, only=["0010"])
+    rep = out[0]["report"]
+    assert not out[0]["verify"] and rep["duplicates"] == [] and rep["n_non_numeric_version"] == 3
+    ix = models.index_information()["version_unique_number"]
+    assert ix["unique"] and ix["partialFilterExpression"] == {"version": {"$type": "number"}}
+    models.insert_one({"_id": "cu-c", "version": "v20240101"})  # chuỗi: ngoài partial
+    with pytest.raises(pymongo.errors.DuplicateKeyError):
+        models.insert_one({"_id": "phasegnn-1b", "version": 1})
+    assert all(not r["verify"] for r in runner.up(db, only=["0010"], force=True))
+    assert not runner.verify(db, only=["0010"])["0010_models_version_unique"]
+    assert runner.down(db, "0010")["reverted"]
+    assert "version_unique_number" not in models.index_information()
+
+
+def test_0010_dung_khi_co_version_trung(db):
+    db["models"].insert_many([{"_id": "a", "version": 2}, {"_id": "b", "version": 2}])
+    assert runner.up(db, only=["0010"], dry_run=True)[0]["report"]["duplicates"] == [2]
+    with pytest.raises(RuntimeError):
+        runner.up(db, only=["0010"])
+    assert "0010_models_version_unique" not in runner.applied(db)
+
+
 def test_dry_run_khong_doi_gi(db):
     db["jobs"].insert_one({"_id": "a", "job": "x", "status": "ok"})
     out = runner.up(db, dry_run=True, only=["0006"])
@@ -149,11 +175,105 @@ def test_down_khoi_phuc_validator_cu(db):
     assert after["validator"] == before["validator"]
 
 
+def _seed_0009(db):
+    """Dữ liệu cũ tổng hợp: tên đăng nhập giả (không phải người thật) lẫn giá trị phải giữ nguyên."""
+    db["users"].insert_many([
+        {"_id": "nv_a", "username": "nv_a", "role": "reviewer"},                       # chưa có mã
+        {"_id": "nv_b", "username": "nv_b", "role": "admin", "account_code": "acc_0000000000b1"},
+        {"_id": "uid_c", "username": "nv_c", "role": "viewer", "account_code": None},   # _id khác tên
+    ])
+    t = _now()
+    db["audit_logs"].insert_many([
+        {"_id": "a1", "at": t, "actor": "nv_a", "action": "qc_decision", "collection": "qc_flags", "doc_id": "f1",
+         "before": {"status": "suspect", "decided_by": "nv_b"},
+         "after": {"status": "confirmed_ok", "decided_by": "nv_a"},
+         "reason": "r", "state": "applied", "reverted_by": "nv_c", "revert_claim": {"by": "uid_c", "at": t}},
+        {"_id": "a2", "at": t, "actor": "manual_review", "action": "qc_decision", "collection": "qc_flags",
+         "doc_id": "f2", "before": None, "after": {"decided_by": "manual_review"}, "reason": "r", "state": "applied"},
+        {"_id": "a3", "at": t, "actor": "user:acc_0000000000b1:admin", "action": "user_perm", "collection": "users",
+         "doc_id": "nv_a", "target": {"user_id": "nv_a"}, "before": {"perm": {}}, "after": None, "reason": "r",
+         "state": "applied"},
+        {"_id": "a4", "at": t, "actor": "ai_do_la", "action": "x", "collection": "c", "doc_id": "d",
+         "before": None, "after": None, "reason": "r", "state": "applied"},
+    ])
+    db["qc_flags"].insert_many([{"_id": "f1", "decided_by": "nv_a", "retired_by": "nv_c"},
+                                {"_id": "f2", "decided_by": "qc_job"}, {"_id": "f3", "decided_by": None}])
+    db["jobs"].insert_one({"_id": "j1", "type": "train", "state": "queued", "requested_by": "nv_b", "params": {}})
+    db["alerts"].insert_one({"_id": "al1", "ack_by": "uid_c"})
+    db["models"].insert_one({"_id": "m1", "version": 1, "status": "production", "promoted_by": "nv_a"})
+
+
+def _walk(x):
+    if isinstance(x, dict):
+        for k, v in x.items():
+            yield k
+            yield from _walk(v)
+    elif isinstance(x, list):
+        for v in x:
+            yield from _walk(v)
+    else:
+        yield x
+
+
+def test_0009_an_danh_hoa_actor(db):
+    _seed_0009(db)
+    runner.up(db, only=["0005"])   # validator audit_logs (moderate): bản ghi sau khi sửa vẫn phải hợp lệ
+    snap = {c: list(db[c].find({})) for c in ("audit_logs", "qc_flags", "jobs", "alerts", "models", "users")}
+    dry = runner.up(db, only=["0009"], dry_run=True)[0]["report"]
+    assert dry["dry_run"] and dry["n_users_code_assigned"] == 2
+    assert dry["fields_changed"] == {
+        "audit_logs.actor": 1, "audit_logs.reverted_by": 1, "audit_logs.revert_claim.by": 1,
+        "audit_logs.before.decided_by": 1, "audit_logs.after.decided_by": 1, "qc_flags.decided_by": 1,
+        "qc_flags.retired_by": 1, "jobs.requested_by": 1, "alerts.ack_by": 1, "models.promoted_by": 1,
+        "audit_logs.user_perm.doc_id": 1, "audit_logs.user_perm.target": 1}
+    assert dry["documents_changed"] == {"audit_logs": 2, "qc_flags": 1, "jobs": 1, "alerts": 1, "models": 1}
+    assert dry["n_unmapped"] == {"audit_logs.actor": 1}
+    # dry-run: không ghi gì, kể cả `_migrations`
+    assert {c: list(db[c].find({})) for c in snap} == snap
+    assert "0009_anonymize_actors" not in runner.applied(db)
+    assert runner.verify(db, only=["0009"])["0009_anonymize_actors"]   # còn tên → verify báo
+
+    out = runner.up(db, only=["0009"])[0]
+    assert not out["verify"] and out["report"]["audit_id"]
+    code = {u["_id"]: u["account_code"] for u in db["users"].find({})}
+    assert code["nv_b"] == "acc_0000000000b1" and all(c.startswith("acc_") for c in code.values())
+    a1 = db["audit_logs"].find_one({"_id": "a1"})
+    assert a1["actor"] == f"user:{code['nv_a']}" and a1["reverted_by"] == f"user:{code['uid_c']}"
+    assert a1["revert_claim"]["by"] == f"user:{code['uid_c']}"
+    assert a1["before"]["decided_by"] == f"user:{code['nv_b']}"
+    assert a1["after"]["decided_by"] == f"user:{code['nv_a']}"
+    a3 = db["audit_logs"].find_one({"_id": "a3"})
+    assert a3["doc_id"] == code["nv_a"] and a3["target"] == {"account_code": code["nv_a"]}
+    assert a3["actor"] == "user:acc_0000000000b1:admin"   # đã đúng định dạng → giữ
+    assert db["audit_logs"].find_one({"_id": "a2"})["actor"] == "manual_review"
+    assert db["audit_logs"].find_one({"_id": "a4"})["actor"] == "ai_do_la"  # không khớp tài khoản → giữ, chỉ đếm
+    assert db["qc_flags"].find_one({"_id": "f1"})["retired_by"] == f"user:{code['uid_c']}"
+    assert db["qc_flags"].find_one({"_id": "f2"})["decided_by"] == "qc_job"
+    assert db["jobs"].find_one({"_id": "j1"})["requested_by"] == f"user:{code['nv_b']}"
+    assert db["alerts"].find_one({"_id": "al1"})["ack_by"] == f"user:{code['uid_c']}"
+    assert db["models"].find_one({"_id": "m1"})["promoted_by"] == f"user:{code['nv_a']}"
+    # bản ghi audit cho chính việc ẩn danh (chỉ số lượng); mọi bản ghi vẫn hợp lệ với validator 0005
+    meta = db["audit_logs"].find_one({"action": "anonymize_actors"})
+    assert meta["actor"] == "migration:0009" and meta["after"]["fields_changed"]["audit_logs.actor"] == 1
+    assert db["audit_logs"].count_documents({"$nor": [load_spec("audit_logs")["validator"]]}) == 0
+    names = {"nv_a", "nv_b", "nv_c", "uid_c"}
+    assert not names & {str(v) for d in db["_migrations"].find({}) for v in _walk(d)}
+    assert not names & {str(v) for v in _walk(meta)}
+    # idempotent: lần 2 không đổi gì, không chèn thêm audit
+    again = runner.up(db, only=["0009"], force=True)[0]
+    assert again["report"]["fields_changed"] == {} and again["report"]["audit_id"] is None
+    assert db["audit_logs"].count_documents({"action": "anonymize_actors"}) == 1
+    # down không khả thi: lỗi rõ, giữ `_migrations`
+    with pytest.raises(RuntimeError):
+        runner.down(db, "0009")
+    assert "0009_anonymize_actors" in runner.applied(db)
+
+
 @pytest.mark.skipif(not os.getenv("MIGRATION_SOURCE_DB"), reason="đặt MIGRATION_SOURCE_DB để thử trên bản sao dữ liệu thật")
 def test_ban_sao_du_lieu_that_khong_co_document_khong_hop_le(client, db):
     src = client[os.environ["MIGRATION_SOURCE_DB"]]
     assert db.name != src.name
-    for c in ("jobs", "qc_flags", "audit_logs"):
+    for c in ("jobs", "qc_flags", "audit_logs", "users", "alerts", "models"):
         docs = list(src[c].find({}))
         if docs:
             db[c].insert_many(docs)
@@ -162,4 +282,8 @@ def test_ban_sao_du_lieu_that_khong_co_document_khong_hop_le(client, db):
         rep = out[mid]["report"]
         assert rep["n_invalid_existing"] == 0, (mid, rep)
         assert not out[mid]["verify"]
-    print({m: (r["report"]["n_documents"], r["report"].get("n_invalid_existing")) for m, r in out.items()})
+    assert not out["0009_anonymize_actors"]["verify"]
+    assert db["audit_logs"].count_documents({"$nor": [load_spec("audit_logs")["validator"]]}) == 0
+    print({m: (r["report"].get("n_documents"), r["report"].get("n_invalid_existing")) for m, r in out.items()})
+    rep9 = out["0009_anonymize_actors"]["report"]
+    print("0009", {k: rep9[k] for k in ("n_users", "n_users_code_assigned", "documents_changed", "n_unmapped")})

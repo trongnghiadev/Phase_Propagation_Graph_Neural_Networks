@@ -217,8 +217,9 @@ class ModelRecord:
     model_id: str
     name: str
     variant: str
-    status: str = "staging"          # staging | production | archived
-    version: int = 1
+    status: str = "staging"          # staging | production | archived (vngis.model_registry.MODEL_STATUSES)
+    #: Số nguyên tăng dần; ``None`` → `register_model` cấp số mới nguyên tử (`vngis.model_registry`).
+    version: int | None = None
     hyperparams: dict = field(default_factory=dict)
     metrics: dict = field(default_factory=dict)
     data_snapshot: dict = field(default_factory=dict)
@@ -233,40 +234,91 @@ class ModelRecord:
         return d
 
 
-def register_model(record: ModelRecord, *, db=None, log=print) -> dict:
+#: Trường do huấn luyện ghi khi cập nhật bản ghi đã có (`update_existing`) — không đụng `status`,
+#: `train_state`, `created_at`, `requested_by` (của API/worker).
+_TRAINING_FIELDS = ("variant", "hyperparams", "metrics", "data_snapshot", "artifact_path", "train_config", "seed")
+
+
+def register_model(record: ModelRecord, *, db=None, log=print, update_existing: bool = False,
+                   fence: int | None = None) -> dict:
     """Ghi ban ghi mo hinh vao collection `models` (MongoDB).
 
-    Neu khong co `db` (hoac khong ket noi duoc MongoDB), ham tra ve dict ban ghi de
-    caller tu luu ra file — khong lam that bai luat trinh.
+    - Mặc định: ``version is None`` → cấp số mới nguyên tử (`vngis.model_registry.allocate_model_version`);
+      chèn bản ghi MỚI ``_id = model_doc_id(name, version)`` (``record.model_id`` được đặt lại theo đó) —
+      không upsert, không ghi đè bản ghi cũ (trùng ``_id`` → lỗi, ``registered=False``).
+    - ``update_existing=True`` (worker gọi ``train --model-version n``): chỉ **cập nhật** bản ghi đã có
+      ``{_id: model_id, version}`` do API tạo (không upsert, không đổi ``status``/``train_state``); có `fence`
+      thì thêm điều kiện ``train_fence <= fence`` để tiến trình của lượt cũ (đã mất khoá) không ghi đè.
+
+    Khong co `db` (hoac loi MongoDB) → tra ve dict ban ghi de caller tu luu ra file (fail-soft);
+    ``record.registered`` (thuộc tính, không thuộc bản ghi) cho biết đã ghi DB hay chưa.
     """
     doc = record.to_mongo()
     if db is None:
         log("[registry] khong co MongoDB -> chi tra ve ban ghi (chua ghi DB)")
+        record.registered = False
         return doc
+    registered = False
     try:
-        from vngis.db import get_db  # noqa: PLC0415
-        from vngis.config import get_config  # noqa: PLC0415
+        from vngis.model_registry import MODEL_STATUSES, allocate_model_version  # noqa: PLC0415
 
-        database = db if db is not None else get_db(get_config())
-        col = database["models"]
-        col.update_one({"_id": record.model_id}, {"$set": doc}, upsert=True)
-        log(f"[registry] da ghi mo hinh '{record.model_id}' vao collection `models`")
+        if record.status not in MODEL_STATUSES:
+            raise ValueError(f"status không hợp lệ: {record.status!r} (cần {MODEL_STATUSES})")
+        col = db["models"]
+        if update_existing:
+            if record.version is None:
+                raise ValueError("update_existing cần version")
+            flt: dict[str, Any] = {"_id": record.model_id, "version": int(record.version)}
+            if fence is not None:
+                flt["$or"] = [{"train_fence": {"$exists": False}}, {"train_fence": None},
+                              {"train_fence": {"$lte": int(fence)}}]
+            fields = {k: doc[k] for k in _TRAINING_FIELDS if k in doc}
+            res = col.update_one(flt, {"$set": {**fields, "registered_at": time.time()}})
+            registered = res.matched_count == 1
+            log(f"[registry] {'da cap nhat' if registered else 'KHONG khop (fence/version)'} ban ghi "
+                f"'{record.model_id}'")
+        else:
+            from vngis.model_registry import model_doc_id  # noqa: PLC0415
+
+            if record.version is None:
+                record.version = allocate_model_version(db)
+            # Mỗi lần đăng ký là MỘT bản ghi mới ``_id = <name>-<version>`` (insert, không upsert): chạy lại
+            # cùng seed không ghi đè/hạ cấp bản cũ (kể cả bản đang ``production``).
+            record.model_id = model_doc_id(record.name, record.version)
+            doc.update({"version": record.version, "model_id": record.model_id})
+            col.insert_one({"_id": record.model_id, **doc})
+            registered = True
+            log(f"[registry] da ghi mo hinh '{record.model_id}' vao collection `models`")
     except Exception as exc:  # noqa: BLE001
         log(f"[registry] khong ghi duoc vao MongoDB ({exc})")
+    record.registered = registered
     return doc
 
 
-def find_production_model(db=None, *, name: str | None = None) -> dict | None:
-    """Lay ban ghi mo hinh dang `production` (dung cho job du bao hang ngay)."""
+def open_registry_db(log=print):
+    """Kết nối MongoDB theo `vngis.config` (``MONGO_URI``/``MONGO_DB``/``APP_ENV``); lỗi → ``None`` (fail-soft)."""
     try:
-        from vngis.db import get_db  # noqa: PLC0415
         from vngis.config import get_config  # noqa: PLC0415
+        from vngis.db import get_db  # noqa: PLC0415
 
-        database = db if db is not None else get_db(get_config())
-        query = {"status": "production"}
-        if name:
-            query["name"] = name
-        return database["models"].find_one(query, sort=[("version", -1)])
+        return get_db(get_config())
+    except Exception as exc:  # noqa: BLE001
+        log(f"[registry] khong ket noi duoc MongoDB ({exc})")
+        return None
+
+
+def find_production_model(db=None, *, name: str | None = None) -> dict | None:
+    """Lay ban ghi mo hinh dang `production` theo `vngis.model_registry.PRODUCTION_SORT` (luot promote moi nhat)."""
+    try:
+        from vngis.model_registry import find_production  # noqa: PLC0415
+
+        database = db
+        if database is None:
+            from vngis.config import get_config  # noqa: PLC0415
+            from vngis.db import get_db  # noqa: PLC0415
+
+            database = get_db(get_config())
+        return find_production(database, name=name)
     except Exception:  # noqa: BLE001
         return None
 

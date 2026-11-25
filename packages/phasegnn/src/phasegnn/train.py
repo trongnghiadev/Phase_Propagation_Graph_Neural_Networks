@@ -41,7 +41,8 @@ from .losses import (QUANTILES, circular_distance_h, mae, mono_loss, peak_mae,
                      peak_hour_mae, pinball_loss, soft_peak_height, tau_loss)
 from .model import (ModelConfig, PhaseGNN, configure_threads, daily_grid,
                     interpolate_to_grid, seed_everything)
-from .registry import MlflowTracker, ModelRecord, optuna_search, register_model, save_registry_json
+from .registry import (MlflowTracker, ModelRecord, open_registry_db, optuna_search, register_model,
+                       save_registry_json)
 
 #: Biến thể mô hình → cấu hình (đề cương 5.2.7).
 VARIANTS: dict[str, dict] = {
@@ -56,6 +57,12 @@ VARIANTS: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 # Đồ thị con theo trạm
 # ---------------------------------------------------------------------------
+#: Phiên bản cách dựng đồ thị con (`build_station_subgraph`). 1 = thiếu cạnh `down` (trước
+#: 25/11/2026); 2 = đã sửa (mặc định cho lượt huấn luyện mới).
+SUBGRAPH_VERSION = 2
+SUBGRAPH_VERSIONS = (1, 2)
+
+
 @dataclass
 class StationSubgraph:
     """Đồ thị con chứa đường đi pha hai chiều của một trạm."""
@@ -72,7 +79,8 @@ class StationSubgraph:
 
 
 def build_station_subgraph(graph: GraphData, station: str,
-                           sea_id: str = "SEA_VUNGTAU") -> StationSubgraph:
+                           sea_id: str = "SEA_VUNGTAU",
+                           version: int = SUBGRAPH_VERSION) -> StationSubgraph:
     """Dựng đồ thị con: biển ↔ trạm, theo cả hai chiều.
 
     **Cấu trúc đồ thị.** Cạnh `up` đi **từ biển vào thượng nguồn** (hướng sóng triều
@@ -80,18 +88,28 @@ def build_station_subgraph(graph: GraphData, station: str,
     nút liền nhau trên dòng chảy có **hai cạnh** (một `up`, một `down`) với hai τ khác
     nhau — đó là cơ chế lan truyền pha hai chiều của PhaseGNN.
 
-    Ta giữ lại:
-    * **đường đi dài nhất theo chiều `up`** từ nút biển tới nút trạm (đường đi của sóng
-      triều — sóng đi vào theo nhánh bị trễ nhất), và
-    * **đường đi xuôi dòng chảy** từ nút trạm về biển.
+    Ta giữ lại **một đường đi theo chiều `up`** từ nút biển tới nút trạm (BFS — đường ít
+    cạnh nhất; đường đi của sóng triều) và, với `version >= 2`, **cạnh `down` của cùng
+    từng cặp nút** trên đường đó (chiều ngược lại). Không thêm nhánh nào khác (không dò
+    riêng đường xuôi dòng từ trạm ra biển, không thêm nhánh hồ chứa) ⇒ đồ thị con chỉ gồm
+    ~7–27 nút thay vì 647 nút. Cạnh `up` rời nút biển không có cạnh `down` ngược chiều trong
+    đồ thị toàn cục (645 `down` / 646 `up`), nên v2 có số cạnh `down` = số cạnh `up` − 1.
 
-    Cả hai chiều của mỗi cặp cạnh trên đường đi `up` được giữ ⇒ đồ thị con có đúng
-    cấu trúc hai chiều nhưng chỉ gồm ~10–30 nút thay vì 647 nút.
+    **Phiên bản (`version`, sửa 25/11/2026).** `1` = hành vi trước 25/11/2026: điều kiện
+    tìm cạnh `down` bị đảo (tìm `cur → par`, cùng chiều cạnh `up`) nên đồ thị con
+    **không có cạnh `down` nào** — thông điệp `down` luôn bằng 0, B5b không nhận thông
+    tin đồ thị. `2` = đã sửa: mỗi cạnh `up` trên đường được kèm cạnh `down` ngược chiều
+    nếu đồ thị toàn cục có cạnh đó; trên đồ thị thật cạnh rời nút biển không có cạnh
+    ngược ⇒ số cạnh `down` = số cạnh `up` − 1. Checkpoint ghi `train_config.subgraph_version`;
+    checkpoint cũ không có trường này được nạp với `1` (`forecast.load_checkpoint`) để dự
+    báo của chúng không đổi.
 
     **Lưu ý:** mã trạm (`"PHU_AN"`) và **mã nút** (`"44043114"`) là hai thứ khác nhau —
     `graph.station_node` ánh xạ mã trạm → *chỉ số* node. BFS dưới đây làm việc với
     *mã nút*.
     """
+    if version not in SUBGRAPH_VERSIONS:
+        raise ValueError(f"subgraph version phải là một trong {SUBGRAPH_VERSIONS}, nhận {version!r}")
     if station not in graph.station_node:
         raise KeyError(f"trạm {station!r} không có nút trong đồ thị")
     if sea_id not in graph.node_index:
@@ -142,15 +160,19 @@ def build_station_subgraph(graph: GraphData, station: str,
     if found:
         cur = sea_id
         while cur in prev:
-            par, e = prev[cur]           # cạnh `up`: par (thượng nguồn) → cur (hạ nguồn)
+            # `prev[cur] = (nxt, e)`: nút kế tiếp về phía trạm và cạnh `up` `e` = cur → nxt
+            # (phía biển → phía thượng nguồn). Tên biến `par` giữ như cũ.
+            par, e = prev[cur]
             keep.add(cur)
             keep.add(par)
             edge_keep.add(e)
-            # cạnh `down` của cùng cặp nút (chiều ngược lại)
+            # cạnh `down` của cùng cặp nút = chiều ngược lại: par → cur.
+            # v1 (lỗi cũ) tìm cur → par (cùng chiều cạnh `up`) ⇒ không bao giờ khớp.
+            want_src, want_dst = (cur, par) if version == 1 else (par, cur)
             for e2 in range(graph.num_edges):
                 if graph.edge_dir[e2] == 0 \
-                        and graph.node_ids[graph.edge_index[0, e2]] == cur \
-                        and graph.node_ids[graph.edge_index[1, e2]] == par:
+                        and graph.node_ids[graph.edge_index[0, e2]] == want_src \
+                        and graph.node_ids[graph.edge_index[1, e2]] == want_dst:
                     edge_keep.add(e2)
                     break
             cur = par
@@ -329,6 +351,10 @@ class TrainConfig:
     #: kể cả trạm giữ riêng (rò thống kê nhãn). Khi dự báo, trạm vẫn có quan trắc quá khứ
     #: của chính nó làm đầu vào (như mọi trạm khác).
     holdout_stations: tuple[str, ...] = ()
+    #: Phiên bản đồ thị con (`build_station_subgraph`): 2 = có cạnh `down` (mặc định lượt
+    #: mới); 1 = hành vi cũ (thiếu cạnh `down`) — checkpoint cũ không có trường này được
+    #: nạp với 1 (`forecast.load_checkpoint`).
+    subgraph_version: int = SUBGRAPH_VERSION
     aux_weight: float = 0.3
     device: str = "cpu"
     #: So luong CPU cho torch. Mac dinh 1: khoi luong nho (do thi con) bi da luong
@@ -422,7 +448,8 @@ def train_model(datasets: dict[str, SampleSet], graph: GraphData, tcfg: TrainCon
     subgraphs: dict[str, StationSubgraph] = {}
     for st in sorted({s.station for s in train_set.samples}):
         try:
-            subgraphs[st] = build_station_subgraph(graph, st)
+            subgraphs[st] = build_station_subgraph(graph, st,
+                                                   version=int(tcfg.subgraph_version))
         except KeyError:
             log(f"[CẢNH BÁO] bỏ qua trạm {st}: không tìm thấy node trong đồ thị")
 
@@ -857,6 +884,18 @@ def evaluate(model, samples: Sequence[WindowSample], subgraphs, cfg: ModelConfig
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+def _portable_path(p: Path) -> str:
+    """Đường dẫn ghi vào registry: tương đối thư mục làm việc (gốc repo) nếu được, dạng ``/``.
+
+    Không ghi đường dẫn tuyệt đối của máy chạy khi tránh được (repo công khai; worker chỉ nhận checkpoint
+    tương đối dưới ``results/``).
+    """
+    try:
+        return p.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        return p.as_posix()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Huấn luyện PhaseGNN / biến thể")
     ap.add_argument("--variant", default="phasegnn", choices=list(VARIANTS))
@@ -875,13 +914,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--subsample", default="head", choices=list(SUBSAMPLE_MODES),
                     help="cách lấy --max-*-samples mẫu: head (N mẫu đầu, mặc định) | "
                          "spread (cách đều trên mọi trạm/ngày)")
+    ap.add_argument("--subgraph-version", type=int, default=SUBGRAPH_VERSION,
+                    choices=list(SUBGRAPH_VERSIONS),
+                    help="cách dựng đồ thị con: 2 = có cạnh down (mặc định), 1 = hành vi cũ "
+                         "trước 25/11/2026 (thiếu cạnh down) để tái tạo số cũ")
     ap.add_argument("--holdout-stations", default="",
                     help="trạm giữ riêng, cách nhau dấu phẩy (bỏ khỏi train/val; E5)")
     ap.add_argument("--out-dir", default=None, help="thư mục ghi checkpoint và log")
     ap.add_argument("--data-root", default=None, help="gốc repo (mặc định suy ra tự động)")
     ap.add_argument("--no-mlflow", action="store_true", help="không ghi MLflow")
+    ap.add_argument("--register", action="store_true",
+                    help="ghi bản ghi mô hình vào collection `models` (kết nối theo MONGO_URI/MONGO_DB/APP_ENV "
+                         "qua vngis.config); version cấp mới qua vngis.model_registry")
     ap.add_argument("--no-register", action="store_true",
-                    help="không ghi bản ghi mô hình vào collection `models`")
+                    help="không ghi collection `models` (mặc định khi không có --register/--model-version)")
+    ap.add_argument("--model-version", type=int, default=None,
+                    help="(worker) cập nhật đúng bản ghi `phasegnn-<n>` do API tạo, không cấp số mới")
+    ap.add_argument("--train-fence", type=int, default=None,
+                    help="(worker) fence của lượt huấn luyện: chỉ ghi khi models.train_fence <= giá trị này")
     ap.add_argument("--mlflow-tracking-uri", default=None, help="URI theo dõi MLflow")
     ap.add_argument("--model-name", default=None, help="tên mô hình trong registry")
     ap.add_argument("--num-threads", type=int, default=1,
@@ -891,6 +941,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--optuna-time-budget", type=float, default=1800.0,
                     help="ngân sách thời gian Optuna (giây)")
     args = ap.parse_args(argv)
+    if args.model_version is not None and args.model_version < 1:
+        ap.error("--model-version phải ≥ 1")
+    # Chỉ ghi `models` khi được yêu cầu rõ (chạy thực nghiệm mặc định không đụng DB).
+    register_db = bool(args.register or args.model_version is not None) and not args.no_register
 
     root = Path(args.data_root) if args.data_root else None
     paths = default_paths(root)
@@ -953,9 +1007,10 @@ def main(argv: list[str] | None = None) -> int:
         max_train_samples=args.max_train_samples, max_val_samples=args.max_val_samples,
         subsample=args.subsample,
         holdout_stations=holdout,
+        subgraph_version=args.subgraph_version,
         num_threads=args.num_threads,
         use_mlflow=not args.no_mlflow,
-        register_to_db=not args.no_register,
+        register_to_db=register_db,
         mlflow_experiment="phasegnn",
     )
     model, result = train_model(datasets, graph, tcfg)
@@ -1000,24 +1055,36 @@ def main(argv: list[str] | None = None) -> int:
         tracker.log_artifact(ckpt_path)
 
     # --- Bản ghi mô hình (`status: staging`) -------------------------------
-    model_id = f"{args.variant}-seed{args.seed}"
+    if args.model_version is not None:
+        from vngis.model_registry import model_doc_id  # noqa: PLC0415
+
+        # Bản ghi do API tạo (`POST /models/train`): `_id = phasegnn-<n>`, tên `phasegnn`.
+        model_id, model_name = model_doc_id("phasegnn", args.model_version), "phasegnn"
+    else:
+        model_id, model_name = f"{args.variant}-seed{args.seed}", args.model_name or f"{args.variant}-v1"
     record = ModelRecord(
         model_id=model_id,
-        name=args.model_name or f"{args.variant}-v1",
+        name=model_name,
         variant=args.variant,
         status="staging",
-        version=1,
+        # None → register_model cấp số nguyên mới (vngis.model_registry); không có DB → None
+        version=args.model_version,
         hyperparams=_make_model_cfg(tcfg).to_dict() | {"train": tcfg.__dict__},
         metrics={"val_mae_peak": result.best_val_mae,
                  "val_mae_hour": (result.history[-1].get("val") or {}).get("mae_hour")
                  if result.history else None,
                  "best_epoch": result.best_epoch},
         data_snapshot=result.data_snapshot,
-        artifact_path=str(ckpt_path),
+        artifact_path=_portable_path(ckpt_path),
         train_config=tcfg.__dict__.copy(),
         seed=args.seed,
     )
-    doc = register_model(record, log=print) if tcfg.register_to_db else record.to_mongo()
+    if tcfg.register_to_db:
+        db = open_registry_db(log=print)
+        doc = register_model(record, db=db, log=print, update_existing=args.model_version is not None,
+                             fence=args.train_fence)
+    else:
+        doc = record.to_mongo()
     save_registry_json(doc, out_dir, filename=f"model_record_seed{args.seed}.json")
 
     print(f"[train] xong. val MAE đỉnh = {result.best_val_mae:.4f} m; "

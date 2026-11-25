@@ -65,6 +65,8 @@ results/**/logs/
 *.log
 results/**/_*_log.txt
 *.pt
+# Mô hình do worker huấn luyện theo hàng đợi (`POST /models/train` → results/models/phasegnn-<n>/)
+results/models/
 *.rds
 # Dự báo/mẫu theo TỪNG bản ghi (lớn, sinh lại được, dẫn xuất từ số liệu KTTV): chỉ commit bảng tổng hợp và hình
 results/**/predictions*.csv

@@ -282,8 +282,37 @@ export interface JobItem {
   finished_at?: string | null;
   message?: string | null;
   error?: string | null;
-  /** Chỉ có với job `train` — phiên bản mô hình được huấn luyện. */
-  model_version?: string | null;
+  /** Chỉ có với job `train` — phiên bản mô hình (số nguyên; job cũ có thể là chuỗi). */
+  model_version?: number | string | null;
+}
+
+/** Trạng thái huấn luyện của bản ghi `models` (worker `train`). */
+export type TrainState = "queued" | "running" | "succeeded" | "failed" | "skipped";
+
+/** Phiên bản mô hình trong `GET /api/v1/models` (registry `models`, `version` số nguyên). */
+export interface ModelItem {
+  id: string;
+  version: number;
+  name?: string | null;
+  variant?: string | null;
+  status?: "staging" | "production" | "archived" | string | null;
+  /** Thiếu ở bản ghi cũ (đăng ký trước khi có worker `train`). */
+  train_state?: TrainState | string | null;
+  train_reason?: string | null;
+  train_error?: string | null;
+  job_id?: string | null;
+  metrics?: Record<string, number | null> | null;
+  requested_by?: string | null;
+  requested_by_label?: ActorLabel | null;
+  created_at?: string | null;
+  train_finished_at?: string | null;
+  promoted_at?: string | null;
+  promoted_by?: string | null;
+  promoted_by_label?: ActorLabel | null;
+  /** Bản production đang phục vụ (lượt promote mới nhất). */
+  serving?: boolean;
+  /** API cho phép promote: đã huấn luyện xong và chưa phục vụ. */
+  promotable?: boolean;
 }
 
 /** Người dùng trong `GET /api/v1/users`. */

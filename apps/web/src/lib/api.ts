@@ -605,10 +605,22 @@ export const api = {
       body,
     }),
   trainModel: (body: Record<string, unknown>) =>
-    apiFetch<{ job_id: string; model_version: string; state: string; note?: string }>("/models/train", {
+    apiFetch<{
+      job_id?: string;
+      model_version: number;
+      status?: string;
+      state: string;
+      note?: string;
+      /** `false`: phiên bản đã có, không giao việc mới. */
+      created?: boolean;
+      retry?: boolean;
+    }>("/models/train", {
       method: "POST",
       body,
     }),
+  /** `GET /models` — phiên bản mô hình kèm `train_state`/`train_reason`, `promotable`, `serving`. */
+  models: (query?: { limit?: number }) =>
+    apiFetch<{ items: import("./types").ModelItem[]; count: number }>("/models", { query }),
   promoteModel: (version: string) =>
     apiFetch<{
       model_version: number | string;

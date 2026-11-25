@@ -78,17 +78,20 @@ def _subprocess_env(db=None) -> dict:
     return env
 
 
-def _run_proc(cmd: list[str], *, cwd: Path, env: dict, timeout_s: int, guard=None) -> subprocess.CompletedProcess:
+def _run_proc(cmd: list[str], *, cwd: Path, env: dict, timeout_s: int, guard=None,
+              on_tick=None, tick_s: float = 30.0) -> subprocess.CompletedProcess:
     """Chạy tiến trình con; mất khoá (``guard.lost``) hoặc quá giờ → dừng tiến trình.
 
     Mất khoá → ném `LockLost` (scheduler ghi ``state="lost"``), không để tiến trình con tiếp tục ghi
-    song song với instance mới đang giữ khoá.
+    song song với instance mới đang giữ khoá. `on_tick` (nếu có) được gọi mỗi `tick_s` giây khi tiến trình
+    còn chạy (ví dụ heartbeat của `models`); lỗi trong `on_tick` chỉ ghi log.
     """
     from vngis.locks import LockLost
 
     proc = subprocess.Popen(cmd, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, encoding="utf-8", errors="replace")
     deadline = time.monotonic() + timeout_s
+    next_tick = time.monotonic() + tick_s
     while True:
         try:
             out, err = proc.communicate(timeout=1.0)
@@ -98,6 +101,12 @@ def _run_proc(cmd: list[str], *, cwd: Path, env: dict, timeout_s: int, guard=Non
                 proc.kill()
                 proc.communicate()
                 raise LockLost("mất khoá khi đang chạy tiến trình con; đã dừng tiến trình") from None
+            if on_tick is not None and time.monotonic() >= next_tick:
+                next_tick = time.monotonic() + tick_s
+                try:
+                    on_tick()
+                except Exception as e:  # noqa: BLE001 - heartbeat lỗi không dừng tiến trình con
+                    log.warning("on_tick lỗi: %s", e)
             if time.monotonic() > deadline:
                 proc.kill()
                 out, err = proc.communicate()
@@ -276,6 +285,18 @@ def forecast_run(db, cache=None, *, basins: list[str] | None = None, horizon_h: 
                        data_root=os.getenv("FORECAST_DATA_ROOT") or None)
     out["horizon_h"] = horizon_h
     return out
+
+
+# ------------------------------------------------------------------ huấn luyện ---
+def train_run(db, cache=None, *, model_version: int | None = None, epochs: int = 50,
+              learning_rate: float = 1e-3, station: str | None = None, basin: str | None = None,
+              guard=None, job_id: str | None = None, repo_root: str | None = None, runner=None) -> dict:
+    """Huấn luyện PhaseGNN cho bản ghi `models` ``phasegnn-<model_version>`` (xem `worker.train`)."""
+    from worker.train import run_training
+
+    root = Path(repo_root) if repo_root else _repo_root()
+    return run_training(db, root=root, model_version=model_version, epochs=epochs, learning_rate=learning_rate,
+                        station=station, basin=basin, guard=guard, job_id=job_id, runner=runner)
 
 
 # ------------------------------------------------------------------ cache -------

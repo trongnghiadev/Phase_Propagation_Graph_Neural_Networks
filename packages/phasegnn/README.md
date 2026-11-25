@@ -49,6 +49,8 @@ Tham số quan trọng:
 | `--variant` | `phasegnn`, `B3`, `B4`, `B5a`, `B5b` |
 | `--delta-h` | bước lưới giờ (mặc định 1). `12` = nửa chu kỳ M2 (2 mốc/ngày) → nhanh gấp ~12× trên CPU; `1` = lưới giờ đầy đủ (336 bước cho 14 ngày) |
 | `--max-train-samples` / `--max-val-samples` | giới hạn số mẫu (chạy nhanh để thử) |
+| `--subsample head\|spread` | cách lấy N mẫu: `head` = N mẫu đầu (mặc định cũ; với N nhỏ chỉ có BEN_LUC), `spread` = cách đều mọi trạm |
+| `--subgraph-version 1\|2` | cách dựng đồ thị con (`build_station_subgraph`): `2` (mặc định) có cạnh `down`; `1` = hành vi trước 25/11/2026 (thiếu cạnh `down`). Ghi trong checkpoint; checkpoint cũ không có trường này được nạp với `1` |
 | `--no-mlflow` / `--no-register` | tắt ghi MLflow / bản ghi MongoDB (khi không có dịch vụ) |
 
 Mỗi lần chạy ghi `checkpoint_seed<N>.pt`, `train_log_seed<N>.json`,

@@ -26,7 +26,7 @@ __all__ = ["JobParamsError", "JOB_PARAM_MODELS", "JOB_TYPES", "INTERNAL_PARAMS",
 
 #: Tham số do hệ thống truyền (không được nhận từ `params` của hàng đợi).
 INTERNAL_PARAMS = frozenset({"db", "cache", "guard", "actor", "documents", "repo_root", "source_dir",
-                             "run_g0", "run_id"})
+                             "run_g0", "run_id", "job_id", "runner", "predictor"})
 
 #: Collection được phép làm nóng cache qua hàng đợi.
 WARMABLE_COLLECTIONS = ("stations", "tide_extremes", "reservoir_daily", "hydromet_bulletins")
@@ -66,12 +66,24 @@ class ForecastRunParams(_Params):
 
 
 class TrainParams(_Params):
-    """Tham số huấn luyện (khớp `TrainRequest` của API)."""
-    model_version: str | None = Field(default=None, pattern=_CODE)
+    """Tham số huấn luyện (khớp `TrainRequest` của API).
+
+    ``model_version`` là số nguyên của registry (`vngis.model_registry`; nhận ``3``/``"3"``/``"v3"``) — API cấp
+    số mới nguyên tử khi người dùng bỏ trống.
+    """
+    model_version: int | None = None
     epochs: int = Field(default=50, ge=1, le=2000)
     learning_rate: float = Field(default=1e-3, gt=0, le=1)
     station: str | None = Field(default=None, pattern=_CODE)
     basin: str | None = Field(default=None, pattern=_CODE)
+
+    @field_validator("model_version", mode="before")
+    @classmethod
+    def _version(cls, v: Any) -> int | None:
+        ver = parse_model_version(v)
+        if ver is not None and ver < 1:
+            raise ValueError("model_version phải ≥ 1")
+        return ver
 
 
 class CacheWarmParams(_Params):

@@ -11,6 +11,8 @@ migrations/mongo/
 ├── 0006_jobs_validator.py        # jobs: anyOf (job/status của Spark | type/state của API/worker) + index hàng đợi
 ├── 0007_model_forecasts.py       # model_forecasts (dự báo PhaseGNN của worker)
 ├── 0008_users_account_code.py    # users.account_code: index unique partial ({$type: "string"}), không validator
+├── 0009_anonymize_actors.py      # dữ liệu: tên đăng nhập cũ trong nhật ký → user:<account_code>; down không khả thi
+├── 0010_models_version_unique.py # models.version: index unique partial ({$type: "number"}), không validator; trùng → dừng
 └── tests/test_migrations.py      # chạy trên DB tạm riêng (tạo/xoá trong test)
 ```
 
@@ -19,7 +21,25 @@ migrations/mongo/
 - **`validationLevel: moderate`**: chèn mới và sửa document đang hợp lệ đều bị kiểm tra; document cũ không hợp lệ vẫn sửa được (không chặn job/API cũ). Trước khi áp, runner đếm document cũ không khớp (`n_invalid_existing` trong báo cáo, `$nor: [validator]`).
 - `down NNNN` khôi phục validator cũ đã lưu trong `_migrations.previous` (không có → tắt validator); không xoá index.
 - Kết nối: `--uri` hoặc `MONGO_URI` (mặc định `mongodb://localhost:27017`); DB: `--db` hoặc `MONGO_DB` — **bắt buộc**, không có mặc định.
+- `--dry-run`: mỗi bước chỉ đọc/đếm; runner **không** ghi `_migrations` (đã kiểm: băm nội dung `_migrations`, `users`, `audit_logs`, `qc_flags`, `jobs`, `alerts` của `vietnam_gis` trước/sau dry-run 0009 trùng nhau).
 - Thay thế dữ liệu lớn dùng mẫu đã có: ghi collection `__staging`, kiểm tra, rồi `renameCollection(dropTarget=True)`.
+
+## 0009 — ẩn danh hoá người thực hiện
+
+Bước dữ liệu (không validator). Giá trị bằng tên đăng nhập hoặc `users._id` đã biết → `user:<account_code>`:
+`audit_logs.actor`, `reverted_by`, `revert_claim.by`, `before`/`after`.{`decided_by`, `retired_by`, `unretired_by`,
+`ack_by`, `requested_by`, `promoted_by`, `reverted_by`}; `audit_logs` loại `user_perm`: `doc_id` → `<account_code>`,
+`target` → `{account_code}` (bỏ `user_id`/`username`, đúng định dạng API hiện ghi); `qc_flags.decided_by`,
+`retired_by`, `unretired_by`; `jobs.requested_by`; `alerts.ack_by`; `models.promoted_by`, `requested_by`.
+
+- **Vai trò:** ghi `user:<account_code>` không kèm vai trò — bản ghi cũ không lưu vai trò lúc thao tác, gắn vai trò hiện tại có thể sai lịch sử. API (`parse_actor`, `actor_label`) đọc được dạng này.
+- Cấp `account_code` cho mọi tài khoản chưa có (lệnh có điều kiện "vẫn chưa có mã", không ghi đè mã API vừa cấp).
+- **Giữ nguyên:** giá trị đã đúng định dạng `user:acc_…`, vai trò hệ thống (`manual_review`, `qc_job`, `worker`, `cli`, … — `SYSTEM_ACTORS`), `null`; chuỗi không khớp tài khoản nào chỉ được đếm (`n_unmapped`, không in giá trị).
+- `audit_logs` không bị validator 0005 chặn sửa (chỉ kiểm kiểu, `moderate`) và code vốn cập nhật bản ghi (`state`, `reverted_*`); vì là nhật ký kiểm toán, khi có thay đổi bước này chèn một bản ghi `action: "anonymize_actors"`, `actor: "migration:0009"`, `after` = số lượng theo trường (không tên).
+- Mỗi lệnh sửa có điều kiện giá trị cũ; idempotent (chạy lại: 0 thay đổi, không thêm audit). `verify`: không còn tên đã biết ở các trường trên và mọi tài khoản có mã. `down` báo lỗi (không lưu bản đồ ngược — cố ý, không giữ tên ngoài `users`); tra ngược qua `users.account_code`.
+- Báo cáo (`_migrations.report`) chỉ chứa số lượng: `fields_changed` (theo `collection.field`), `documents_changed` (theo collection), `n_users_code_assigned`, `n_unmapped`.
+
+Dry-run trên `vietnam_gis` (25/11/2026): 8 tài khoản, cả 8 chưa có `account_code` (sẽ được cấp); 0 bản ghi chứa tên đăng nhập (người thực hiện cũ đều là `manual_review`); 0 giá trị lạ. Chưa có collection `models`.
 
 ## Áp vào `vietnam_gis` (người vận hành chạy)
 
@@ -43,4 +63,4 @@ MSYS_NO_PATHCONV=1 docker run --rm --network spark-mongodb-gis_gis-net -e MONGO_
   python -m pytest migrations/mongo/tests -q
 ```
 
-`MIGRATION_SOURCE_DB` chỉ được **đọc** (chép `jobs`, `qc_flags`, `audit_logs` sang DB tạm `pgnn_test_migr_*` rồi áp migration).
+`MIGRATION_SOURCE_DB` chỉ được **đọc** (chép `jobs`, `qc_flags`, `audit_logs`, `users`, `alerts`, `models` sang DB tạm `pgnn_test_migr_*` rồi áp migration).

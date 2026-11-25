@@ -1,0 +1,110 @@
+{
+ "summary": {
+  "model": "B5a-spread-s2",
+  "mae_peak_m": 0.16791783855726866,
+  "mae_hour_h": 2.9804322551265816,
+  "n_records": 76050
+ },
+ "by_station": [
+  {
+   "model": "B5a-spread-s2",
+   "station": "BEN_LUC",
+   "mae_peak_m": 0.16454838695092916,
+   "mae_hour_h": 2.833905914995586,
+   "n_records": 8450
+  },
+  {
+   "model": "B5a-spread-s2",
+   "station": "BIEN_HOA",
+   "mae_peak_m": 0.20123517114604875,
+   "mae_hour_h": 3.5824145325838015,
+   "n_records": 8450
+  },
+  {
+   "model": "B5a-spread-s2",
+   "station": "DAU_TIENG",
+   "mae_peak_m": 0.16982256998637654,
+   "mae_hour_h": 3.373598570604164,
+   "n_records": 8450
+  },
+  {
+   "model": "B5a-spread-s2",
+   "station": "GO_DAU_HA",
+   "mae_peak_m": 0.13729474232752675,
+   "mae_hour_h": 3.421490803050695,
+   "n_records": 8450
+  },
+  {
+   "model": "B5a-spread-s2",
+   "station": "NHA_BE",
+   "mae_peak_m": 0.16604395142711972,
+   "mae_hour_h": 2.819654614932393,
+   "n_records": 8450
+  },
+  {
+   "model": "B5a-spread-s2",
+   "station": "PHU_AN",
+   "mae_peak_m": 0.16036079416973448,
+   "mae_hour_h": 3.247301986421926,
+   "n_records": 8450
+  },
+  {
+   "model": "B5a-spread-s2",
+   "station": "TAN_AN",
+   "mae_peak_m": 0.1723832163743437,
+   "mae_hour_h": 2.717231243705941,
+   "n_records": 8450
+  },
+  {
+   "model": "B5a-spread-s2",
+   "station": "THU_DAU_MOT",
+   "mae_peak_m": 0.14947874942021222,
+   "mae_hour_h": 3.7755010147133428,
+   "n_records": 8450
+  },
+  {
+   "model": "B5a-spread-s2",
+   "station": "VUNG_TAU",
+   "mae_peak_m": 0.18851207866856998,
+   "mae_hour_h": 1.0384820265694192,
+   "n_records": 8450
+  }
+ ],
+ "by_lead": [
+  {
+   "model": "B5a-spread-s2",
+   "lead_day": 1,
+   "mae_peak_m": 0.16599989617495978,
+   "mae_hour_h": 3.011712574139976,
+   "n_records": 15210
+  },
+  {
+   "model": "B5a-spread-s2",
+   "lead_day": 2,
+   "mae_peak_m": 0.16668327620491807,
+   "mae_hour_h": 2.9968192922536887,
+   "n_records": 15210
+  },
+  {
+   "model": "B5a-spread-s2",
+   "lead_day": 3,
+   "mae_peak_m": 0.1676095498954543,
+   "mae_hour_h": 2.978186291948299,
+   "n_records": 15210
+  },
+  {
+   "model": "B5a-spread-s2",
+   "lead_day": 4,
+   "mae_peak_m": 0.16891363671677526,
+   "mae_hour_h": 2.9641628723202427,
+   "n_records": 15210
+  },
+  {
+   "model": "B5a-spread-s2",
+   "lead_day": 5,
+   "mae_peak_m": 0.17038181749744738,
+   "mae_hour_h": 2.951295769303737,
+   "n_records": 15210
+  }
+ ]
+}

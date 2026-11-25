@@ -27,6 +27,8 @@
     docker run --rm -v "$PWD:/work" -w /work -e PYTHONPATH=/work/packages/phasegnn/src phasegnn:local \
         python -X utf8 scripts/ablation_summary.py --root results/E2 --out-dir results/E2 \
             --models phasegnn B4 B5a B5b B3 --seeds 0 1 2
+    # biến thể lấy mẫu `spread` (thư mục <model>_spread/, ghi ablation_spread_*.csv):
+    #   ... --suffix _spread --out-prefix ablation_spread
 """
 from __future__ import annotations
 
@@ -146,7 +148,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--models", nargs="+", default=["phasegnn", "B4", "B5a", "B5b", "B3"])
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
     ap.add_argument("--ref", default="phasegnn")
-    ap.add_argument("--suffix", default="_abl")
+    ap.add_argument("--suffix", default="_abl",
+                    help="hậu tố thư mục mô hình (vd. _abl, _spread); tên dự báo TB seed = "
+                         "<model><suffix> với '_' đổi thành '-'")
+    ap.add_argument("--out-prefix", default="ablation",
+                    help="tiền tố file kết quả (vd. ablation_spread ⇒ ablation_spread_*.csv)")
     ap.add_argument("--dm-lag", type=int, default=4)
     args = ap.parse_args(argv)
 
@@ -179,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
 
     by_seed = pd.DataFrame(rows)
     out_dir.mkdir(parents=True, exist_ok=True)
-    by_seed.to_csv(out_dir / "ablation_by_seed.csv", index=False, encoding="utf-8")
+    by_seed.to_csv(out_dir / f"{args.out_prefix}_by_seed.csv", index=False, encoding="utf-8")
     num = [c for c in by_seed.columns if c not in ("model", "seed", "split")
            and pd.api.types.is_numeric_dtype(by_seed[c])]
     ps = by_seed[by_seed["seed"] != "seedmean"]
@@ -187,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     agg.columns = [f"{a}_{b}" for a, b in agg.columns]
     agg = agg.reset_index()
     agg.insert(1, "n_seeds", len(args.seeds))
-    agg.to_csv(out_dir / "ablation_mean_sd.csv", index=False, encoding="utf-8")
+    agg.to_csv(out_dir / f"{args.out_prefix}_mean_sd.csv", index=False, encoding="utf-8")
 
     tests = []
     for pairing in ["seedmean"] + [k for k in args.seeds]:
@@ -207,8 +213,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[abl] {b['pairing']} {args.ref} vs {b['variant']}: diff={b['mean_diff']:+.4f} "
                   f"DM t={b['dm_t']:.2f} p_holm={b['dm_p_holm']:.3g} "
                   f"W p_holm={b['wilcoxon_p_holm']:.3g}", flush=True)
-    pd.DataFrame(tests).to_csv(out_dir / "ablation_tests.csv", index=False, encoding="utf-8")
-    print(f"[abl] ghi {out_dir}/ablation_*.csv", flush=True)
+    pd.DataFrame(tests).to_csv(out_dir / f"{args.out_prefix}_tests.csv", index=False, encoding="utf-8")
+    print(f"[abl] ghi {out_dir}/{args.out_prefix}_*.csv", flush=True)
     return 0
 
 

@@ -231,3 +231,14 @@ def test_validator_khop_schema_file():
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["validator"] == fc.MODEL_FORECASTS_VALIDATOR
     assert data["indexes"] == fc.MODEL_FORECASTS_INDEXES
+
+
+def test_checkpoint_mac_dinh_la_spread_v2():
+    """Mặc định = PhaseGNN `spread` v2 (9 trạm), không phải `phasegnn_long` (chỉ BEN_LUC)."""
+    import json
+
+    assert fc.DEFAULT_CHECKPOINT == "results/E2/phasegnn_spread_v2/checkpoint_seed0.pt"
+    rec = Path(__file__).resolve().parents[3] / "results" / "E2" / "phasegnn_spread_v2" / "model_record_seed0.json"
+    if rec.is_file():  # tệp kết quả có trên máy đã chạy thực nghiệm
+        d = json.loads(rec.read_text(encoding="utf-8"))
+        assert d["train_config"]["subgraph_version"] == 2

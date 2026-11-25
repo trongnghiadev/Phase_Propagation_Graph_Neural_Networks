@@ -31,6 +31,11 @@ trả lại `queued` nếu khoá bận.
   ``failed``); `actor` lấy từ `requested_by` của bản ghi việc.
 * Việc `claimed`/`running` có `heartbeat`/`claimed_at` cũ hơn `stale_s` (mặc định 3 × TTL khoá) — worker
   đã chết — được trả về `queued` (tăng `attempts`); quá `max_attempts` lượt → ``failed``.
+* Việc hàng đợi **mất khoá** giữa chừng (``lost``) cũng được trả về `queued` ngay (cùng giới hạn
+  `max_attempts`; lượt mới lấy fence lớn hơn và ghi đè trạng thái của lượt cũ). Việc ``lost`` sót lại (worker
+  chết trước khi kịp trả về) của các loại trong `REQUEUE_LOST_TYPES` (``train``) được `reclaim_stale` nhận lại.
+* Hết lượt (``failed`` do mất khoá/worker chết quá `max_attempts` lần) → gọi `abandon_hooks[type]` (``train``:
+  đánh `models.train_state="failed"`, xem `worker.train.abandon_training`).
 """
 from __future__ import annotations
 
@@ -52,6 +57,11 @@ JOBS_COLLECTION = "jobs"
 
 #: Tham số job do hệ thống truyền, không nhận từ `params` của hàng đợi (xem `vngis.job_params`).
 _RESERVED_KWARGS = INTERNAL_PARAMS
+
+#: Loại việc mà bản ghi ``lost`` sót lại (worker chết ngay sau khi mất khoá) được `reclaim_stale` trả về hàng
+#: đợi. Chỉ ``train`` (bản ghi `models` kẹt ``running`` nếu không chạy lại); việc khác mất khoá được trả về
+#: ngay trong `run_queue_once`, bản ghi ``lost`` cũ của chúng không bị chạy lại bất ngờ.
+REQUEUE_LOST_TYPES = ("train",)
 
 
 def _now() -> datetime:
@@ -279,6 +289,8 @@ class Scheduler:
         # Việc kẹt: heartbeat cũ hơn 3 × TTL khoá (khoá chắc chắn đã hết hạn nếu worker chết).
         self.stale_s = float(stale_s) if stale_s is not None else 3 * ttl_ms / 1000.0
         self.max_attempts = max(int(max_attempts), 1)
+        #: Loại việc → hàm ``hook(db, job_doc, reason)`` gọi khi việc hàng đợi bị bỏ hẳn (hết lượt).
+        self.abandon_hooks: dict[str, Callable[..., Any]] = {}
         self.retry_s = float(retry_s)
         self.max_retries = int(max_retries)
         self.runner = JobRunner(db, lock, instance=instance, ttl_ms=ttl_ms, heartbeat_s=heartbeat_s)
@@ -344,10 +356,17 @@ class Scheduler:
                            id=name, replace_existing=True, kwargs={"job_key": name})
 
     def queue(self, handlers: dict[str, Callable[..., Any]], *, seconds: int = 15,
-              lock_keys: dict[str, str] | None = None, **kwargs: Any) -> None:
-        """Đăng ký job quét hàng đợi `jobs` (``state="queued"``) mỗi `seconds` giây."""
-        self.sched.add_job(lambda: self.run_queue_once(handlers, lock_keys=lock_keys, **kwargs),
-                           trigger="interval", seconds=seconds, id="job_queue", replace_existing=True)
+              lock_keys: dict[str, str] | None = None, name: str = "job_queue",
+              types: list[str] | None = None, exclude_types: list[str] | None = None, **kwargs: Any) -> None:
+        """Đăng ký job quét hàng đợi `jobs` (``state="queued"``) mỗi `seconds` giây.
+
+        Mỗi bộ quét (`name`) là một job APScheduler riêng (chạy song song trong thread pool). Việc chạy lâu
+        (``train``) dùng bộ quét riêng (`types`) và loại khỏi bộ quét chung (`exclude_types`) để không chặn
+        các việc ngắn của instance này.
+        """
+        self.sched.add_job(lambda: self.run_queue_once(handlers, lock_keys=lock_keys, types=types,
+                                                       exclude_types=exclude_types, **kwargs),
+                           trigger="interval", seconds=seconds, id=name, replace_existing=True)
 
     def _wrap(self, name: str, fn: Callable[..., Any], kwargs: dict, *, interval: bool = False,
               lock_key: str | None = None):
@@ -395,7 +414,9 @@ class Scheduler:
         """Nhận lại việc kẹt do worker chết (heartbeat/claimed_at cũ hơn `stale_s`).
 
         - Việc từ hàng đợi (có `requested_by`): còn lượt → ``queued`` + ``attempts += 1``; hết lượt
-          (`max_attempts`) → ``failed``.
+          (`max_attempts`) → ``failed`` (+ `abandon_hooks`).
+        - Việc hàng đợi ``lost`` (mất khoá) thuộc `REQUEUE_LOST_TYPES`, cũ hơn `stale_s` — sót lại khi worker chết
+          trước khi trả về hàng đợi — xử lý như trên.
         - Bản ghi của cron/interval (không có `requested_by`) còn ``running`` → ``lost`` (chỉ để hiển thị;
           lượt sau của lịch tự chạy lại).
 
@@ -404,23 +425,33 @@ class Scheduler:
         now = now or _now()
         cutoff = now - timedelta(seconds=self.stale_s)
         jobs = self.db[JOBS_COLLECTION]
-        stale = [{"state": {"$in": ["claimed", "running"]}},
-                 {"$or": [{"heartbeat": None}, {"heartbeat": {"$lt": cutoff}}]},
-                 {"$or": [{"claimed_at": None}, {"claimed_at": {"$lt": cutoff}}]},
-                 {"$or": [{"started_at": None}, {"started_at": {"$lt": cutoff}}]},
-                 {"$or": [{"updated_at": None}, {"updated_at": {"$lt": cutoff}}]}]
+        old = [{"$or": [{"heartbeat": None}, {"heartbeat": {"$lt": cutoff}}]},
+               {"$or": [{"claimed_at": None}, {"claimed_at": {"$lt": cutoff}}]},
+               {"$or": [{"started_at": None}, {"started_at": {"$lt": cutoff}}]},
+               {"$or": [{"updated_at": None}, {"updated_at": {"$lt": cutoff}}]}]
+        stale = [{"state": {"$in": ["claimed", "running"]}}, *old]
+        lost = [{"state": "lost"}, {"type": {"$in": list(REQUEUE_LOST_TYPES)}},
+                {"$or": [{"updated_at": None}, {"updated_at": {"$lt": cutoff}}]}]
         queued = {"requested_by": {"$exists": True}}
+        stuck = {"$or": [{"$and": stale}, {"$and": lost}]}
         last = self.max_attempts - 1
         note = {"worker": self.instance, "at": now, "note": "worker ngừng (heartbeat cũ) — nhận lại việc"}
         out = {"failed": 0, "requeued": 0, "lost": 0}
         try:
-            r = jobs.update_many({"$and": [*stale, queued, {"attempts": {"$gte": last}}]},
-                                 {"$set": {"state": "failed", "finished_at": now, "updated_at": now,
-                                           "error": f"worker ngừng giữa chừng quá {self.max_attempts} lần"}})
-            out["failed"] = r.modified_count
-            r = jobs.update_many({"$and": [*stale, queued, {"$or": [{"attempts": {"$exists": False}},
-                                                                       {"attempts": {"$lt": last}}]}]},
-                                 {"$set": {"state": "queued", "worker": None, "updated_at": now},
+            give_up = {"$and": [stuck, queued, {"attempts": {"$gte": last}}]}
+            ids = [d["_id"] for d in jobs.find(give_up, {"_id": 1})]
+            if ids:
+                r = jobs.update_many({"$and": [give_up, {"_id": {"$in": ids}}]},
+                                     {"$set": {"state": "failed", "finished_at": now, "updated_at": now,
+                                               "error": f"worker ngừng/mất khoá giữa chừng quá "
+                                                        f"{self.max_attempts} lần"}})
+                out["failed"] = r.modified_count
+                for d in jobs.find({"_id": {"$in": ids}, "state": "failed"}):
+                    self._abandon(d, d.get("error") or "hết lượt")
+            r = jobs.update_many({"$and": [stuck, queued, {"$or": [{"attempts": {"$exists": False}},
+                                                                     {"attempts": {"$lt": last}}]}]},
+                                 {"$set": {"state": "queued", "worker": None, "updated_at": now,
+                                           "finished_at": None},
                                   "$inc": {"attempts": 1},
                                   "$push": {"reclaims": {"$each": [note], "$slice": -20}}})
             out["requeued"] = r.modified_count
@@ -434,8 +465,52 @@ class Scheduler:
             log.warning("đã xử lý việc kẹt: %s", out)
         return out
 
+    def _abandon(self, job_doc: dict, reason: str) -> None:
+        hook = self.abandon_hooks.get(str(job_doc.get("type") or ""))
+        if hook is None:
+            return
+        try:
+            hook(self.db, job_doc, reason)
+        except Exception as e:  # noqa: BLE001 - hook lỗi không được chặn hàng đợi
+            log.warning("abandon hook của việc %s lỗi: %s", job_doc.get("_id"), e)
+
+    def requeue_lost(self, job_id: Any, fence: int | None, error: str | None = None) -> str | None:
+        """Việc hàng đợi vừa ``lost`` (mất khoá) → ``queued`` (``attempts += 1``) hoặc ``failed`` khi hết lượt.
+
+        Chỉ đổi bản ghi còn đúng ``state="lost"`` và ``fence`` của lượt này (lượt khác đã nhận lại thì thôi).
+        Trả trạng thái mới (``queued``/``failed``) hoặc ``None`` khi không đổi.
+        """
+        jobs = self.db[JOBS_COLLECTION]
+        now = _now()
+        flt: dict[str, Any] = {"_id": job_id, "state": "lost", "requested_by": {"$exists": True}}
+        if fence is not None:
+            flt["fence"] = fence
+        last = self.max_attempts - 1
+        note = {"worker": self.instance, "at": now, "note": f"mất khoá giữa chừng — trả về hàng đợi ({error or ''})"[:300]}
+        try:
+            r = jobs.update_one({**flt, "$or": [{"attempts": {"$exists": False}}, {"attempts": {"$lt": last}}]},
+                                {"$set": {"state": "queued", "worker": None, "updated_at": now, "finished_at": None},
+                                 "$inc": {"attempts": 1},
+                                 "$push": {"reclaims": {"$each": [note], "$slice": -20}}})
+            if r.modified_count:
+                log.warning("việc %s mất khoá → trả về hàng đợi", job_id)
+                return "queued"
+            msg = f"mất khoá giữa chừng quá {self.max_attempts} lần: {error or ''}"[:500]
+            doc = jobs.find_one_and_update({**flt, "attempts": {"$gte": last}},
+                                           {"$set": {"state": "failed", "finished_at": now, "updated_at": now,
+                                                     "error": msg}},
+                                           return_document=ReturnDocument.AFTER)
+        except Exception as e:  # noqa: BLE001
+            log.warning("không trả được việc %s về hàng đợi: %s", job_id, e)
+            return None
+        if doc is not None:
+            self._abandon(doc, msg)
+            return "failed"
+        return None
+
     def run_queue_once(self, handlers: dict[str, Callable[..., Any]], *,
-                       lock_keys: dict[str, str] | None = None, **kwargs: Any) -> dict | None:
+                       lock_keys: dict[str, str] | None = None, types: list[str] | None = None,
+                       exclude_types: list[str] | None = None, **kwargs: Any) -> dict | None:
         """Nhận nguyên tử MỘT việc `queued` (ưu tiên `priority` cao, cũ trước) và chạy nó.
 
         - Trước tiên nhận lại việc kẹt (`reclaim_stale`).
@@ -443,14 +518,21 @@ class Scheduler:
         - `params` sai danh sách trắng (`vngis.job_params`: khoá lạ, tham số nội bộ, sai kiểu) → ``failed``.
         - `actor` (nếu hàm job nhận) = `requested_by` của bản ghi việc, không bao giờ lấy từ `params`.
         - Khoá của loại việc bận → trả về ``queued`` để lượt quét sau chạy.
+        - Mất khoá giữa chừng (``lost``) → `requeue_lost` (``queued``, ``attempts += 1``; hết lượt → ``failed``).
+        - `types` / `exclude_types`: chỉ nhận / không nhận các loại việc này (bộ quét riêng cho ``train``).
         """
         from vngis.job_params import JobParamsError, validate_job_params
 
         jobs = self.db[JOBS_COLLECTION]
         self.reclaim_stale()
         now = _now()
+        flt: dict[str, Any] = {"state": "queued", "$or": [{"scheduled_at": None}, {"scheduled_at": {"$lte": now}}]}
+        if types is not None:
+            flt["type"] = {"$in": list(types)}
+        elif exclude_types:
+            flt["type"] = {"$nin": list(exclude_types)}
         doc = jobs.find_one_and_update(
-            {"state": "queued", "$or": [{"scheduled_at": None}, {"scheduled_at": {"$lte": now}}]},
+            flt,
             {"$set": {"state": "claimed", "worker": self.instance, "claimed_at": now, "updated_at": now}},
             sort=[("priority", -1), ("created_at", 1)], return_document=ReturnDocument.AFTER)
         if doc is None:
@@ -482,6 +564,9 @@ class Scheduler:
             extra["actor"] = str(doc.get("requested_by") or doc.get("created_by") or "queue")
         key = (lock_keys or {}).get(job_type) or self.resource_for(job_type)
         out = self.runner.run(key, fn, params=params, job_id=job_id, job_type=job_type, **extra, **call)
+        if out.get("state") == "lost":
+            # Mất khoá: trả về hàng đợi (lượt sau fence lớn hơn), hết lượt → failed + abandon hook.
+            out["requeue"] = self.requeue_lost(job_id, out.get("fence"), out.get("error"))
         if out.get("state") == "skipped" and out.get("reason") != "job_skipped":
             # Khoá bận: trả việc về hàng đợi (chỉ khi vẫn do instance này nhận). Hàm job tự bỏ qua
             # (`job_skipped`) là trạng thái cuối, không trả về hàng đợi.

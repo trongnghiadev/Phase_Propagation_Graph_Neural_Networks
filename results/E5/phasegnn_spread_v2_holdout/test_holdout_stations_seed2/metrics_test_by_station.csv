@@ -1,0 +1,3 @@
+model,station,mae_peak_m,mae_hour_h,n_records
+phasegnn-spread-v2-holdout-s2,PHU_AN,0.18226435531084065,4.649410150029336,8450
+phasegnn-spread-v2-holdout-s2,TAN_AN,0.20097451796529475,4.387778197381672,8450

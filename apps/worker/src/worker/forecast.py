@@ -5,7 +5,9 @@
 1. Tìm checkpoint (`resolve_checkpoint`): biến môi trường ``FORECAST_CHECKPOINT`` → mô hình
    ``status="production"`` trong `models` (đúng registry `phasegnn/registry.py`; ``model_version`` của job ép
    về số nguyên và chỉ chọn được bản đang production) có ``checkpoint_path``/``artifact_path`` → mặc định
-   ``results/E2/phasegnn_long/checkpoint_seed0.pt`` (đường dẫn tương đối tính từ gốc repo). Mọi đường dẫn
+   ``results/E2/phasegnn_spread_v2/checkpoint_seed0.pt`` (mẫu ``spread`` 9 trạm, đồ thị con v2, seed có val MAE
+   đỉnh thấp nhất trong 3 seed; trước 25/11/2026 là ``phasegnn_long`` — chỉ học BEN_LUC) (đường dẫn tương đối
+   tính từ gốc repo). Mọi đường dẫn
    được ``resolve()`` và phải nằm dưới ``<repo>/results`` (hoặc ``FORECAST_CHECKPOINT_DIR``), đuôi ``.pt``;
    checkpoint nạp bằng ``torch.load(weights_only=True)``. File ``*.pt`` bị gitignore: chỉ có trên máy đã
    huấn luyện. Không có → job ``skipped`` (lý do rõ).
@@ -35,13 +37,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 from vngis.job_params import parse_model_version
+from vngis.model_registry import PRODUCTION_SORT
 
 log = logging.getLogger("worker.forecast")
 
 MODEL_FORECASTS = "model_forecasts"
 SCHEMA_VERSION = 1
 #: Checkpoint mặc định (tương đối gốc repo).
-DEFAULT_CHECKPOINT = "results/E2/phasegnn_long/checkpoint_seed0.pt"
+#: Checkpoint mặc định: PhaseGNN mẫu ``spread`` (9 trạm), đồ thị con v2 (``train_config.subgraph_version=2``),
+#: seed 0 — val MAE đỉnh 0.149 m, thấp nhất trong 3 seed (`results/E2/phasegnn_spread_v2/model_record_seed*.json`).
+DEFAULT_CHECKPOINT = "results/E2/phasegnn_spread_v2/checkpoint_seed0.pt"
 
 _NUM = {"bsonType": ["double", "int", "long", "decimal"]}
 _NUM_OR_NULL = {"bsonType": ["double", "int", "long", "decimal", "null"]}
@@ -135,7 +140,8 @@ def resolve_checkpoint(db, root: Path, model_version: Any = None) -> tuple[Path 
 
     Tra `models` theo registry (`phasegnn/registry.py`): chỉ bản ghi ``status="production"``; có
     ``model_version`` (ép về số nguyên) thì lấy đúng phiên bản đó **nếu nó đang production**, không thì bản
-    production có ``version`` lớn nhất. Mọi đường dẫn (env, DB, mặc định) qua `safe_checkpoint_path`.
+    production của lượt promote mới nhất (`vngis.model_registry.PRODUCTION_SORT`: ``promote_seq``,
+    ``promoted_at``, rồi ``version`` lớn nhất). Mọi đường dẫn (env, DB, mặc định) qua `safe_checkpoint_path`.
     """
     tried: list[str] = []
     info: dict[str, Any] = {"model_version": None if model_version is None else str(model_version)}
@@ -164,7 +170,8 @@ def resolve_checkpoint(db, root: Path, model_version: Any = None) -> tuple[Path 
     if ver is not None:
         flt["version"] = ver
     try:
-        model = (db["models"].find_one(flt, sort=[("version", -1)])
+        # Nhiều bản production (tạm thời, giữa hai lệnh ghi của promote) → lượt promote mới nhất thắng.
+        model = (db["models"].find_one(flt, sort=PRODUCTION_SORT)
                  if "models" in db.list_collection_names() else None)
     except Exception:  # noqa: BLE001 - không đọc được `models` thì dò tiếp
         model = None

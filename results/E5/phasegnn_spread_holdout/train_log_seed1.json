@@ -1,0 +1,249 @@
+{
+ "variant": "phasegnn",
+ "best_val_mae": 0.16168969875630268,
+ "best_epoch": 11,
+ "history": [
+  {
+   "epoch": 0,
+   "train_loss": 1.7703539657592773,
+   "val": {
+    "mae_peak": 0.17979974908350616,
+    "mae_slot": 0.2201046424087459,
+    "mae_hour": 5.672796005205142,
+    "pinball": 0.2802253299206495,
+    "n_samples": 300
+   },
+   "seconds": 142.2091248035431
+  },
+  {
+   "epoch": 1,
+   "train_loss": 1.3446913870175679,
+   "val": {
+    "mae_peak": 0.17749437350844952,
+    "mae_slot": 0.20811391285842892,
+    "mae_hour": 4.495880036653692,
+    "pinball": 0.25931309156119825,
+    "n_samples": 300
+   },
+   "seconds": 110.272465467453
+  },
+  {
+   "epoch": 2,
+   "train_loss": 1.2630190960566203,
+   "val": {
+    "mae_peak": 0.182102455485557,
+    "mae_slot": 0.21392303944114013,
+    "mae_hour": 4.492491148251784,
+    "pinball": 0.2621468826631705,
+    "n_samples": 300
+   },
+   "seconds": 79.83891415596008
+  },
+  {
+   "epoch": 3,
+   "train_loss": 1.1962219762802124,
+   "val": {
+    "mae_peak": 0.1917634281664485,
+    "mae_slot": 0.21695515840678403,
+    "mae_hour": 4.342212128496828,
+    "pinball": 0.2679567362368107,
+    "n_samples": 300
+   },
+   "seconds": 81.20833992958069
+  },
+  {
+   "epoch": 4,
+   "train_loss": 1.0993773754437763,
+   "val": {
+    "mae_peak": 0.17759614133979237,
+    "mae_slot": 0.21154627246484925,
+    "mae_hour": 4.243878038111236,
+    "pinball": 0.26213779583573343,
+    "n_samples": 300
+   },
+   "seconds": 75.88732814788818
+  },
+  {
+   "epoch": 5,
+   "train_loss": 1.0733365154266357,
+   "val": {
+    "mae_peak": 0.16773799428789002,
+    "mae_slot": 0.20168821220211194,
+    "mae_hour": 4.202198663167405,
+    "pinball": 0.24606373409430185,
+    "n_samples": 300
+   },
+   "seconds": 84.54413557052612
+  },
+  {
+   "epoch": 6,
+   "train_loss": 1.0200687940915425,
+   "val": {
+    "mae_peak": 0.16626518421266154,
+    "mae_slot": 0.1991335947399258,
+    "mae_hour": 4.134538073127796,
+    "pinball": 0.24348120120664438,
+    "n_samples": 300
+   },
+   "seconds": 98.84949779510498
+  },
+  {
+   "epoch": 7,
+   "train_loss": 0.9884825491905213,
+   "val": {
+    "mae_peak": 0.16311974510610666,
+    "mae_slot": 0.19114789132186993,
+    "mae_hour": 4.092320976545721,
+    "pinball": 0.23667420806984107,
+    "n_samples": 300
+   },
+   "seconds": 87.61088800430298
+  },
+  {
+   "epoch": 8,
+   "train_loss": 0.9357530609766642,
+   "val": {
+    "mae_peak": 0.16283017005846606,
+    "mae_slot": 0.19278367633875432,
+    "mae_hour": 3.9187963399459504,
+    "pinball": 0.2344093049565951,
+    "n_samples": 300
+   },
+   "seconds": 95.46133756637573
+  },
+  {
+   "epoch": 9,
+   "train_loss": 0.9512346601486206,
+   "val": {
+    "mae_peak": 0.1648319883229434,
+    "mae_slot": 0.19140830281494653,
+    "mae_hour": 3.9643403621312747,
+    "pinball": 0.23582837863514822,
+    "n_samples": 300
+   },
+   "seconds": 89.03707146644592
+  },
+  {
+   "epoch": 10,
+   "train_loss": 0.9463030163447063,
+   "val": {
+    "mae_peak": 0.16395729651842592,
+    "mae_slot": 0.19050322812306933,
+    "mae_hour": 3.9525641365676196,
+    "pinball": 0.2346367638806502,
+    "n_samples": 300
+   },
+   "seconds": 87.13542151451111
+  },
+  {
+   "epoch": 11,
+   "train_loss": 0.9472296818097432,
+   "val": {
+    "mae_peak": 0.16168969875630268,
+    "mae_slot": 0.18970392470958466,
+    "mae_hour": 3.958561967140813,
+    "pinball": 0.2328389035910368,
+    "n_samples": 300
+   },
+   "seconds": 96.44710159301758
+  }
+ ],
+ "data_snapshot": {
+  "run_date": "2026-11-24",
+  "job_version": "g5-v1",
+  "collections": {
+   "tide_extremes": 129420,
+   "official_forecasts": 38410,
+   "reservoir_daily": 15313,
+   "rainfall_daily": 13127,
+   "hydromet_bulletins": 3636,
+   "stations": 26,
+   "merit_river_reaches": 21508,
+   "qc_flags": 380
+  },
+  "max_timestamps": {
+   "tide_extremes_ts": "2026-11-10T16:00:00Z",
+   "reservoir_daily_date": "2026-11-09T17:00:00Z",
+   "rainfall_daily_date": "2026-11-09T17:00:00Z",
+   "official_forecasts_target_date": "2026-11-15"
+  },
+  "day_range": [
+   "2016-12-31",
+   "2026-11-10"
+  ],
+  "rows": 32352,
+  "rows_per_year": {
+   "2016": 9,
+   "2017": 3265,
+   "2018": 3276,
+   "2019": 3285,
+   "2020": 3294,
+   "2021": 3276,
+   "2022": 3275,
+   "2023": 3267,
+   "2024": 3294,
+   "2025": 3285,
+   "2026": 2826
+  },
+  "rows_per_station": {
+   "BEN_LUC": 3595,
+   "BIEN_HOA": 3595,
+   "DAU_TIENG": 3593,
+   "GO_DAU_HA": 3595,
+   "NHA_BE": 3595,
+   "PHU_AN": 3595,
+   "TAN_AN": 3595,
+   "THU_DAU_MOT": 3594,
+   "VUNG_TAU": 3595
+  },
+  "astro_merged": true,
+  "astro_fit": {
+   "fit_from": "2017-01-01",
+   "fit_to": "2022-12-31",
+   "fit_splits": [
+    "train"
+   ],
+   "generated_at": "2026-11-24T11:34:47+0700"
+  },
+  "leak_check": {
+   "rows_with_input_obs": 32343,
+   "violations": 0
+  }
+ },
+ "config": {
+  "variant": "phasegnn",
+  "epochs": 12,
+  "batch_size": 16,
+  "lr": 0.001,
+  "weight_decay": 0.0001,
+  "seed": 1,
+  "t_in": 14,
+  "t_out": 5,
+  "hidden_dim": 64,
+  "num_gnn_layers": 2,
+  "delta_h": 12.0,
+  "lam1": 1.0,
+  "lam2": 0.5,
+  "lam3": 0.1,
+  "lam4": 0.1,
+  "patience": 4,
+  "max_train_samples": 1200,
+  "max_val_samples": 300,
+  "subsample": "spread",
+  "holdout_stations": [
+   "PHU_AN",
+   "TAN_AN"
+  ],
+  "aux_weight": 0.3,
+  "device": "cpu",
+  "num_threads": 1,
+  "use_mlflow": false,
+  "register_to_db": false,
+  "mlflow_experiment": "phasegnn"
+ },
+ "dims": {
+  "in_dim": 20,
+  "static_dim": 9,
+  "edge_dim": 6
+ }
+}

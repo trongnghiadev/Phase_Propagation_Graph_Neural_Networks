@@ -1,0 +1,61 @@
+{
+ "summary": {
+  "model": "phasegnn-spread-all-s2",
+  "mae_peak_m": 0.16802376223058224,
+  "mae_hour_h": 3.174808885813729,
+  "n_records": 16900
+ },
+ "by_station": [
+  {
+   "model": "phasegnn-spread-all-s2",
+   "station": "PHU_AN",
+   "mae_peak_m": 0.16165630895342223,
+   "mae_hour_h": 3.3204500880060346,
+   "n_records": 8450
+  },
+  {
+   "model": "phasegnn-spread-all-s2",
+   "station": "TAN_AN",
+   "mae_peak_m": 0.17439923093231063,
+   "mae_hour_h": 3.028984348774757,
+   "n_records": 8450
+  }
+ ],
+ "by_lead": [
+  {
+   "model": "phasegnn-spread-all-s2",
+   "lead_day": 1,
+   "mae_peak_m": 0.17156062186070511,
+   "mae_hour_h": 3.0283522131319485,
+   "n_records": 3380
+  },
+  {
+   "model": "phasegnn-spread-all-s2",
+   "lead_day": 2,
+   "mae_peak_m": 0.16526056451077634,
+   "mae_hour_h": 3.1283846960167714,
+   "n_records": 3380
+  },
+  {
+   "model": "phasegnn-spread-all-s2",
+   "lead_day": 3,
+   "mae_peak_m": 0.16535188888984,
+   "mae_hour_h": 3.199602725366876,
+   "n_records": 3380
+  },
+  {
+   "model": "phasegnn-spread-all-s2",
+   "lead_day": 4,
+   "mae_peak_m": 0.16731890532411364,
+   "mae_hour_h": 3.2455896226415097,
+   "n_records": 3380
+  },
+  {
+   "model": "phasegnn-spread-all-s2",
+   "lead_day": 5,
+   "mae_peak_m": 0.17062905500749495,
+   "mae_hour_h": 3.2720230607966454,
+   "n_records": 3380
+  }
+ ]
+}

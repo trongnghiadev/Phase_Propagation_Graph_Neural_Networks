@@ -192,6 +192,12 @@ def _register_events(target: FastAPI) -> None:
             state.repo.ensure_indexes()   # `users.account_code` unique (partial) — idempotent, như migration 0008
         except Exception as e:  # noqa: BLE001 - trùng mã cũ / thiếu quyền: báo, không chặn khởi động
             log.warning("không tạo được index của users: %s", e)
+        try:
+            from vngis.model_registry import ensure_model_indexes
+
+            ensure_model_indexes(state.db)  # `models.version` unique (partial) — idempotent, như migration 0010
+        except Exception as e:  # noqa: BLE001 - trùng version cũ / thiếu quyền: báo, không chặn khởi động
+            log.warning("không tạo được index của models: %s", e)
 
     @target.on_event("shutdown")
     async def on_shutdown() -> None:  # pragma: no cover

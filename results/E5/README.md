@@ -1,8 +1,8 @@
 # results/E5 – Tổng quát hóa (đề cương mục 7.2, RQ1)
 
-> **TRẠNG THÁI (25/11/2026): bản nhẹ, sơ bộ** — 1 seed, cấu hình gần `long` của E2. Phần (a) chạy lại 25/11/2026
-> sau khi sửa rò thống kê nhãn của trạm giữ riêng (xem dưới). Không đủ để kết luận
-> chắc chắn; đủ để thấy chiều của hiệu ứng.
+> **TRẠNG THÁI (25/11/2026): bản nhẹ** — cấu hình gần `long` của E2 với mẫu `spread`. Phần (a) nay có **3 seed**
+> (0, 1, 2) cho cả mô hình giữ riêng và đối chứng, sau khi sửa rò thống kê nhãn của trạm giữ riêng (xem dưới).
+> Phần (b) chưa có kiểm định ghép cặp.
 > Thư mục này trước 25/11/2026 chứa **đánh giá chung** của `pipelines/r/evaluation.R`; phần đó đã chuyển sang
 > `results/evaluation/` (`git mv`, giữ lịch sử).
 
@@ -14,7 +14,7 @@
 trạm → ngày, nên **toàn bộ 1 200 mẫu train là của BEN_LUC (2017-01-15 → 2020-04-28)** và 300 mẫu val cũng chỉ
 của BEN_LUC. Nghĩa là mọi mô hình `*_long` / `*_abl` của E2 chỉ học nhãn của **một** trạm rồi dự báo cho 9 trạm
 — tức E2 trên thực tế đã là một thí nghiệm "giữ riêng 8/9 trạm". Để E5 có nghĩa, ta thêm tùy chọn
-`--subsample spread` (lấy N mẫu cách đều trên mọi trạm/giai đoạn); mặc định vẫn là `head` để chạy lại được số cũ.
+`--subsample spread` (lấy N mẫu cách đều trên mọi trạm/giai đoạn); mặc định vẫn là `head` để chạy lại được số cũ. Ablation E2 đã chạy lại với `spread` (`results/E2/README.md`, mục `*_spread`): MAE phasegnn 0.180 ± 0.021 → 0.146 ± 0.001 m.
 
 ## (a) Giữ riêng trạm
 
@@ -39,53 +39,98 @@ qua trạm giữ riêng. Mô hình `phasegnn-all` (không giữ riêng) không �
 | `phasegnn-long` | chỉ BEN_LUC (cấu hình `long` cũ, E2) | `results/E2/phasegnn_long/` |
 | B0 (persistence), B_harm, B_KTTV | — | `results/baselines/` |
 
-Chung: seed 0, `hidden_dim` 64, `delta_h` 12, 12 epoch, patience 4, val 300 mẫu (cùng cách lấy mẫu, cùng trạm
-bị loại). Best val MAE: holdout 0.163 m (bản cũ 0.162), all 0.150 m.
+Chung: seed **0, 1, 2**, `hidden_dim` 64, `delta_h` 12, 12 epoch, patience 4, val 300 mẫu (cùng cách lấy mẫu, cùng trạm
+bị loại). Best val MAE (seed 0/1/2): holdout 0.163/0.160/0.160 m; all 0.150/0.152/0.150 m.
+`phasegnn_spread_all` seed k trùng tuyệt đối với `results/E2/phasegnn_spread` seed k (cùng cấu hình, tất định).
 
-**Kết quả trên tập test tại PHU_AN + TAN_AN** (`holdout_station_metrics.csv`, `phasegnn.evaluate`, ghép đỉnh ngày):
+**Kết quả trên tập test tại PHU_AN + TAN_AN — trung bình ± độ lệch chuẩn qua 3 seed**
+(`holdout_station_mean_sd.csv`; từng seed: `holdout_station_by_seed.csv`; `phasegnn.evaluate`, ghép đỉnh ngày, 8 450 cặp):
+
+| Mô hình | MAE (m) | RMSE | bias | NSE | KGE | MAE Δt (h) | Phủ 10–90 % |
+|---|---|---|---|---|---|---|---|
+| phasegnn-holdout | 0.168 ± 0.005 | 0.209 ± 0.007 | −0.102 ± 0.006 | 0.27 ± 0.05 | 0.41 | 4.04 ± 0.33 | 0.65 |
+| phasegnn-all | 0.148 ± 0.001 | 0.187 ± 0.001 | −0.065 ± 0.004 | 0.41 ± 0.01 | 0.50 | 3.57 ± 0.01 | 0.72 |
+
+MAE từng seed (0/1/2): holdout 0.168/0.162/0.173 (PHU_AN 0.138/0.136/0.149; TAN_AN 0.197/0.189/0.197);
+all 0.149/0.148/0.146 (PHU_AN 0.124/0.124/0.124; TAN_AN 0.173/0.173/0.169). Theo trạm (TB ± sd): PHU_AN holdout
+0.141 ± 0.007 vs all 0.124 ± 0.000; TAN_AN 0.194 ± 0.005 vs 0.172 ± 0.003.
+
+**Dự báo trung bình seed và tham chiếu** (`holdout_station_metrics.csv`):
 
 | Mô hình | n | MAE (m) | RMSE | bias | NSE | KGE | MAE Δt (h) | Phủ 10–90 % |
 |---|---:|---|---|---|---|---|---|---|
-| phasegnn-holdout | 8 450 | 0.168 | 0.209 | −0.109 | 0.27 | 0.45 | 3.77 | 0.65 |
-| phasegnn-all | 8 450 | 0.149 | 0.188 | −0.068 | 0.40 | 0.52 | 3.56 | 0.69 |
-| phasegnn-long (chỉ BEN_LUC) | 8 450 | 0.148 | 0.186 | −0.061 | 0.42 | 0.48 | 4.52 | 0.58 |
+| phasegnn-holdout (TB 3 seed) | 8 450 | 0.167 | 0.208 | −0.110 | 0.27 | 0.43 | 4.02 | 0.65 |
+| phasegnn-all (TB 3 seed) | 8 450 | 0.147 | 0.187 | −0.068 | 0.41 | 0.51 | 3.53 | 0.72 |
+| phasegnn-long (`head`, chỉ BEN_LUC, seed 0) | 8 450 | 0.148 | 0.186 | −0.061 | 0.42 | 0.48 | 4.52 | 0.58 |
+| phasegnn-abl (`head`, chỉ BEN_LUC, TB 3 seed) | 8 450 | 0.202 | 0.245 | −0.168 | −0.02 | 0.42 | 3.96 | 0.45 |
 | B0 persistence | 8 575 | 0.155 | 0.213 | +0.046 | 0.24 | 0.65 | 3.85 | 0.62 |
-| B_harm | 8 610 | 0.200 | 0.243 | +0.039 | 0.02 | 0.25 | 3.32 | 0.41 |
+| B_harm | 8 610 | 0.200 | 0.242 | +0.039 | 0.02 | 0.25 | 3.32 | 0.41 |
 | B_KTTV (chỉ PHU_AN) | 4 304 | 0.081 | 0.117 | +0.008 | 0.76 | 0.87 | 2.54 | 0.86 |
 
-Bản cũ (μ/σ rò từ train của trạm giữ riêng): holdout MAE 0.169, RMSE 0.211, bias −0.112, NSE 0.25, KGE 0.47.
+**Kiểm định ghép cặp** (`holdout_station_tests.csv`; tham chiếu `phasegnn-holdout` = **dự báo trung bình 3 seed**
+(`pairing = seedmean`), ghép theo `(station, target_date, lead_day)`; Wilcoxon trên `|e_a| − |e_b|`; DM trên chuỗi
+trung bình theo ngày phát bản tin, Newey–West lag 4; Holm trên 6 so sánh; `mean_diff` > 0 ⇒ holdout kém hơn):
 
-Theo trạm (MAE m): PHU_AN — holdout 0.138 (cũ 0.136), all 0.124, long 0.125, B0 0.149, B_harm 0.196, B_KTTV 0.081;
-TAN_AN — holdout 0.197 (cũ 0.203), all 0.173, long 0.170, B0 0.160, B_harm 0.205.
-
-**Kiểm định ghép cặp** (`holdout_station_tests.csv`; tham chiếu `phasegnn-holdout`; ghép theo
-`(station, target_date, lead_day)`; Wilcoxon trên `|e_a| − |e_b|`; DM trên chuỗi trung bình theo ngày phát bản
-tin, Newey–West lag 4; Holm trên 5 so sánh; `mean_diff` > 0 ⇒ holdout kém hơn):
-
-| holdout vs | n cặp | MAE holdout / kia | mean_diff | Wilcoxon p_Holm | DM t | DM p_Holm |
+| holdout (TB seed) vs | n cặp | MAE holdout / kia | mean_diff | Wilcoxon p_Holm | DM t | DM p_Holm |
 |---|---:|---|---|---|---|---|
-| phasegnn-all | 8 415 | 0.168 / 0.149 | +0.019 | 5e-225 | 7.74 | 4.1e-14 |
-| phasegnn-long | 8 415 | 0.168 / 0.148 | +0.020 | 5e-178 | 6.94 | 1.2e-11 |
-| B0 persistence | 8 381 | 0.167 / 0.155 | +0.012 | 3e-24 | 1.59 | **0.111** |
-| B_harm | 8 415 | 0.168 / 0.199 | −0.031 | 1e-57 | −3.43 | 0.0012 |
-| B_KTTV (PHU_AN) | 4 215 | 0.138 / 0.081 | +0.057 | 1e-185 | 10.83 | 1.3e-26 |
+| phasegnn-all (TB seed) | 8 415 | 0.167 / 0.147 | +0.020 | 4e-251 | 8.19 | 1.1e-15 |
+| phasegnn-long | 8 415 | 0.167 / 0.148 | +0.019 | 1e-199 | 7.26 | 1.1e-12 |
+| phasegnn-abl | 8 415 | 0.167 / 0.202 | −0.035 | ≈ 0 | −12.57 | 1.8e-35 |
+| B0 persistence | 8 381 | 0.167 / 0.155 | +0.012 | 2e-23 | 1.51 | **0.130** |
+| B_harm | 8 415 | 0.167 / 0.199 | −0.032 | 1e-54 | −3.42 | 0.0013 |
+| B_KTTV (PHU_AN) | 4 215 | 0.138 / 0.081 | +0.057 | 2e-178 | 10.59 | 1.7e-25 |
 
-(Bản cũ: mean_diff so với all/long/B0/B_harm/B_KTTV = +0.020/+0.022/+0.014/−0.029/+0.055; DM p_Holm
-1.7e-17/3.8e-13/0.068/0.0026/6.3e-26.)
+Theo từng seed (holdout seed k vs all seed k, `pairing = seed<k>`): mean_diff +0.019 / +0.014 / +0.027 m,
+DM p 1.0e-14 / 7.9e-09 / 3.7e-18 — **cùng chiều cả 3 seed**.
+
+Bản 1 seed trước (seed 0): holdout 0.168, all 0.149; mean_diff so với all/long/B0/B_harm/B_KTTV =
++0.019/+0.020/+0.012/−0.031/+0.057, DM p_Holm 4.1e-14/1.2e-11/0.111/0.0012/1.3e-26.
 
 **Đọc kết quả (trung thực):**
 
-1. Che nhãn PHU_AN/TAN_AN làm MAE tại hai trạm đó tăng **~0.019 m (≈ +13 %)** so với cùng cấu hình có nhãn
-   (DM p_Holm = 4.1e-14); mức suy giảm lớn hơn ở TAN_AN (0.173 → 0.197 m) — trạm Vàm Cỏ Tây không có "trạm anh
-   em" trong tập học. Sai lệch âm (dự báo thấp) tăng rõ: −0.068 → −0.109 m. Bỏ rò thống kê chỉ đổi số rất ít
-   (MAE gộp 0.169 → 0.168; PHU_AN xấu đi 0.002, TAN_AN tốt lên 0.006) — kết luận không đổi.
-2. Mô hình giữ riêng vẫn **tốt hơn B_harm** (p_Holm = 0.001) nhưng **không tốt hơn persistence** (MAE kém hơn
-   0.012 m, DM p_Holm = 0.111 — không có ý nghĩa ở 5 %) và kém xa B_KTTV ở PHU_AN.
-3. Điều bất ngờ: `phasegnn-long` (chỉ học BEN_LUC) **ngang** `phasegnn-all` tại hai trạm này (0.148 vs 0.149 m).
-   Tức là ở quy mô dữ liệu này, việc thấy nhãn của *nhiều* trạm không giúp bao nhiêu, nhưng việc thấy nhãn của
-   *chính* trạm (hoặc của một trạm tương tự) thì giúp. **Cần nhiều seed để chắc chắn:** độ lệch chuẩn
-   MAE qua 3 seed của phasegnn ở E2 là 0.021 m (`results/E2/ablation_mean_sd.csv`) — lớn hơn mọi khác biệt ở
-   bảng trên, nên kết luận (1) chỉ là sơ bộ (1 seed, cùng seed cho cả hai mô hình).
+1. Che nhãn PHU_AN/TAN_AN làm MAE tại hai trạm đó tăng **0.020 m (≈ +14 %)** so với cùng cấu hình có nhãn
+   (0.168 ± 0.005 vs 0.148 ± 0.001 m; DM p_Holm = 1e-15 trên dự báo TB seed; cùng chiều ở cả 3 seed). Hiệu ứng lớn hơn
+   độ lệch giữa seed khoảng 4 lần ⇒ kết luận (1) của bản 1 seed **đứng vững**. Suy giảm ở cả hai trạm (PHU_AN +0.017,
+   TAN_AN +0.022 m); sai lệch âm (dự báo thấp) tăng −0.065 → −0.102 m; giờ đỉnh kém hơn 3.57 → 4.04 h. Mô hình giữ
+   riêng cũng kém ổn định hơn theo seed (sd 0.005 vs 0.001 m).
+2. Mô hình giữ riêng vẫn **tốt hơn B_harm** (p_Holm = 0.001) và tốt hơn hẳn `phasegnn-abl` (mô hình chỉ học BEN_LUC, TB
+   3 seed: 0.202 m), nhưng **không tốt hơn persistence** tại hai trạm này (kém hơn 0.012 m, DM p_Holm = 0.13) và kém xa
+   B_KTTV ở PHU_AN (0.138 vs 0.081 m).
+3. Điểm "bất ngờ" của bản 1 seed — `phasegnn-long` (chỉ BEN_LUC) ngang `phasegnn-all` — **là may mắn của seed 0**:
+   trung bình 3 seed của cùng cấu hình `head` (`phasegnn-abl`) có MAE 0.202 m tại hai trạm, kém cả mô hình giữ riêng.
+   Tức là thấy nhãn của nhiều trạm (kể cả không phải trạm đích) giúp rõ: holdout 7 trạm (0.168) < chỉ BEN_LUC (0.202);
+   thấy nhãn của chính trạm giúp thêm (0.148).
+4. Mọi mô hình ở đây dùng đồ thị con chưa có cạnh `down` (lỗi `build_station_subgraph`, `results/E2/README.md`) — áp
+   dụng như nhau cho holdout và all nên so sánh (1) vẫn công bằng. Bản chạy lại với đồ thị con v2: mục (a′) dưới — kết luận không đổi.
+
+### (a′) Đồ thị con v2 (có cạnh `down`, 25/11/2026) — `subgraph_v2/`
+
+Cùng thiết kế và cấu hình, `--subgraph-version 2` (`results/E2/README.md`, mục `*_spread_v2`), seed 0/1/2.
+`phasegnn-holdout-v2`: `phasegnn_spread_v2_holdout/`; `phasegnn-all-v2` = `results/E2/phasegnn_spread_v2`
+(cùng cấu hình, dự báo toàn tập test lọc về hai trạm). Kết quả trong `subgraph_v2/` (`holdout_station_*.csv`;
+tham chiếu `phasegnn-holdout-v2`, Holm trên 6 so sánh; bảng v1 ở trên giữ nguyên).
+
+| Mô hình (PHU_AN + TAN_AN) | MAE TB ± sd 3 seed (m) | MAE TB-seed | bias | MAE Δt (h) | MAE PHU_AN / TAN_AN |
+|---|---|---|---|---|---|
+| phasegnn-holdout-v2 | 0.165 ± 0.010 | 0.165 | −0.106 | 4.27 | 0.140 / 0.191 |
+| phasegnn-all-v2 | 0.147 ± 0.001 | 0.146 | −0.072 | 3.49 | 0.123 / 0.171 |
+| *(v1)* phasegnn-holdout | 0.168 ± 0.005 | 0.167 | −0.110 | 4.02 | 0.141 / 0.194 |
+| *(v1)* phasegnn-all | 0.148 ± 0.001 | 0.147 | −0.068 | 3.53 | 0.124 / 0.172 |
+
+MAE holdout-v2 từng seed: 0.174 / 0.154 / 0.169 (dao động giữa seed lớn gấp đôi v1).
+
+| holdout-v2 (TB seed) vs | MAE holdout-v2 / kia | mean_diff | DM t | DM p_Holm |
+|---|---|---|---|---|
+| phasegnn-all-v2 | 0.165 / 0.146 | +0.018 | 8.38 | 2.7e-16 (theo seed +0.026 / +0.006 / +0.023, 3/3 cùng chiều) |
+| phasegnn-holdout (v1) | 0.165 / 0.167 | −0.002 | −3.56 | 7e-04 (theo seed: +0.006 / −0.009 / −0.004 — không ổn định) |
+| B0 persistence | 0.165 / 0.155 | +0.010 | 1.26 | **0.21** |
+| B_harm | 0.165 / 0.199 | −0.034 | −3.72 | 6e-04 |
+| B_KTTV (PHU_AN) | 0.137 / 0.081 | +0.056 | 10.65 | 1e-25 |
+
+**Đọc:** kết luận của (a) không đổi với v2 — che nhãn hai trạm làm MAE tăng ≈ 0.018 m (+13 %), cùng chiều cả 3
+seed; không tốt hơn persistence; kém xa B_KTTV. Holdout-v2 nhỉnh hơn holdout-v1 trên dự báo TB seed (−0.002 m)
+nhưng chiều đổi theo seed nên không coi là cải thiện (đầu ra tại trạm không phụ thuộc cạnh `down`, xem
+`results/E2/README.md`).
 
 ## (b) Giữ riêng năm triều cao nhất
 
@@ -129,11 +174,15 @@ $D python -X utf8 -m phasegnn.train --variant phasegnn --seed 0 --epochs 12 --de
 $D python -X utf8 packages/phasegnn/scripts/evaluate_checkpoint.py \
    --checkpoint results/E5/phasegnn_spread_holdout/checkpoint_seed0.pt --split test --stations PHU_AN,TAN_AN \
    --model-name phasegnn-spread-holdout --out-dir results/E5/phasegnn_spread_holdout/test_holdout_stations
-# tổng hợp + kiểm định
+#   (lặp lại với --seed 1|2; chấm seed k ghi vào .../test_holdout_stations_seed<k>, seed 0 ở .../test_holdout_stations)
+# tổng hợp + kiểm định (3 seed: nhiều đường dẫn cách nhau dấu phẩy ⇒ dự báo TB seed + holdout_station_by_seed/mean_sd.csv)
+H=results/E5/phasegnn_spread_holdout; A=results/E5/phasegnn_spread_all
 $D python -X utf8 scripts/generalization_summary.py --out-dir results/E5 --stations PHU_AN,TAN_AN \
-   --ref phasegnn-holdout --pred phasegnn-holdout=results/E5/phasegnn_spread_holdout/test_holdout_stations/predictions_test.csv \
-   --pred phasegnn-all=results/E5/phasegnn_spread_all/test_holdout_stations/predictions_test.csv \
+   --ref phasegnn-holdout \
+   --pred phasegnn-holdout=$H/test_holdout_stations/predictions_test.csv,$H/test_holdout_stations_seed1/predictions_test.csv,$H/test_holdout_stations_seed2/predictions_test.csv \
+   --pred phasegnn-all=$A/test_holdout_stations/predictions_test.csv,$A/test_holdout_stations_seed1/predictions_test.csv,$A/test_holdout_stations_seed2/predictions_test.csv \
    --pred phasegnn-long=results/E2/phasegnn_long/test_full/predictions_test.csv \
+   --pred phasegnn-abl=results/E2/phasegnn_abl/test_full_seedmean/predictions_test.csv \
    --pred B0=results/baselines/B0/predictions_test.csv --pred B_harm=results/baselines/B_harm/predictions_test.csv \
    --pred B_KTTV=results/baselines/B_KTTV/predictions_test.csv
 # (b) năm 2025 (lượt riêng, ghi holdout_year_2025_metrics.csv)
@@ -142,6 +191,8 @@ $D python -X utf8 scripts/generalization_summary.py --out-dir results/E5 --year 
 
 ## File
 
-`holdout_station_metrics.csv`, `holdout_station_tests.csv`, `holdout_year_2025_metrics.csv`;
-`phasegnn_spread_{all,holdout}/` (`model_record_seed0.json`, `train_log_seed0.json`,
-`test_holdout_stations/metrics_test*.csv|json`). `*.pt`, `predictions*.csv`, `logs/` không commit.
+`holdout_station_metrics.csv`, `holdout_station_tests.csv`, `holdout_station_by_seed.csv`,
+`holdout_station_mean_sd.csv`, `holdout_year_2025_metrics.csv`;
+`subgraph_v2/holdout_station_*.csv` (đồ thị con v2); `phasegnn_spread_v2_holdout/` (seed 0/1/2, `test_holdout_stations_seed{0,1,2}/`);
+`phasegnn_spread_{all,holdout}/` (`model_record_seed{0,1,2}.json`, `train_log_seed{0,1,2}.json`,
+`test_holdout_stations/` (seed 0), `test_holdout_stations_seed{1,2}/` — `metrics_test*.csv|json`). `*.pt`, `predictions*.csv`, `logs/` không commit.
